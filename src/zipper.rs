@@ -1342,11 +1342,11 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ReadZipp
         let prefix_len = self.root_prefix_path().len();
         f.debug_struct("ReadZipperOwned")
             .field("origin_path", &self.origin_path())
-            .field("prefix_len", &prefix_len)
             .field("at_root", &self.at_root())
             .field("is_val", &self.is_val())
             .field("child_count", &self.child_count())
             .field("shared_node_id", &self.shared_node_id())
+            .field("prefix_len", &prefix_len)
             .finish()
     }
 }
