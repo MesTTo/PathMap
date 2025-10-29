@@ -622,22 +622,16 @@ where
     A: Allocator,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        use crate::utils::debug::{render_debug_path, PathRenderMode};
-
-        let origin      = render_debug_path(self.origin_path(),      PathRenderMode::TryAscii).unwrap();
-        let root_prefix = render_debug_path(self.root_prefix_path(), PathRenderMode::TryAscii).unwrap();
-        let path        = render_debug_path(self.path(),             PathRenderMode::TryAscii).unwrap();
+        let origin = crate::utils::debug::render_debug_path(self.origin_path(), crate::utils::debug::PathRenderMode::TryAscii).unwrap();        
+        let prefix_len = self.root_prefix_path().len();
 
         f.debug_struct("WriteZipperUntracked")
             .field("origin_path", &origin)
-            .field("root_prefix_path", &root_prefix)
-            .field("path_from_root", &path)
+            .field("prefix_len", &prefix_len)
             .field("at_root", &self.at_root())
             .field("is_val", &self.is_val())
-            .field("val_cnt", &self.val_count())
             .field("child_cnt", &self.child_count())
             .field("child_mask", &self.child_mask())
-            .field("has_focus", &self.try_borrow_focus().is_some())
             .finish()
     }
 }
