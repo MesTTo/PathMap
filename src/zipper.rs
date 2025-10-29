@@ -1337,6 +1337,20 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAbsolutePath for ReadZi
     fn root_prefix_path(&self) -> &[u8] { self.z.root_prefix_path() }
 }
 
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ReadZipperOwned<V, A> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ReadZipperOwned")
+            .field("origin_path", &self.origin_path())
+            .field("root_prefix_path", &self.root_prefix_path())
+            .field("path_from_root", &self.path())
+            .field("at_root", &self.at_root())
+            .field("is_val", &self.is_val())
+            .field("child_count", &self.child_count())
+            .field("shared_node_id", &self.shared_node_id())
+            .finish()
+    }
+}
+
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // ReadZipperCore (the actual implementation)
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
