@@ -625,14 +625,13 @@ where
         let origin_path = crate::utils::debug::render_debug_path(self.origin_path(), crate::utils::debug::PathRenderMode::TryAscii).unwrap();        
         let prefix_len = self.root_prefix_path().len();
 
-        f.debug_struct("WriteZipperUntracked")
-            .field("origin_path", &origin_path)
-            .field("at_root", &self.at_root())
-            .field("is_val", &self.is_val())
-            .field("child_count", &self.child_count())
-            .field("child_mask", &self.child_mask())
-            .field("prefix_len", &prefix_len)
-            .finish()
+        write!(
+            f,
+            "WriteZipperUntracked<prefix_len={}, child_mask={:?}, origin_path={}>",
+            prefix_len,
+            self.child_mask(),
+            origin_path
+        )
     }
 }
 
