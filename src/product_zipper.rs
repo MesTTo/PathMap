@@ -116,18 +116,6 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 't
             None => 0
         }
     }
-    /// Returns a slice of the path indices that represent the end-points of the portion of the path from each
-    /// factor
-    ///
-    /// The returned slice will have a length of [`focus_factor`](Self::focus_factor), so the factor
-    /// containing the current focus has will not be included.
-    ///
-    /// Indices will be offsets into the buffer returned by [path](ZipperMoving::path).  To get an offset into
-    /// [origin_path](ZipperAbsolutePath::origin_path), add the length of the prefix path from
-    /// [root_prefix_path](ZipperAbsolutePath::root_prefix_path).
-    pub fn path_indices(&self) -> &[usize] {
-        &self.factor_paths
-    }
     /// Reserves a path buffer of at least `len` bytes.  Will never shrink the path buffer
     /// NOTE, this doesn't offer any value over the standard `reserve_buffers` method which is now implemented
     /// on many zipper types
@@ -461,19 +449,6 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ,
     /// The minimum returned value will be 1 because the primary factor is counted.
     pub fn factor_count(&self) -> usize {
         self.secondary.len() + 1
-    }
-
-    /// Returns a slice of the path indices that represent the end-points of the portion of the path from each
-    /// factor
-    ///
-    /// The returned slice will have a length of [`focus_factor`](Self::focus_factor), so the factor
-    /// containing the current focus has will not be included.
-    ///
-    /// Indices will be offsets into the buffer returned by [path](ZipperMoving::path).  To get an offset into
-    /// [origin_path](ZipperAbsolutePath::origin_path), add the length of the prefix path from
-    /// [root_prefix_path](ZipperAbsolutePath::root_prefix_path).
-    pub fn path_indices(&self) -> &[usize] {
-        &self.factor_paths
     }
 
     /// Returns `true` if the last active factor zipper is positioned at the end of a valid path
@@ -840,7 +815,7 @@ for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
 
 
 /// Implemented on both [ProductZipper] types to provide abstraction across them
-pub trait ProductZipperLike : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration {
+pub trait ZipperProductTrie : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration {
     /// Returns a slice of the path indices that represent the end-points of the portion of the path from each
     /// factor
     ///
@@ -853,17 +828,17 @@ pub trait ProductZipperLike : ZipperMoving + Zipper + ZipperAbsolutePath + Zippe
     fn path_indices(&self) -> &[usize];
 }
 
-impl <'factor_z, 'trie, V : crate::TrieValue> ProductZipperLike for ProductZipper<'factor_z, 'trie, V> {
+impl <'factor_z, 'trie, V : crate::TrieValue> ZipperProductTrie for ProductZipper<'factor_z, 'trie, V> {
     fn path_indices(&self) -> &[usize] {
-        ProductZipper::path_indices(self)
+        &self.factor_paths
     }
 }
 
-impl <'trie, PZ, SZ, V : crate::TrieValue> ProductZipperLike for ProductZipperG<'trie, PZ, SZ, V> where
+impl <'trie, PZ, SZ, V : crate::TrieValue> ZipperProductTrie for ProductZipperG<'trie, PZ, SZ, V> where
     PZ : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration,
     SZ : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration {
     fn path_indices(&self) -> &[usize] {
-        ProductZipperG::path_indices(self)
+        &self.factor_paths
     }
 }
 

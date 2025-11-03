@@ -257,7 +257,7 @@ impl<A: Zipper + ZipperIteration, B: Zipper + ZipperIteration> ZipperIteration f
     }
 }
 
-impl <PZL : ProductZipperLike, PZR : ProductZipperLike> ProductZipperLike for DiffZipper<PZL, PZR> {
+impl <PZL : ZipperProductTrie, PZR : ZipperProductTrie> ZipperProductTrie for DiffZipper<PZL, PZR> {
     fn path_indices(&self) -> &[usize] {
         let a = self.a.path_indices();
         let b = self.b.path_indices();

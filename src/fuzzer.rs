@@ -254,7 +254,7 @@ impl <T : TrieValue> Distribution<(Vec<u8>, Option<T>)> for FairTriePath<T> {
   fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> (Vec<u8>, Option<T>) {
     use crate::morphisms::Catamorphism;
     // it's much cheaper to draw many samples at once, but the current Distribution API is broken
-    let size = Catamorphism::into_cata_cached(self.source.clone(), |_: &ByteMask, ws: &mut [usize], _mv: Option<&T>, _path: &[u8]| {
+    let size = Catamorphism::into_cata_cached(self.source.clone(), |_: &ByteMask, ws: &mut [usize], _mv: Option<&T>| {
       ws.iter().sum::<usize>() + 1
     });
     let target = rng.random_range(0..size);
