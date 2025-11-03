@@ -1,4 +1,6 @@
-
+// note, this is almost identical in implementation to ProductZipperG
+// It's very likely, for maintainability, we'll want to implement ProductZipperG as a simple policy over DependentProductZipperG
+// However, all my attempts at this failed so far because of the enroll enter/exit closure types in the struct
 use crate::alloc::{Allocator, GlobalAlloc};
 use crate::utils::ByteMask;
 use crate::trie_node::*;
@@ -7,14 +9,9 @@ use zipper_priv::*;
 
 
 /// A [Zipper] type that moves through a Cartesian product trie created by extending each path in a primary
-/// trie with the root of the next secondardary trie, doing it recursively for all provided tries
+/// trie with the computed virtual trie, doing it recursively for all returned tries
 ///
-/// Compared to [ProductZipper], this is a generic virtual zipper that works without
-/// inspecting the inner workings of primary and secondary zippers.  `ProductZipperG` is more general,
-/// while `ProductZipper` is faster in situations where it can be used.
-///
-/// NOTE: In the future, this generic type will be renamed to `ProductZipper`, and the existing
-/// [ProductZipper] will be renamed something else or removed entirely.
+/// Compared to [ProductZipperG], this allows the factors zippers to be calculated on the fly, and depend on the prefix.
 pub struct DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, F>
     where
         V: Clone + Send + Sync,
@@ -32,8 +29,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V, F : Clone + for <'a> FnOnce(&'a [u8], usize
         PrimaryZ: ZipperMoving,
         SecondaryZ: ZipperMoving,
 {
-    /// Creates a new `ProductZipper` from the provided zippers
-    pub fn new(primary: PrimaryZ, enroll: F) -> Self
+    /// Creates a new `DependentProductZipperG` from the provided enroll function
+    pub fn new_enroll(primary: PrimaryZ, enroll: F) -> Self
         where
             PrimaryZ: ZipperValues<V>
     {
@@ -46,7 +43,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, F : Clone + for <'a> FnOnce(&'a [u8], usize
         }
     }
 
-    /// Returns the index of the factor containing the `ProductZipper` focus
+    /// Returns the index of the factor containing the `DependentProductZipperG` focus
     ///
     /// Returns `0` if the focus is in the primary factor.  The returned value will always be
     /// `zipper.focus_factor() < zipper.factor_count()`.
@@ -65,7 +62,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, F : Clone + for <'a> FnOnce(&'a [u8], usize
         Some(factor)
     }
 
-    /// Returns the number of factors composing the `ProductZipper`
+    /// Returns the number of factors composing the `DependentProductZipperG`
     ///
     /// The minimum returned value will be 1 because the primary factor is counted.
     pub fn factor_count(&self) -> usize {
@@ -465,7 +462,7 @@ mod tests {
         let rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
         rs.iter().enumerate().for_each(|(i, r)| { btm.set_val_at(r.as_bytes(), i); });
 
-        let mut dpz = DependentProductZipperG::new(btm.into_read_zipper(&[]), |_, c| {
+        let mut dpz = DependentProductZipperG::new_enroll(btm.into_read_zipper(&[]), |_, c| {
             if c == 0 { Some(PathMap::single(".postfix", 0).into_read_zipper(&[])) } else { None }
         });
 
@@ -496,7 +493,7 @@ rubicundus.postfix
         let rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
         rs.iter().enumerate().for_each(|(i, r)| { btm.set_val_at(r.as_bytes(), i); });
 
-        let mut dpz = DependentProductZipperG::new(btm.into_read_zipper(&[]), |p, c| {
+        let mut dpz = DependentProductZipperG::new_enroll(btm.into_read_zipper(&[]), |p, c| {
             if c == 0 { Some(PathMap::single(p, 0).into_read_zipper(&[])) } else { None }
         });
 
