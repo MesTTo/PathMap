@@ -1,5 +1,4 @@
 
-use crate::alloc::Allocator;
 use crate::zipper::*;
 use crate::utils::ByteMask;
 

@@ -7,29 +7,28 @@ PathMap is optimized for large data sets and can be used efficiently in a multi-
 
 This crate provides the low-level data structure for [MORK](https://github.com/trueagi-io/MORK/)
 
-The crate name **`pathmap`** was previously used by **Canmi** for a different project —  
-[`kvmap`](https://github.com/canmi21/kvmap) *(formerly published as `pathmap`)*,  
-which is a **SQL-driven key-value store**.
-
-This repository is the **official PathMap** project by Adam Vandervorst and team,  
-providing a high-performance map/trie data structure for path manipulation.
-
-If you are looking for Canmi’s SQL-based KVMap project, please visit:  
-[https://github.com/canmi21/kvmap](https://github.com/canmi21/kvmap)
-
 ## Usage
 
 Check out the [book](https://pathmap-rs.github.io/).
+
+## kvmap
+
+The crate name **`pathmap`** was previously used by **Canmi** for a different project, 
+[`kvmap`](https://github.com/canmi21/kvmap) *(formerly published as `pathmap`)*, 
+which is a **SQL-driven key-value store**.
+
+If you are looking for Canmi’s SQL-based KVMap project, please visit:  
+[https://github.com/canmi21/kvmap](https://github.com/canmi21/kvmap)
 
 ## Getting Started
 
 Add the following to your Cargo.toml:
 
 ```toml
-pathmap = "0.1"
+pathmap = ">=0.2.0-alpha0, <0.3.0"
 ```
 
-**NOTE** This is pre-alpha software and there will be API churn.  Make a fork if you need to be insulated from this churn until the initial release.
+**NOTE** This is pre-release software and there is likely to be further API churn.  Specify an exact version to be insulated from the churn until the `0.2.0` release.
 
 ## Optional Cargo features
 
