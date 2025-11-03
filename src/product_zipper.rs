@@ -815,7 +815,7 @@ for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
 
 
 /// Implemented on both [ProductZipper] types to provide abstraction across them
-pub trait ZipperProductTrie : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration {
+pub trait ZipperProduct : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration {
     /// Returns a slice of the path indices that represent the end-points of the portion of the path from each
     /// factor
     ///
@@ -828,13 +828,13 @@ pub trait ZipperProductTrie : ZipperMoving + Zipper + ZipperAbsolutePath + Zippe
     fn path_indices(&self) -> &[usize];
 }
 
-impl <'factor_z, 'trie, V : crate::TrieValue> ZipperProductTrie for ProductZipper<'factor_z, 'trie, V> {
+impl <'factor_z, 'trie, V : crate::TrieValue> ZipperProduct for ProductZipper<'factor_z, 'trie, V> {
     fn path_indices(&self) -> &[usize] {
         &self.factor_paths
     }
 }
 
-impl <'trie, PZ, SZ, V : crate::TrieValue> ZipperProductTrie for ProductZipperG<'trie, PZ, SZ, V> where
+impl <'trie, PZ, SZ, V : crate::TrieValue> ZipperProduct for ProductZipperG<'trie, PZ, SZ, V> where
     PZ : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration,
     SZ : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration {
     fn path_indices(&self) -> &[usize] {
