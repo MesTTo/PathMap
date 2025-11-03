@@ -135,6 +135,7 @@ mod product_zipper;
 mod empty_zipper;
 mod prefix_zipper;
 mod overlay_zipper;
+mod dependent_zipper;
 mod trie_ref;
 mod dense_byte_node;
 pub(crate) mod line_list_node;

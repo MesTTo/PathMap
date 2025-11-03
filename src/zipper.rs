@@ -22,6 +22,7 @@ pub use crate::overlay_zipper::{OverlayZipper};
 pub use crate::prefix_zipper::{PrefixZipper};
 pub use crate::empty_zipper::{EmptyZipper};
 pub use crate::poly_zipper::PolyZipper;
+pub use crate::dependent_zipper::DependentProductZipperG;
 use crate::zipper_tracking::*;
 
 
