@@ -147,6 +147,10 @@ impl<'trie, V: Clone + Send + Sync, A: Allocator> ZipperCreationPriv<'trie, V, A
     }
 }
 
+crate::impl_name_only_debug!(
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ZipperHead<'_, '_, V, A>
+);
+
 /// Similar to [ZipperHead], but owns the trie from which zippers are granted
 ///
 /// `ZipperHeadOwned` is useful when managing the lifetime of an ordinary `ZipperHead` is unwieldy, as
@@ -191,6 +195,10 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperCreationPriv<'static, V
         &self.tracker_paths
     }
 }
+
+crate::impl_name_only_debug!(
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ZipperHeadOwned<V, A>
+);
 
 impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> ZipperCreation<'trie, V, A> for Z where Z: ZipperCreationPriv<'trie, V, A> {
     fn read_zipper_at_borrowed_path<'a, 'path>(&'a self, path: &'path[u8]) -> Result<ReadZipperTracked<'a, 'path, V, A>, Conflict> where 'trie: 'a {

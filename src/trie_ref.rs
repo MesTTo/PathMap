@@ -819,6 +819,33 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperReadOnlyPriv<'
     }
 }
 
+
+/// Internal macro to implement Debug on TrieRef types
+macro_rules! impl_trie_ref_debug {
+    (impl $($impl_tail:tt)*) => {
+        impl $($impl_tail)* {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.debug_struct(core::any::type_name::<Self>())
+                    .field("child_mask", &self.child_mask())
+                    .field("shared_node_id", &self.shared_node_id())
+                    .finish()
+            }
+        }
+    };
+}
+
+impl_trie_ref_debug!(
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for TrieRefBorrowed<'_, V, A>
+);
+
+impl_trie_ref_debug!(
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for TrieRefOwned<V, A>
+);
+
+impl_trie_ref_debug!(
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for TrieRef<'_, V, A>
+);
+
 #[cfg(test)]
 mod tests {
     use crate::{trie_node::AbstractNodeRef, utils::ByteMask, zipper::{zipper_priv::ZipperPriv, *}, PathMap};

@@ -536,6 +536,11 @@ impl<'prefix, V: Clone + Send + Sync, Z, A: Allocator> zipper_priv::ZipperPriv f
     fn try_borrow_focus(&self) -> Option<&TrieNodeODRc<Self::V, Self::A>> { self.source.try_borrow_focus() }
 }
 
+crate::zipper::impl_zipper_debug!(
+    impl<Z> core::fmt::Debug for PrefixZipper<'_, Z>
+        where Z: ZipperAbsolutePath
+);
+
 #[cfg(test)]
 mod tests {
     use super::PrefixZipper;

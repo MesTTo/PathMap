@@ -127,3 +127,7 @@ impl ZipperPathBuffer for EmptyZipper {
         self.path.reserve(path_len)
     }
 }
+
+crate::impl_name_only_debug!(
+    impl core::fmt::Debug for EmptyZipper
+);

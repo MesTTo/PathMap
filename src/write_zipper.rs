@@ -466,6 +466,10 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperPr
     fn alloc(&self) -> A { self.z.alloc.clone() }
 }
 
+crate::zipper::impl_zipper_debug!(
+    impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> core::fmt::Debug for WriteZipperTracked<'a, 'path, V, A>
+);
+
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // WriteZipperUntracked
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
@@ -616,21 +620,9 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperPr
     fn alloc(&self) -> A { self.z.alloc.clone() }
 }
 
-impl<'a, 'path, V, A> core::fmt::Debug for WriteZipperUntracked<'a, 'path, V, A>
-where
-    V: Clone + Send + Sync + Unpin,
-    A: Allocator,
-{
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let origin_path = crate::utils::debug::render_debug_path(self.origin_path(), crate::utils::debug::PathRenderMode::TryAscii).unwrap();        
-        let prefix_len = self.root_prefix_path().len();
-        f.debug_struct("WriteZipperUntracked")
-            .field("prefix_len", &prefix_len)
-            .field("child_mask", &self.child_mask())
-            .field("origin_path", &origin_path)
-            .finish()
-    }
-}
+crate::zipper::impl_zipper_debug!(
+    impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> core::fmt::Debug for WriteZipperUntracked<'a, 'path, V, A>
+);
 
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // WriteZipperOwned
@@ -842,6 +834,14 @@ impl<V: Clone + Send + Sync + Unpin + 'static, A: Allocator + 'static> Iterator 
         }
     }
 }
+
+crate::impl_name_only_debug!(
+    impl<V: Clone + Send + Sync + Unpin + 'static, A: Allocator + 'static> core::fmt::Debug for OwnedZipperIter<V, A>
+);
+
+crate::zipper::impl_zipper_debug!(
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for WriteZipperOwned<V, A>
+);
 
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // WriteZipperCore (the actual implementation)

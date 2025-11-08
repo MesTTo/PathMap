@@ -443,6 +443,10 @@ pub trait ZipperReadOnlyValues<'a, V>: ZipperValues<V> {
 /// A [`witness`](ZipperReadOnlyConditionalValues::witness) type used by [`ReadZipperTracked`] and [`ReadZipperOwned`]
 pub struct ReadZipperWitness<V: Clone + Send + Sync, A: Allocator>(pub(crate) Option<TrieNodeODRc<V, A>>);
 
+crate::impl_name_only_debug!(
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ReadZipperWitness<V, A>
+);
+
 /// Conceptually similar to [ZipperReadOnlyValues] but requires a [`witness`](ZipperReadOnlyConditionalValues::witness)
 /// to ensure the data remains intact.
 ///
@@ -868,6 +872,27 @@ impl<'a, V: Clone + Send + Sync, Z, A: Allocator> ZipperReadOnlyPriv<'a, V, A> f
     fn take_core(&mut self) -> Option<ReadZipperCore<'a, 'static, V, A>> { (**self).take_core() }
 }
 
+/// Internal macro to implement Debug on a number of internal zipper types
+macro_rules! impl_zipper_debug {
+    (impl $($impl_tail:tt)*) => {
+        impl $($impl_tail)* {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                let origin_path = crate::utils::debug::render_debug_path(
+                    self.origin_path(),
+                    crate::utils::debug::PathRenderMode::TryAscii
+                ).unwrap();
+                let prefix_len = self.root_prefix_path().len();
+                f.debug_struct(core::any::type_name::<Self>())
+                    .field("child_mask", &self.child_mask())
+                    .field("prefix_len", &prefix_len)
+                    .field("origin_path", &origin_path)
+                    .finish()
+            }
+        }
+    };
+}
+pub(crate) use impl_zipper_debug;
+
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // ReadZipperTracked
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
@@ -1022,6 +1047,10 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ReadZipperTra
 //         }
 //     }
 // }
+
+impl_zipper_debug!(
+    impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> core::fmt::Debug for ReadZipperTracked<'a, 'path, V, A>
+);
 
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // ReadZipperUntracked
@@ -1183,6 +1212,13 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> std::ite
         }
     }
 }
+crate::impl_name_only_debug!(
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ReadZipperIter<'_, '_, V, A>
+);
+
+impl_zipper_debug!(
+    impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> core::fmt::Debug for ReadZipperUntracked<'a, 'path, V, A>
+);
 
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // ReadZipperOwned
@@ -1337,17 +1373,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAbsolutePath for ReadZi
     fn root_prefix_path(&self) -> &[u8] { self.z.root_prefix_path() }
 }
 
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ReadZipperOwned<V, A> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let origin_path = crate::utils::debug::render_debug_path(self.origin_path(), crate::utils::debug::PathRenderMode::TryAscii).unwrap();        
-        let prefix_len = self.root_prefix_path().len();
-        f.debug_struct("ReadZipperOwned")
-            .field("prefix_len", &prefix_len)
-            .field("shared_node_id", &self.shared_node_id())
-            .field("origin_path", &origin_path)
-            .finish()
-    }
-}
+impl_zipper_debug!(
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ReadZipperOwned<V, A>
+);
 
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // ReadZipperCore (the actual implementation)
