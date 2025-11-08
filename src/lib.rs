@@ -152,6 +152,18 @@ pub trait TrieValue: Clone + Send + Sync + Unpin + 'static {}
 
 impl<T> TrieValue for T where T : Clone + Send + Sync + Unpin + 'static {}
 
+/// Internal macro to implement Debug on a type that just outputs the type name
+macro_rules! impl_name_only_debug {
+    (impl $($impl_tail:tt)*) => {
+        impl $($impl_tail)* {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.debug_struct(core::any::type_name::<Self>()).finish()
+            }
+        }
+    };
+}
+pub(crate) use impl_name_only_debug;
+
 #[cfg(test)]
 mod tests {
     use rand::{Rng, SeedableRng, rngs::StdRng};

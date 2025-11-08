@@ -315,6 +315,12 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperIteration
         Mapping: for<'a> Fn(Option<&'a AV>, Option<&'a BV>) -> Option<&'a OutV>,
 { }
 
+crate::impl_name_only_debug!(
+    impl<AV, BV, OutV, AZipper, BZipper, Mapping> core::fmt::Debug for OverlayZipper<AV, BV, OutV, AZipper, BZipper, Mapping>
+        where
+        Mapping: for<'a> Fn(Option<&'a AV>, Option<&'a BV>) -> Option<&'a OutV>,
+);
+
 #[cfg(test)]
 mod tests {
     use crate::alloc::GlobalAlloc;

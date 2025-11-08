@@ -466,6 +466,10 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperPr
     fn alloc(&self) -> A { self.z.alloc.clone() }
 }
 
+crate::zipper::impl_zipper_debug!(
+    impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> core::fmt::Debug for WriteZipperTracked<'a, 'path, V, A>
+);
+
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // WriteZipperUntracked
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
@@ -615,6 +619,10 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperPr
     fn take_root_prefix_path(&mut self) -> Vec<u8> { self.z.take_root_prefix_path() }
     fn alloc(&self) -> A { self.z.alloc.clone() }
 }
+
+crate::zipper::impl_zipper_debug!(
+    impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> core::fmt::Debug for WriteZipperUntracked<'a, 'path, V, A>
+);
 
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // WriteZipperOwned
@@ -826,6 +834,14 @@ impl<V: Clone + Send + Sync + Unpin + 'static, A: Allocator + 'static> Iterator 
         }
     }
 }
+
+crate::impl_name_only_debug!(
+    impl<V: Clone + Send + Sync + Unpin + 'static, A: Allocator + 'static> core::fmt::Debug for OwnedZipperIter<V, A>
+);
+
+crate::zipper::impl_zipper_debug!(
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for WriteZipperOwned<V, A>
+);
 
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // WriteZipperCore (the actual implementation)

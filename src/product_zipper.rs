@@ -813,6 +813,10 @@ for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
         SecondaryZ: ZipperIteration,
 { } //Use the default impl for all methods
 
+impl_zipper_debug!(
+    impl<V: Clone + Send + Sync + Unpin, PrimaryZ, SecondaryZ> core::fmt::Debug for ProductZipperG<'_, PrimaryZ, SecondaryZ, V>
+        where PrimaryZ: ZipperAbsolutePath, SecondaryZ: ZipperAbsolutePath
+);
 
 /// Implemented on both [ProductZipper] types to provide abstraction across them
 pub trait ZipperProduct : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration {

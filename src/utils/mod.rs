@@ -468,6 +468,10 @@ pub struct ByteMaskIter {
     mask: [u64; 4],
 }
 
+crate::impl_name_only_debug!(
+    impl core::fmt::Debug for ByteMaskIter
+);
+
 /// Iterate over a [u64; 4].  Deprecated in favor [`ByteMask`]
 #[deprecated]
 pub trait IntoByteMaskIter {
