@@ -17,7 +17,7 @@ use crate::PathMap;
 pub use crate::write_zipper::*;
 pub use crate::trie_ref::*;
 pub use crate::zipper_head::*;
-pub use crate::product_zipper::{ProductZipper, ProductZipperG, ZipperProduct};
+pub use crate::product_zipper::{ProductZipper, ProductZipperG, ZipperProduct, OneFactor};
 pub use crate::overlay_zipper::{OverlayZipper};
 pub use crate::prefix_zipper::{PrefixZipper};
 pub use crate::empty_zipper::{EmptyZipper};

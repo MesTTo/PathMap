@@ -846,6 +846,76 @@ impl <'trie, PZ, SZ, V : crate::TrieValue> ZipperProduct for ProductZipperG<'tri
     }
 }
 
+/// A simple wrapper that lifts a Zipper into a single-factor product zipper
+pub struct OneFactor<Z> {
+    z: Z
+}
+
+impl <Z : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration> OneFactor<Z> {
+    pub fn new(z: Z) -> Self {
+        OneFactor{ z }
+    }
+}
+
+impl <Z : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration> ZipperProduct for OneFactor<Z> {
+    fn path_indices(&self) -> &[usize] {
+        &[]
+    }
+}
+
+// TODO GOAT I feel like we should move this lens to zipper.rs and use it to replace more boilerplate there
+macro_rules! lens {
+    (ZipperIteration $e:ident) => {
+        fn to_next_val(&mut self) -> bool { self.$e.to_next_val() }
+        fn descend_first_k_path(&mut self, k: usize) -> bool { self.$e.descend_first_k_path(k) }
+        fn to_next_k_path(&mut self, k: usize) -> bool { self.$e.to_next_k_path(k) }
+    };
+    (ZipperAbsolutePath $e:ident) => {
+        fn origin_path(&self) -> &[u8] { self.$e.origin_path() }
+        fn root_prefix_path(&self) -> &[u8] { self.$e.root_prefix_path() }
+    };
+    (Zipper $e:ident) => {
+        #[inline] fn path_exists(&self) -> bool { self.$e.path_exists() }
+        fn is_val(&self) -> bool { self.$e.is_val() }
+        fn child_count(&self) -> usize { self.$e.child_count() }
+        fn child_mask(&self) -> ByteMask { self.$e.child_mask() }
+    };
+    (ZipperMoving $e:ident) => {
+        fn at_root(&self) -> bool { self.$e.at_root() }
+        fn reset(&mut self) { self.$e.reset() }
+        #[inline] fn path(&self) -> &[u8] { self.$e.path() }
+        fn val_count(&self) -> usize { self.$e.val_count() }
+        fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) { self.$e.descend_to(k) }
+        fn descend_to_check<K: AsRef<[u8]>>(&mut self, k: K) -> bool { self.$e.descend_to_check(k) }
+        fn descend_to_existing<K: AsRef<[u8]>>(&mut self, k: K) -> usize { self.$e.descend_to_existing(k) }
+        fn descend_to_val<K: AsRef<[u8]>>(&mut self, k: K) -> usize { self.$e.descend_to_val(k) }
+        fn descend_to_byte(&mut self, k: u8) { self.$e.descend_to_byte(k) }
+        fn descend_to_existing_byte(&mut self, k: u8) -> bool { self.$e.descend_to_existing_byte(k) }
+        fn descend_indexed_byte(&mut self, child_idx: usize) -> bool { self.$e.descend_indexed_byte(child_idx) }
+        fn descend_first_byte(&mut self) -> bool { self.$e.descend_first_byte() }
+        fn descend_until(&mut self) -> bool { self.$e.descend_until() }
+        fn to_next_sibling_byte(&mut self) -> bool { self.$e.to_next_sibling_byte() }
+        fn to_prev_sibling_byte(&mut self) -> bool { self.$e.to_prev_sibling_byte() }
+        fn ascend(&mut self, steps: usize) -> bool { self.$e.ascend(steps) }
+        fn ascend_byte(&mut self) -> bool { self.$e.ascend_byte() }
+        fn ascend_until(&mut self) -> bool { self.$e.ascend_until() }
+        fn ascend_until_branch(&mut self) -> bool { self.$e.ascend_until_branch() }
+        fn to_next_step(&mut self) -> bool { self.$e.to_next_step() }
+    };
+}
+
+impl<V : Clone + Send + Sync + Unpin, Z : ZipperForking<V>> ZipperForking<V> for OneFactor<Z> {
+    type ReadZipperT<'a> = Z::ReadZipperT<'a> where Z: 'a;
+    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
+        self.z.fork_read_zipper()
+    }
+}
+
+impl <Z : Zipper> Zipper for OneFactor<Z> { lens!(Zipper z); }
+impl <Z : ZipperAbsolutePath> ZipperAbsolutePath for OneFactor<Z> { lens!(ZipperAbsolutePath z); }
+impl <Z : ZipperMoving> ZipperMoving for OneFactor<Z> { lens!(ZipperMoving z); }
+impl <Z : ZipperIteration> ZipperIteration for OneFactor<Z> { lens!(ZipperIteration z); }
+
 #[cfg(test)]
 mod tests {
     use fast_slice_utils::find_prefix_overlap;
