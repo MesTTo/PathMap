@@ -1198,6 +1198,15 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ReadZipp
     }
 }
 
+impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ReadZipperUntracked<'a, 'path, V, A> {
+    pub fn into_path(self) -> Vec<u8> {
+        //Destructure `self` without dropping it
+        let zip = core::mem::ManuallyDrop::new(self);
+        let core_z = unsafe { std::ptr::read(&zip.z) };
+        core_z.into_path()
+    }
+}
+
 impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> std::iter::IntoIterator for ReadZipperUntracked<'a, 'path, V, A> {
     type Item = (Vec<u8>, &'a V);
     type IntoIter = ReadZipperIter<'a, 'path, V, A>;
@@ -2826,6 +2835,12 @@ pub(crate) mod read_zipper_core {
             self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
             *self.focus_node = node;
             self.focus_iter_token = NODE_ITER_INVALID;
+        }
+
+        pub(crate) fn into_path(self) -> Vec<u8> {
+            let zip = core::mem::ManuallyDrop::new(self);
+            let prefix_buf = unsafe { std::ptr::read(&zip.prefix_buf) };
+            prefix_buf
         }
     }
 
@@ -4733,5 +4748,28 @@ mod tests {
         let mut rz = btm.read_zipper();
         assert!(rz.descend_last_path());
         assert_eq!(rz.path(), b"rubicundus");
+    }
+
+    #[test]
+    fn remove_bug() {
+        let mut btm: PathMap<()> = PathMap::new();
+        btm.insert([2, 197, 115, 116, 97, 116, 101, 197, 114, 101, 97, 100, 121], ());
+        btm.insert([4, 196, 101, 120, 101, 99, 193, 50, 2, 193, 44, 2, 199, 116, 114, 105, 103, 103, 101, 114, 193, 120, 2, 193, 79, 2, 193, 43, 2, 195, 97, 100, 100, 193, 120], ());
+
+        let mut zh = btm.zipper_head();
+        let mut wz = zh.write_zipper_at_exclusive_path(&[2, 199, 116, 114, 105, 103, 103, 101, 114, 193, 120]).unwrap();
+        wz.set_val(());
+        zh.cleanup_write_zipper(wz);
+
+        // let mut wz = zh.write_zipper_at_exclusive_path(&[2, 197, 115, 116, 97, 116, 101, 197, 114, 101, 97, 100]).unwrap();
+        // wz.move_to_path(&[121]);
+        // println!("{}", wz.is_val());
+        // wz.remove_val(true);
+        // zh.cleanup_write_zipper(wz);
+
+        // drop(zh);
+        let mut out_buf = Vec::new();
+        crate::viz::viz_maps(&[btm], &crate::viz::DrawConfig{ ascii: false, hide_value_paths: false, minimize_values: true, logical: false }, &mut out_buf).unwrap();
+        println!("{}", String::from_utf8_lossy(&out_buf));
     }
 }

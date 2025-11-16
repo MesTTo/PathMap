@@ -47,7 +47,7 @@ struct NodeMeta {
 
 #[derive(Debug)]
 enum NodeType {
-    Dense, Pair, Tiny, Empty, Unknown
+    Dense, Pair, Tiny, Empty, Cell
 }
 
 enum DrawCmd {
@@ -273,7 +273,7 @@ fn viz_zipper_logical<V : TrieValue + Debug + Hash, Z: zipper_priv::ZipperPriv +
 
             ds.cmds.push(DrawCmd::Edge(parent_node_id, graph_node_id, edge_path.to_smallvec()));
             if !skip_node {
-                ds.cmds.push(DrawCmd::Node(graph_node_id, NodeType::Unknown));
+                ds.cmds.push(DrawCmd::Node(graph_node_id, NodeType::Cell));
             }
         }
 
@@ -314,7 +314,7 @@ fn viz_node_physical<V : TrieValue + Debug + Hash, A : Allocator>(n: &TrieNodeOD
         TaggedNodeRef::LineListNode(_) => { NodeType::Pair }
         TaggedNodeRef::TinyRefNode(_) => { NodeType::Tiny }
         // TaggedNodeRef::BridgeNode(_) => { NodeType::Bridge }
-        TaggedNodeRef::CellByteNode(_) => { NodeType::Unknown }
+        TaggedNodeRef::CellByteNode(_) => { NodeType::Cell }
         TaggedNodeRef::EmptyNode => { NodeType::Empty }
     };
     ds.cmds.push(DrawCmd::Node(address, ntype));
@@ -322,6 +322,7 @@ fn viz_node_physical<V : TrieValue + Debug + Hash, A : Allocator>(n: &TrieNodeOD
     let mut token = bn.new_iter_token();
     while token != NODE_ITER_FINISHED {
         let (new_token, key_bytes, rec, value) = bn.next_items(token);
+        // println!("iterating over {:?}: {:?} ({:?} {:?})", address, key_bytes, rec.is_some(), value.is_some());
 
         if let Some(r) = rec {
             let other_address = r.shared_node_id();
@@ -332,7 +333,9 @@ fn viz_node_physical<V : TrieValue + Debug + Hash, A : Allocator>(n: &TrieNodeOD
         }
 
         if let Some(v) = value {
-            ds.cmds.push(DrawCmd::Value(address, v as *const V as u64, key_bytes.to_smallvec()));
+            let mut vhasher = std::hash::DefaultHasher::new();
+            v.hash(&mut vhasher);
+            ds.cmds.push(DrawCmd::Value(address, vhasher.finish(), key_bytes.to_smallvec()));
         }
 
         token = new_token;
