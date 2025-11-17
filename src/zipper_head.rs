@@ -1487,17 +1487,5 @@ mod tests {
         assert_eq!(rz.path_exists(), false);
         assert_eq!(rz.is_val(), false);
         drop(rz);
-
-        //LP: No idea what this was supposed to show.  But it was commented out so I assume nothing relevant.
-        // let mut wz = zh.write_zipper_at_exclusive_path(&[2, 197, 115, 116, 97, 116, 101, 197, 114, 101, 97, 100]).unwrap();
-        // wz.move_to_path(&[121]);
-        // // println!("{}", wz.is_val());
-        // wz.remove_val(true);
-        // zh.cleanup_write_zipper(wz);
-
-        // drop(zh);
-        // let mut out_buf = Vec::new();
-        // crate::viz::viz_maps(&[btm], &crate::viz::DrawConfig{ ascii: false, hide_value_paths: false, minimize_values: false, logical: false }, &mut out_buf).unwrap();
-        // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 }

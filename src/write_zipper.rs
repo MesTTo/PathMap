@@ -3058,6 +3058,47 @@ mod tests {
         assert_eq!(map.iter().count(), 1);
     }
 
+    //GOAT, we need similar tests to `write_zipper_subtract_into_test2` to test dangling path handling for `meet` and `restrict`
+
+    /// Tests how `subtract_into` handles dangling paths, including situations with extraneous empty nodes hanging around
+    #[test]
+    fn write_zipper_subtract_into_test2() {
+        let mut btm: PathMap<()> = PathMap::new();
+        btm.insert([1, 255, 0], ());
+        let zh = btm.zipper_head();
+
+        //Make a single value, at the root of a shared path
+        // then do a subtract, which should result in the removal of the value
+        let mut wz = zh.write_zipper_at_exclusive_path(&[0, 255, 0]).unwrap();
+        wz.set_val(());
+        let rz = zh.read_zipper_at_path(&[1, 255, 0]).unwrap();
+        let alg_result = wz.subtract_into(&rz, true);
+        assert_eq!(alg_result, AlgebraicStatus::None);
+        drop(wz);
+        drop(rz);
+
+        //Now, recreate the value, but do a subtract from another zipper higher in the trie
+        // this should result in the removal of the whole [0, ...] path
+        let mut wz = zh.write_zipper_at_exclusive_path(&[0, 255, 0]).unwrap();
+        wz.set_val(());
+        drop(wz);
+
+        let mut wz = zh.write_zipper_at_exclusive_path(&[0]).unwrap();
+        let rz = zh.write_zipper_at_exclusive_path(&[1]).unwrap();
+        let alg_result = wz.subtract_into(&rz, true);
+        assert_eq!(alg_result, AlgebraicStatus::None);
+        drop(wz);
+        drop(rz);
+
+        drop(zh);
+        assert_eq!(btm.read_zipper().child_count(), 1);
+        assert_eq!(btm.read_zipper().child_mask(), ByteMask::from(1));
+
+        // let mut out_buf = Vec::new();
+        // crate::viz::viz_maps(&[btm], &crate::viz::DrawConfig{ ascii: false, hide_value_paths: false, minimize_values: false, logical: false }, &mut out_buf).unwrap();
+        // println!("{}", String::from_utf8_lossy(&out_buf));
+    }
+
     #[test]
     fn write_zipper_movement_test() {
         let keys = ["romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
