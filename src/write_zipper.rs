@@ -1926,7 +1926,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
 
     /// See [ZipperWriting::prune_path]
-    fn prune_path(&mut self) -> usize {
+    pub(crate) fn prune_path(&mut self) -> usize {
         let key = self.key.node_key();
         if key.len() > 0 {
             let node_pruned_bytes = self.focus_stack.top_mut().unwrap().node_remove_dangling(key);
@@ -4336,6 +4336,48 @@ mod tests {
         let _ = wz.take_map(true);
         assert_eq!(wz.child_mask(), ByteMask::EMPTY);
         assert_eq!(wz.child_count(), 0);
+    }
+
+    /// Tests that `prune_path` won't destroy a value at the zipper's focus, when that zipper's focus is at the root
+    /// of a ZipperHead's WriteZipper
+    #[test]
+    fn write_zipper_prune_test9() {
+        let mut btm: PathMap<()> = PathMap::new();
+
+        //Make a single value at the root of a ZipperHead's WriteZipper
+        let zh = btm.zipper_head();
+        let mut wz = zh.write_zipper_at_exclusive_path(&[2, 199, 116, 114, 105, 103, 103, 101, 114, 193, 120]).unwrap();
+        wz.set_val(());
+        drop(wz);
+        drop(zh);
+        let mut wz = btm.write_zipper_at_path(&[2, 199, 116, 114, 105, 103, 103, 101, 114, 193, 120]);
+
+        //Validate that the value is where we think it is
+        assert_eq!(wz.path_exists(), true);
+        assert_eq!(wz.is_val(), true);
+        assert_eq!(wz.child_count(), 0);
+        assert_eq!(wz.child_mask(), ByteMask::EMPTY);
+
+        //Now try and prune it away, which should fail to do anything
+        wz.prune_path();
+        assert_eq!(wz.path_exists(), true);
+        assert_eq!(wz.is_val(), true);
+        assert_eq!(wz.child_count(), 0);
+        assert_eq!(wz.child_mask(), ByteMask::EMPTY);
+
+        //Now remove the val, but don't prune
+        wz.remove_val(false);
+        assert_eq!(wz.path_exists(), true);
+        assert_eq!(wz.is_val(), false);
+        assert_eq!(wz.child_count(), 0);
+        assert_eq!(wz.child_mask(), ByteMask::EMPTY);
+
+        //Finally, prune again, and make sure that did what it was supposed to do
+        wz.prune_path();
+        assert_eq!(wz.path_exists(), false);
+        assert_eq!(wz.is_val(), false);
+        assert_eq!(wz.child_count(), 0);
+        assert_eq!(wz.child_mask(), ByteMask::EMPTY);
     }
 
     /// Tests [`ZipperPriv::get_focus`] and [`ZipperPriv::try_borrow_focus`] internal APIs on [`WriteZipperCore`]

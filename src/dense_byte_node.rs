@@ -865,9 +865,13 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                 //Clean up empty nodes too, which may have been left by a ZipperHead
                 match cf.rec() {
                     Some(node) => if node.as_tagged().node_is_empty() {
-                        self.mask.clear_bit(k);
-                        self.values.remove(ix);
-                        return 1
+                        if cf.has_val() {
+                            cf.set_rec_option(None);
+                        } else {
+                            self.mask.clear_bit(k);
+                            self.values.remove(ix);
+                            return 1
+                        }
                     },
                     None => {}
                 }
