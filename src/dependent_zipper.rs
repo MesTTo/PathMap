@@ -1,17 +1,17 @@
 // note, this is almost identical in implementation to ProductZipperG
 // It's very likely, for maintainability, we'll want to implement ProductZipperG as a simple policy over DependentProductZipperG
 // However, all my attempts at this failed so far because of the enroll enter/exit closure types in the struct
-use crate::alloc::{Allocator, GlobalAlloc};
 use crate::utils::ByteMask;
-use crate::trie_node::*;
 use crate::zipper::*;
-use zipper_priv::*;
 
 
 /// A [Zipper] type that moves through a Cartesian product trie created by extending each path in a primary
 /// trie with the computed virtual trie, doing it recursively for all returned tries
 ///
 /// Compared to [ProductZipperG], this allows the factors zippers to be calculated on the fly, and depend on the prefix.
+///
+/// GOAT: The shape of this API is still experimental.  Creating new owned zippers is not great for performance and
+/// there is probably a design that allows mutable references to be returned from an object with an appropriate lifetime.
 pub struct DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
     where
         V: Clone + Send + Sync,
@@ -114,7 +114,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
         if self.is_path_end() {
             // this clone is hideous, but I don't remember how to get rid of it
             let (payload, ret) = self.enroll.clone()(self.enroll_payload.take().unwrap(), self.path() as _, self.secondary.len());
-            self.enroll_payload.insert(payload);
+            let _ = self.enroll_payload.insert(payload);
             if let Some(nz) = ret {
                 self.factor_paths.push(len);
                 self.secondary.push(nz);
