@@ -356,7 +356,7 @@ mod test {
 
         let mut out_buf = Vec::new();
         viz_maps(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: false }, &mut out_buf).unwrap();
-        println!("{}", String::from_utf8_lossy(&out_buf));
+        // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
     #[test]
