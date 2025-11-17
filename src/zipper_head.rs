@@ -309,9 +309,7 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             if inner_z.focus_stack.top().is_some() {
                 inner_z.move_to_path(origin_path);
                 if inner_z.try_borrow_focus().unwrap().as_tagged().node_is_empty() {
-                    if !inner_z.is_val() && inner_z.child_count() == 0 {
-                        inner_z.remove_branches(true);
-                    }
+                    inner_z.prune_path();
                 }
                 inner_z.reset();
             }
@@ -1466,7 +1464,7 @@ mod tests {
         btm.insert([4, 196, 101, 120, 101, 99, 193, 50, 2, 193, 44, 2, 199, 116, 114, 105, 103, 103, 101, 114, 193, 120, 2, 193, 79, 2, 193, 43, 2, 195, 97, 100, 100, 193, 120], ());
         let zh = btm.zipper_head();
 
-        //Make a single value, at the root of a shared path, and 
+        //Make a single value, at the root of a shared path
         let mut wz = zh.write_zipper_at_exclusive_path(&[2, 199, 116, 114, 105, 103, 103, 101, 114, 193, 120]).unwrap();
         wz.set_val(());
         zh.cleanup_write_zipper(wz);
