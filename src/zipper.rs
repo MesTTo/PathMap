@@ -1199,11 +1199,12 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ReadZipp
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ReadZipperUntracked<'a, 'path, V, A> {
+    /// Consumes the zipper and returns the `Vec` storing its path
+    ///
+    /// The returned `Vec` will contain bytes equivalent to those provided by [origin_path](ZipperAbsolutePath::origin_path),
+    /// unless the internal path has not yet been initialized, in which case it will return `vec![]`.
     pub fn into_path(self) -> Vec<u8> {
-        //Destructure `self` without dropping it
-        let zip = core::mem::ManuallyDrop::new(self);
-        let core_z = unsafe { std::ptr::read(&zip.z) };
-        core_z.into_path()
+        self.z.into_path()
     }
 }
 
