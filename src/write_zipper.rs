@@ -3084,7 +3084,7 @@ mod tests {
         drop(wz);
 
         let mut wz = zh.write_zipper_at_exclusive_path(&[0]).unwrap();
-        let rz = zh.write_zipper_at_exclusive_path(&[1]).unwrap();
+        let rz = zh.read_zipper_at_path(&[1]).unwrap();
         let alg_result = wz.subtract_into(&rz, true);
         assert_eq!(alg_result, AlgebraicStatus::None);
         drop(wz);
