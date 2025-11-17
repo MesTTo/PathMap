@@ -2839,9 +2839,7 @@ pub(crate) mod read_zipper_core {
         }
 
         pub(crate) fn into_path(self) -> Vec<u8> {
-            let zip = core::mem::ManuallyDrop::new(self);
-            let prefix_buf = unsafe { std::ptr::read(&zip.prefix_buf) };
-            prefix_buf
+            self.prefix_buf
         }
     }
 
