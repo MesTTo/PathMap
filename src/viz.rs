@@ -52,8 +52,11 @@ enum NodeType {
 
 enum DrawCmd {
     Node(u64, NodeType),
+    /// (from_node, to_node, label)
     Edge(u64, u64, SmallVec<[u8; 8]>),
-    Value(u64, u64, SmallVec<[u8; 8]>),
+    /// (from_node, *const V, label)
+    Value(u64, *const (), SmallVec<[u8; 8]>),
+    /// (idx of map arg, root_node)
     Map(usize, u64),
 }
 
@@ -139,7 +142,7 @@ pub fn viz_maps<V : TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc:
                 let address_string = format!("{parent}");
                 let address_str = address_string.as_str();
 
-                let value_address_string = format!("{address}");
+                let value_address_string = format!("{address:p}");
                 let value_address_str = value_address_string.as_str();
 
                 let show_v = format!("{:?}", unsafe{ (address as *const V).as_ref().unwrap() });
@@ -281,7 +284,7 @@ fn viz_zipper_logical<V : TrieValue + Debug + Hash, Z: zipper_priv::ZipperPriv +
         let edge_path = &path[graph_stack.last().unwrap().0..];
 
         if let Some(v) = z.val() {
-            ds.cmds.push(DrawCmd::Value(graph_node_id, v as *const V as u64, edge_path.to_smallvec()));
+            ds.cmds.push(DrawCmd::Value(graph_node_id, (v as *const V).cast(), edge_path.to_smallvec()));
         }
     }
 }
@@ -333,9 +336,7 @@ fn viz_node_physical<V : TrieValue + Debug + Hash, A : Allocator>(n: &TrieNodeOD
         }
 
         if let Some(v) = value {
-            let mut vhasher = std::hash::DefaultHasher::new();
-            v.hash(&mut vhasher);
-            ds.cmds.push(DrawCmd::Value(address, vhasher.finish(), key_bytes.to_smallvec()));
+            ds.cmds.push(DrawCmd::Value(address, (v as *const V).cast(), key_bytes.to_smallvec()));
         }
 
         token = new_token;
@@ -355,7 +356,7 @@ mod test {
 
         let mut out_buf = Vec::new();
         viz_maps(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: false }, &mut out_buf).unwrap();
-        // println!("{}", String::from_utf8_lossy(&out_buf));
+        println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
     #[test]
