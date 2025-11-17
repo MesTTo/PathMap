@@ -26,27 +26,6 @@ pub use crate::dependent_zipper::DependentProductZipperG;
 use crate::zipper_tracking::*;
 
 
-
-// mod goat {
-//     use crate as pathmap;
-//     use pathmap::*;
-//     use pathmap::zipper::*;
-
-//     #[derive(PolyZipper)]
-//     enum MyPolyZipper<'trie, 'path, V: Clone + Send + Sync + Unpin> {
-//         Tracked(ReadZipperTracked<'trie, 'path, V>),
-//         Untracked(ReadZipperUntracked<'trie, 'path, V>),
-//     }
-
-//     #[test]
-//     pub fn goat_f() {
-//         let map = PathMap::<()>::new();
-        
-//         let x = MyPolyZipper::from(map.read_zipper());
-//     }
-// }
-
-
 /// The most fundamantal interface for a zipper, compatible with all zipper types
 pub trait Zipper {
     /// Returns `true` if the zipper's focus is on a path within the trie, otherwise `false`

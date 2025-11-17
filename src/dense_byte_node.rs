@@ -8,36 +8,6 @@ use crate::alloc::Allocator;
 use crate::ring::*;
 use crate::utils::ByteMask;
 
-//OPTIMIZATION QUESTION 2, a note on Rc vs. rclite: Rc's payload bloat is 16 bytes, while rclite's is much smaller <8 Bytes.
-// That's a big deal on a DenseByteNode because it pushes it from a single cache line onto two.
-// However, rclite doesn't currently support DSTs. (like &dyn)  Therefore there are two options if we
-// want to keep Rc<DenseByteNode<_>> as a type that's a single cache line. (See OPTIMIZATION QUESTION 1)
-//
-// 1. try and add a PR to rclite.  However it's possible not supporting DSTs was a deliberate choice, so
-//  they may not even take the PR.  And it's also possible (likely) it's hard to do (given the original
-//  authors didn't do it alrady)... If I had to guess it's because the rclite header is at the end of
-//  the object, while the Rc header is at the beginning.
-// 2. hunt for a solution that lets us do something like: Vec<dyn TrieNode<_>> where TrieNode is only
-//  implementable on pointer types like Rc, Box, etc.  I don't think Rust lets you do that, but perhaps
-//  it should!
-//
-// use rclite::Rc;
-// use std::rc::Rc;
-
-
-//OPTIMIZATION QUESTION 1, figure out the best compromise with regard to where to put Rc...
-// Question: Is it true that it's always going to be cheaper to increment a refcount than to do a clone?
-//  and to decrement a refcount instead of free?  because that seems like it would argue for an Rc at every node.
-//
-// However, the mutable traversal loop calls `node_get_child_mut`, which, in turn, needs to check the
-// refcount imposing non-zero overhead.
-//
-// The bigger concern is that incrementing the refcount requires thread syncronization around the atomic
-// access and that could be painful
-//
-//Conclusion: Need a massively multi-threaded benchmark to decide what to do with Rc / RcLite
-//
-
 use crate::utils::BitMask;
 use crate::trie_node::*;
 use crate::line_list_node::LineListNode;
