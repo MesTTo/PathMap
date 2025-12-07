@@ -1185,6 +1185,12 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ReadZipp
     pub fn into_path(self) -> Vec<u8> {
         self.z.into_path()
     }
+
+    /// Consumes the zipper and returns an iterator over all terminating paths reachable from the current focus,
+    /// including paths that do not hold values
+    pub fn into_path_iter(self) -> ReadZipperPathIter<'a, 'path, V, A> {
+        ReadZipperPathIter { zipper: Some(self.z) }
+    }
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> std::iter::IntoIterator for ReadZipperUntracked<'a, 'path, V, A> {
@@ -1192,17 +1198,17 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> std::ite
     type IntoIter = ReadZipperIter<'a, 'path, V, A>;
 
     fn into_iter(self) -> Self::IntoIter {
-        //Destructure `self` without dropping it
-        let zip = core::mem::ManuallyDrop::new(self);
-        let core_z = unsafe { std::ptr::read(&zip.z) };
         ReadZipperIter {
             started: false,
-            zipper: Some(core_z),
+            zipper: Some(self.z),
         }
     }
 }
 crate::impl_name_only_debug!(
     impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ReadZipperIter<'_, '_, V, A>
+);
+crate::impl_name_only_debug!(
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ReadZipperPathIter<'_, '_, V, A>
 );
 
 impl_zipper_debug!(
@@ -2923,6 +2929,31 @@ impl<'a, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> Iterator for Re
     }
 }
 
+/// An iterator for depth-first traversal of every existing path end (leaf) reachable from a [Zipper],
+/// regardless of whether a value exists at that path. Returned from [ReadZipperUntracked::into_path_iter]
+///
+/// NOTE: This is a convenience to allow access to syntactic sugar like `for` loops, [collect](std::iter::Iterator::collect),
+///  etc.  It will always be faster to use the zipper itself for iteration and traversal.
+pub struct ReadZipperPathIter<'a, 'path, V: Clone + Send + Sync, A: Allocator = GlobalAlloc>{
+    zipper: Option<ReadZipperCore<'a, 'path, V, A>>,
+}
+
+impl<'a, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> Iterator for ReadZipperPathIter<'a, '_, V, A> {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Vec<u8>> {
+        if let Some(zipper) = &mut self.zipper {
+            while zipper.to_next_step() {
+                if zipper.path_exists() && zipper.child_count() == 0 {
+                    return Some(zipper.path().to_vec());
+                }
+            }
+        }
+        self.zipper = None;
+        None
+    }
+}
+
 /// The origin path, will be a slice if it's borrowed from outside the Zipper, or length of the origin path in
 /// the `prefix_buf` if it has already been copied
 #[derive(Clone, Copy)]
@@ -4479,6 +4510,18 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, R_KEY_CNT);
+    }
+
+    #[test]
+    fn read_zipper_path_iter_leaf_paths() {
+        pub const ZIPPER_UNIQUE_PATH_KEYS: &[&[u8]] = &[b"arrow", b"bow", b"cannon", b"rom'i", b"romane", b"romanus", b"romulus", b"rubens", b"ruber", b"rubicon", b"rubicundus"];
+        let mut map: PathMap<()> = PathMap::new();
+        for key in ZIPPER_UNIQUE_PATH_KEYS {
+            map.create_path(key);
+        }
+
+        let iter_paths: Vec<Vec<u8>> = map.read_zipper().into_path_iter().collect();
+        assert_eq!(iter_paths, ZIPPER_UNIQUE_PATH_KEYS);
     }
 
     /// This test tries to hit an edge case in [ZipperIteration::to_next_val] where we begin iteration in the middle of a node

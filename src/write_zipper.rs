@@ -2565,7 +2565,13 @@ mod mut_node_stack {
         pub fn top(&self) -> Option<TaggedNodeRef<'_, V, A>> {
             match self.stack.last() {
                 Some(top) => Some(unsafe{ top.as_tagged() }),
-                None => unsafe{ self.root.map(|mut ptr| ptr.as_mut().make_mut().cast()) }
+                None => unsafe{ self.root.and_then(|mut ptr| {
+                    let ptr = ptr.as_mut();
+                    match ptr.is_empty() {
+                        true => None,
+                        false => Some(ptr.make_mut().cast())
+                    }
+                }) }
             }
         }
         ///GOAT, This is going to make miri mad.  This is used in the creation of a ReadZipper, forked
