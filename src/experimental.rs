@@ -98,6 +98,31 @@ impl FullZipper {
 // Doesn't seem as lawful as the above, still maybe useful for testing
 struct NullZipper {}
 
+impl Zipper for NullZipper {
+    fn path_exists(&self) -> bool { false }
+    fn is_val(&self) -> bool { false }
+    fn child_count(&self) -> usize { 0 }
+    fn child_mask(&self) -> ByteMask { ByteMask::EMPTY }
+}
+
+impl ZipperMoving for NullZipper {
+    fn at_root(&self) -> bool { true }
+    fn reset(&mut self) {}
+    fn path(&self) -> &[u8] { &[] }
+    fn val_count(&self) -> usize { 0 }
+    fn descend_to<K: AsRef<[u8]>>(&mut self, _k: K) {}
+    fn descend_to_byte(&mut self, _k: u8) {}
+    fn descend_indexed_byte(&mut self, _idx: usize) -> bool { false }
+    fn descend_first_byte(&mut self) -> bool { false }
+    fn descend_until(&mut self) -> bool { false }
+    fn ascend(&mut self, _steps: usize) -> bool { false }
+    fn ascend_byte(&mut self) -> bool { false }
+    fn ascend_until(&mut self) -> bool { false }
+    fn ascend_until_branch(&mut self) -> bool { false }
+    fn to_next_sibling_byte(&mut self) -> bool { false }
+    fn to_prev_sibling_byte(&mut self) -> bool { false }
+}
+
 impl<V: TrieValue, A: Allocator> WriteZipperPriv<V, A> for NullZipper {
     fn take_focus(&mut self, prune: bool) -> Option<TrieNodeODRc<V, A>> {
         None

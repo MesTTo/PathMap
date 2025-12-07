@@ -12,7 +12,9 @@ use crate::zipper_tracking::*;
 use crate::ring::{AlgebraicResult, AlgebraicStatus, DistributiveLattice, Lattice, COUNTER_IDENT, SELF_IDENT};
 
 /// Implemented on [Zipper] types that allow modification of the trie
-pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: WriteZipperPriv<V, A> {
+//GOAT: Long term, the ZipperMoving bound doesn't belong here.  But we'll want to break ZipperWriting into a
+// separate trait that allows writing at a specific path that we can also implement in PathMap
+pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: WriteZipperPriv<V, A> + ZipperMoving {
     /// A [ZipperHead] that can be created from this zipper
     type ZipperHead<'z> where Self: 'z;
 
@@ -88,6 +90,28 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     ///
     /// NOTE: If the `map` is empty then the effect will be the same as [remove_branches](ZipperWriting::remove_branches)
     fn graft_map(&mut self, map: PathMap<V, A>);
+
+    /// Grafts each [PathMap] returned by the `maps` iterator at the corresponding child byte indicated by a 
+    /// set bit in `child_mask`.
+    ///
+    /// If `remove_unset` is `true` then [Zipper::child_mask] will be equal to `child_mask` when this operations
+    /// completes.  If it is `false`, then the branches corresponding to set bits will be grafted, but branches
+    /// corresponding to unset bits will be left alone.
+    ///
+    /// Panics if the `maps` iterator returns fewer maps than the number of set bits in `child_mask`
+    fn graft_child_maps<I: IntoIterator<Item=PathMap<V, A>>>(&mut self, child_mask: ByteMask, maps: I, remove_unset: bool) {
+        if remove_unset {
+            self.remove_unmasked_branches(child_mask, false);
+        }
+
+        let mut maps_iter = maps.into_iter();
+        for child_byte in child_mask.iter() {
+            let map = maps_iter.next().expect("maps iterator returned fewer items than the number of set bits in child_mask");
+            self.descend_to_byte(child_byte);
+            self.graft_map(map);
+            self.ascend_byte();
+        }
+    }
 
     /// Joins (union of) the subtrie below the focus of `read_zipper` into the subtrie downstream from the
     /// focus of `self`
@@ -4477,6 +4501,104 @@ mod tests {
         assert_eq!(zipper.descend_until(), true);
         assert_eq!(zipper.path(), b"arrow");
         assert_eq!(zipper.val_count(), 1);
+    }
+
+    #[test]
+    fn write_zipper_graft_child_maps_test() {
+        // Create a base map with some initial structure
+        let mut map: PathMap<i32> = PathMap::new();
+        map.set_val_at(b"root:a:x", 1);
+        map.set_val_at(b"root:a:y", 2);
+        map.set_val_at(b"root:b:x", 3);
+        map.set_val_at(b"root:b:y", 4);
+        map.set_val_at(b"root:c:x", 5);
+        map.set_val_at(b"root:c:y", 6);
+        map.set_val_at(b"root:d:x", 7);
+
+        // Test 1: Graft child maps with remove_unset = true
+        // This should replace children 'a' and 'c', and remove 'b' and 'd'
+        let mut map_for_a: PathMap<i32> = PathMap::new();
+        map_for_a.set_val_at(b":new_a", 10);
+
+        let mut map_for_c: PathMap<i32> = PathMap::new();
+        map_for_c.set_val_at(b":new_c", 30);
+
+        let child_mask = ByteMask::from(b'a') | ByteMask::from(b'c');
+        let maps = vec![map_for_a, map_for_c];
+
+        let mut wz = map.write_zipper_at_path(b"root:");
+        wz.graft_child_maps(child_mask, maps, true);
+        drop(wz);
+
+        // After grafting with remove_unset=true, only 'a' and 'c' branches should exist
+        assert_eq!(map.get_val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(map.get_val_at(b"root:c:new_c"), Some(&30));
+        assert_eq!(map.get_val_at(b"root:a:x"), None);
+        assert_eq!(map.get_val_at(b"root:a:y"), None);
+        assert_eq!(map.get_val_at(b"root:b:x"), None);
+        assert_eq!(map.get_val_at(b"root:b:y"), None);
+        assert_eq!(map.get_val_at(b"root:d:x"), None);
+
+        // Test 2: Graft child maps with remove_unset = false
+        let mut map2: PathMap<i32> = PathMap::new();
+        map2.set_val_at(b"root:a:old", 100);
+        map2.set_val_at(b"root:b:old", 200);
+        map2.set_val_at(b"root:c:old", 300);
+
+        let mut map_for_b: PathMap<i32> = PathMap::new();
+        map_for_b.set_val_at(b":new_b", 222);
+
+        let child_mask2 = ByteMask::from(b'b');
+        let maps2 = vec![map_for_b];
+
+        let mut wz2 = map2.write_zipper_at_path(b"root:");
+        wz2.graft_child_maps(child_mask2, maps2, false);
+        drop(wz2);
+
+        // After grafting with remove_unset=false, 'a' and 'c' should remain, 'b' should be replaced
+        assert_eq!(map2.get_val_at(b"root:a:old"), Some(&100));
+        assert_eq!(map2.get_val_at(b"root:b:new_b"), Some(&222));
+        assert_eq!(map2.get_val_at(b"root:b:old"), None);
+        assert_eq!(map2.get_val_at(b"root:c:old"), Some(&300));
+
+        // Test 3: Graft multiple child maps
+        let mut map3: PathMap<i32> = PathMap::new();
+
+        let mut map_for_x: PathMap<i32> = PathMap::new();
+        map_for_x.set_val_at(b":data", 111);
+
+        let mut map_for_y: PathMap<i32> = PathMap::new();
+        map_for_y.set_val_at(b":info", 222);
+
+        let mut map_for_z: PathMap<i32> = PathMap::new();
+        map_for_z.set_val_at(b":stuff", 333);
+
+        let child_mask3 = ByteMask::from(b'x') | ByteMask::from(b'y') | ByteMask::from(b'z');
+        let maps3 = vec![map_for_x, map_for_y, map_for_z];
+
+        let mut wz3 = map3.write_zipper();
+        wz3.graft_child_maps(child_mask3, maps3, true);
+        drop(wz3);
+
+        assert_eq!(map3.get_val_at(b"x:data"), Some(&111));
+        assert_eq!(map3.get_val_at(b"y:info"), Some(&222));
+        assert_eq!(map3.get_val_at(b"z:stuff"), Some(&333));
+        assert_eq!(map3.val_count(), 3);
+
+        // Test 4: Empty mask should result in all branches removed when remove_unset=true
+        let mut map4: PathMap<i32> = PathMap::new();
+        map4.set_val_at(b"root:a", 1);
+        map4.set_val_at(b"root:b", 2);
+
+        let empty_mask = ByteMask::EMPTY;
+        let empty_maps: Vec<PathMap<i32>> = vec![];
+
+        let mut wz4 = map4.write_zipper_at_path(b"root:");
+        wz4.graft_child_maps(empty_mask, empty_maps, true);
+        drop(wz4);
+
+        assert_eq!(map4.get_val_at(b"root:a"), None);
+        assert_eq!(map4.get_val_at(b"root:b"), None);
     }
 
     crate::zipper::zipper_moving_tests::zipper_moving_tests!(write_zipper,
