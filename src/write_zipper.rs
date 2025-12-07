@@ -1457,71 +1457,51 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             let new_node_odrc = TrieNodeODRc::new_in(new_node, self.alloc.clone());
             self.graft_internal(Some(new_node_odrc));
         } else {
-            //GOAT: This is the slow default impl, because I didn't have time to get the impl below working
+            // If we don't have enough children to justify forcing a new ByteNode, just set the nodes
             if remove_unset {
-                self.remove_unmasked_branches(child_mask, false);
+                self.remove_branches(false);
             }
             let mut maps_iter = maps.into_iter();
             for child_byte in child_mask.iter() {
                 let map = maps_iter.next().expect("maps iterator returned fewer items than the number of set bits in child_mask");
-                self.descend_to_byte(child_byte);
-                self.graft_map(map);
-                self.ascend_byte();
+                let (src_root_node, src_root_val) = map.into_root();
+
+                if let Some(node) = src_root_node {
+                    self.set_node_at_child_path(&[child_byte], node)
+                }
+                if let Some(val) = src_root_val {
+                    let _ = self.set_val_at_child_path(&[child_byte], val);
+                }
             }
-
-
-            // // If we don't have enough children to justify forcing a new ByteNode, just set the nodes
-            // if remove_unset {
-            //     self.remove_branches(false);
-            // }
-
-            // let mut maps_iter = maps.into_iter();
-            // for child_byte in child_mask.iter() {
-            //     let map = maps_iter.next().expect("maps iterator returned fewer items than the number of set bits in child_mask");
-            //     let (src_root_node, src_root_val) = map.into_root();
-
-            //     if let Some(node) = src_root_node {
-            //         self.set_node_at_child_byte(child_byte, node)
-            //     }
-            //     if let Some(val) = src_root_val {
-            //         self.set_val_at_child_byte(child_byte, val)
-            //     }
-            // }
         }
     }
 
-    //GOAT.  These functions are both busted.  They need to handle the case where there is a child node at
-    // partial_key, and also we need to handle the case where the focus node gets upgraded.
-    // /// Sets a child node one byte below the focus
-    // #[inline]
-    // fn set_node_at_child_byte(&mut self, byte: u8, node: TrieNodeODRc<V, A>) {
-    //     let _ = self.in_zipper_mut_static_result(
-    //         |focus_node, partial_key| {
-    //             let mut key_buf = [0u8; MAX_NODE_KEY_BYTES + 1];
-    //             key_buf[0..partial_key.len()].copy_from_slice(partial_key);
-    //             key_buf[partial_key.len()] = byte;
-    //             let full_key = &key_buf[0..partial_key.len() + 1];
-    //             focus_node.node_set_branch(full_key, node)
-    //         },
-    //         |_, _| true
-    //     );
-    // }
+    /// Sets a child node at a position below the current focus
+    #[inline]
+    fn set_node_at_child_path(&mut self, path: &[u8], src: TrieNodeODRc<V, A>) {
+        let sub_branch_added = self.with_node_at_path(path,
+            |node, key| {
+                node.node_set_branch(key, src)
+            },
+            |_, _| true);
+        if sub_branch_added {
+            self.mend_root();
+            self.descend_to_internal();
+        }
+    }
 
-    //GOAT see above
-    // /// Sets a child value one byte below the focus
-    // #[inline]
-    // fn set_val_at_child_byte(&mut self, byte: u8, val: V) {
-    //     let _ = self.in_zipper_mut_static_result(
-    //         |focus_node, partial_key| {
-    //             let mut key_buf = [0u8; MAX_NODE_KEY_BYTES + 1];
-    //             key_buf[0..partial_key.len()].copy_from_slice(partial_key);
-    //             key_buf[partial_key.len()] = byte;
-    //             let full_key = &key_buf[0..partial_key.len() + 1];
-    //             focus_node.node_set_val(full_key, val)
-    //         },
-    //         |_, _| (None, true)
-    //     );
-    // }
+    /// Sets a child value one byte below the focus
+    #[inline]
+    fn set_val_at_child_path(&mut self, path: &[u8], val: V) -> Option<V> {
+        let (old_val, created_subnode) = self.with_node_at_path(path,
+            |node, remaining_key| node.node_set_val(remaining_key, val),
+            |_new_leaf_node, _remaining_key| (None, true));
+        if created_subnode {
+            self.mend_root();
+            self.descend_to_internal();
+        }
+        old_val
+    }
 
     /// See [ZipperWriting::join_into]
     pub fn join_into<Z: ZipperSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus where V: Lattice {
@@ -2160,6 +2140,43 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 replace_top_node(&mut self.focus_stack, &self.key, replacement_node);
                 retry_f(&mut self.focus_stack.top_mut().unwrap(), key)
             },
+        }
+    }
+
+    /// An internal function to follow a path relative to the zipper's focus, and perform an operation on the
+    /// node at the path
+    #[inline]
+    pub(crate) fn with_node_at_path<NodeF, RetryF, R>(&mut self, path: &[u8], node_f: NodeF, retry_f: RetryF) -> R
+        where
+        NodeF: FnOnce(&mut TaggedNodeRefMut<'_, V, A>, &[u8]) -> Result<R, TrieNodeODRc<V, A>>,
+        RetryF: FnOnce(&mut TaggedNodeRefMut<'_, V, A>, &[u8]) -> R,
+    {
+        let key = self.key.node_key();
+        let mut focus_node = self.focus_stack.top_mut().unwrap();
+        if let Some((key_bytes, child_node)) = focus_node.node_get_child_mut(key) {
+            debug_assert_eq!(key_bytes, key.len());
+            let (key, node) = node_along_path_mut(child_node, path, true);
+            let mut node_ref = node.make_mut();
+            match node_f(&mut node_ref, key) {
+                Ok(result) => result,
+                Err(replacement_node) => {
+                    *node = replacement_node;
+                    retry_f(&mut node.make_mut(), key)
+                },
+            }
+        } else {
+            self.in_zipper_mut_static_result(
+                |focus_node, partial_key| {
+                    let mut key_buf = [0u8; MAX_NODE_KEY_BYTES];
+                    key_buf[0..partial_key.len()].copy_from_slice(partial_key);
+                    //GOAT, currently this will panic if the path is too long to fit in the buffer, which means this internal API
+                    // isn't suitable for general-purpose path-based ops yet, but we're using it to deal with single-byte ops
+                    key_buf[partial_key.len()..partial_key.len()+path.len()].copy_from_slice(path);
+                    let full_key = &key_buf[0..partial_key.len()+path.len()];
+                    node_f(focus_node, full_key)
+                },
+                retry_f
+            )
         }
     }
 
