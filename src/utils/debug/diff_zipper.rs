@@ -258,6 +258,18 @@ impl<A: Zipper + ZipperIteration, B: Zipper + ZipperIteration> ZipperIteration f
 }
 
 impl <PZL : ZipperProduct, PZR : ZipperProduct> ZipperProduct for DiffZipper<PZL, PZR> {
+    fn focus_factor(&self) -> usize {
+        let a = self.a.focus_factor();
+        let b = self.b.focus_factor();
+        assert_eq!(a, b);
+        a
+    }
+    fn factor_count(&self) -> usize {
+        let a = self.a.factor_count();
+        let b = self.b.factor_count();
+        assert_eq!(a, b);
+        a
+    }
     fn path_indices(&self) -> &[usize] {
         let a = self.a.path_indices();
         let b = self.b.path_indices();

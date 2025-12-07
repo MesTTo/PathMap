@@ -32,7 +32,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ProductZ
     }
 }
 
-impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ProductZipper<'factor_z, 'trie, V, A> {
+impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipper<'factor_z, 'trie, V, A> {
     /// Creates a new `ProductZipper` from the provided zippers
     ///
     /// WARNING: passing `other_zippers` that are not at node roots may lead to a panic.  This is
@@ -91,29 +91,6 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 't
             let trie_ref: TrieRef<'trie, V, A> = other_z.trie_ref_at_path("").into();
             self.secondaries.push(trie_ref);
             self.source_zippers.push(Box::new(other_z));
-        }
-    }
-    /// Returns the number of factors composing the `ProductZipper`
-    ///
-    /// The minimum returned value will be 1 because the primary factor is counted.
-    pub fn factor_count(&self) -> usize {
-        self.secondaries.len() + 1
-    }
-    /// Returns the index of the factor containing the `ProductZipper` focus
-    ///
-    /// Returns `0` if the focus is in the primary factor.  The returned value will always be
-    /// `zipper.focus_factor() < zipper.factor_count()`.
-    pub fn focus_factor(&self) -> usize {
-        match self.factor_paths.last() {
-            Some(factor_path_len) => {
-                let factor_idx = self.factor_paths.len();
-                if *factor_path_len < self.path().len() {
-                    factor_idx
-                } else {
-                    factor_idx - 1
-                }
-            },
-            None => 0
         }
     }
     /// Reserves a path buffer of at least `len` bytes.  Will never shrink the path buffer
@@ -425,14 +402,6 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ,
         }
     }
 
-    /// Returns the index of the factor containing the `ProductZipper` focus
-    ///
-    /// Returns `0` if the focus is in the primary factor.  The returned value will always be
-    /// `zipper.focus_factor() < zipper.factor_count()`.
-    pub fn focus_factor(&self) -> usize {
-        self.factor_idx(true).map_or(0, |x| x + 1)
-    }
-
     /// Actual focus factor calculation.
     /// Returns a valid index into `self.factor_paths`, truncating to parents if requested.
     fn factor_idx(&self, truncate_up: bool) -> Option<usize> {
@@ -442,13 +411,6 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ,
             factor = factor.checked_sub(1)?;
         }
         Some(factor)
-    }
-
-    /// Returns the number of factors composing the `ProductZipper`
-    ///
-    /// The minimum returned value will be 1 because the primary factor is counted.
-    pub fn factor_count(&self) -> usize {
-        self.secondary.len() + 1
     }
 
     /// Returns `true` if the last active factor zipper is positioned at the end of a valid path
@@ -820,10 +782,21 @@ impl_zipper_debug!(
 
 /// Implemented on both [ProductZipper] types to provide abstraction across them
 pub trait ZipperProduct : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration {
+    /// Returns the number of factors composing the `ProductZipper`
+    ///
+    /// The minimum returned value will be 1 because the primary factor is counted.
+    fn factor_count(&self) -> usize;
+
+    /// Returns the index of the factor containing the `ProductZipper` focus
+    ///
+    /// Returns `0` if the focus is in the primary factor.  The returned value will always be
+    /// `zipper.focus_factor() < zipper.factor_count()`.
+    fn focus_factor(&self) -> usize;
+
     /// Returns a slice of the path indices that represent the end-points of the portion of the path from each
     /// factor
     ///
-    /// The returned slice will have a length of [`focus_factor`](Self::focus_factor), so the factor
+    /// The returned slice will have a length of [`focus_factor`](ZipperProduct::focus_factor), so the factor
     /// containing the current focus has will not be included.
     ///
     /// Indices will be offsets into the buffer returned by [path](ZipperMoving::path).  To get an offset into
@@ -832,15 +805,37 @@ pub trait ZipperProduct : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIte
     fn path_indices(&self) -> &[usize];
 }
 
-impl <'factor_z, 'trie, V : crate::TrieValue> ZipperProduct for ProductZipper<'factor_z, 'trie, V> {
+impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ZipperProduct for ProductZipper<'_, 'trie, V, A> {
+    fn factor_count(&self) -> usize {
+        self.secondaries.len() + 1
+    }
+    fn focus_factor(&self) -> usize {
+        match self.factor_paths.last() {
+            Some(factor_path_len) => {
+                let factor_idx = self.factor_paths.len();
+                if *factor_path_len < self.path().len() {
+                    factor_idx
+                } else {
+                    factor_idx - 1
+                }
+            },
+            None => 0
+        }
+    }
     fn path_indices(&self) -> &[usize] {
         &self.factor_paths
     }
 }
 
-impl <'trie, PZ, SZ, V : crate::TrieValue> ZipperProduct for ProductZipperG<'trie, PZ, SZ, V> where
+impl <'trie, PZ, SZ, V: crate::TrieValue> ZipperProduct for ProductZipperG<'trie, PZ, SZ, V> where
     PZ : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration,
     SZ : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration {
+    fn focus_factor(&self) -> usize {
+        self.factor_idx(true).map_or(0, |x| x + 1)
+    }
+    fn factor_count(&self) -> usize {
+        self.secondary.len() + 1
+    }
     fn path_indices(&self) -> &[usize] {
         &self.factor_paths
     }
@@ -858,6 +853,12 @@ impl <Z : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration> OneFacto
 }
 
 impl <Z : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration> ZipperProduct for OneFactor<Z> {
+    fn focus_factor(&self) -> usize {
+        0
+    }
+    fn factor_count(&self) -> usize {
+        1
+    }
     fn path_indices(&self) -> &[usize] {
         &[]
     }
