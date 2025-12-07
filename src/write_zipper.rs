@@ -1851,6 +1851,12 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         let node_was_none;
         let src = read_zipper.get_focus();
         let self_focus = self.get_focus();
+        let self_focus = self_focus.try_as_tagged().and_then(|node| {
+            match node.node_is_empty() {
+                true => None,
+                false => Some(node)
+            }
+        });
         let node_status = if src.is_none() {
             if self_focus.is_none() {
                 node_was_none = true;
@@ -1860,11 +1866,15 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 AlgebraicStatus::Identity
             }
         } else {
-            match self_focus.try_as_tagged() {
+            match self_focus {
                 Some(self_node) => {
                     node_was_none = false;
+//GOAT, I'm in the middle of deciding what I want to do about write_zipper_subtract_into_test2.
+// println!("BEFORE src: {src:?}");
+// println!("BEFORE self_node: {self_node:?}");
                     match self_node.psubtract_dyn(src.as_tagged()) {
                         AlgebraicResult::Element(diff) => {
+// println!("AFTER diff: {diff:?}");
                             self.graft_internal(Some(diff));
                             AlgebraicStatus::Element
                         },
