@@ -3,7 +3,7 @@ use maybe_dangling::MaybeDangling;
 use core::ptr::NonNull;
 
 use crate::alloc::{Allocator, GlobalAlloc};
-use crate::utils::ByteMask;
+use crate::utils::{ByteMask, BitMask};
 use crate::trie_node::*;
 use crate::PathMap;
 use crate::zipper::*;
@@ -311,6 +311,7 @@ impl<V: Clone + Send + Sync, Z, A: Allocator> ZipperWriting<V, A> for &mut Z whe
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { (**self).zipper_head() }
     fn graft<RZ: ZipperSubtries<V, A>>(&mut self, read_zipper: &RZ) { (**self).graft(read_zipper) }
     fn graft_map(&mut self, map: PathMap<V, A>) { (**self).graft_map(map) }
+    fn graft_child_maps<I: IntoIterator<Item=PathMap<V, A>>>(&mut self, child_mask: ByteMask, maps: I, remove_unset: bool) { (**self).graft_child_maps(child_mask, maps, remove_unset) }
     fn join_into<RZ: ZipperSubtries<V, A>>(&mut self, read_zipper: &RZ) -> AlgebraicStatus where V: Lattice { (**self).join_into(read_zipper) }
     fn join_map_into(&mut self, map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice { (**self).join_map_into(map) }
     fn join_into_take<RZ: ZipperSubtries<V, A> + ZipperWriting<V, A>>(&mut self, src_zipper: &mut RZ, prune: bool) -> AlgebraicStatus where V: Lattice { (**self).join_into_take(src_zipper, prune) }
@@ -464,6 +465,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { self.z.zipper_head() }
     fn graft<Z: ZipperSubtries<V, A>>(&mut self, read_zipper: &Z) { self.z.graft(read_zipper) }
     fn graft_map(&mut self, map: PathMap<V, A>) { self.z.graft_map(map) }
+    fn graft_child_maps<I: IntoIterator<Item=PathMap<V, A>>>(&mut self, child_mask: ByteMask, maps: I, remove_unset: bool) { self.z.graft_child_maps(child_mask, maps, remove_unset) }
     fn join_into<Z: ZipperSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus where V: Lattice { self.z.join_into(read_zipper) }
     fn join_map_into(&mut self, map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice { self.z.join_map_into(map) }
     fn join_into_take<Z: ZipperSubtries<V, A> + ZipperWriting<V, A>>(&mut self, src_zipper: &mut Z, prune: bool) -> AlgebraicStatus where V: Lattice { self.z.join_into_take(src_zipper, prune) }
@@ -618,6 +620,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { self.z.zipper_head() }
     fn graft<Z: ZipperSubtries<V, A>>(&mut self, read_zipper: &Z) { self.z.graft(read_zipper) }
     fn graft_map(&mut self, map: PathMap<V, A>) { self.z.graft_map(map) }
+    fn graft_child_maps<I: IntoIterator<Item=PathMap<V, A>>>(&mut self, child_mask: ByteMask, maps: I, remove_unset: bool) { self.z.graft_child_maps(child_mask, maps, remove_unset) }
     fn join_into<Z: ZipperSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus where V: Lattice { self.z.join_into(read_zipper) }
     fn join_map_into(&mut self, map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice { self.z.join_map_into(map) }
     fn join_into_take<Z: ZipperSubtries<V, A> + ZipperWriting<V, A>>(&mut self, src_zipper: &mut Z, prune: bool) -> AlgebraicStatus where V: Lattice { self.z.join_into_take(src_zipper, prune) }
@@ -789,6 +792,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperWriting<V, A> for Write
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { self.z.zipper_head() }
     fn graft<Z: ZipperSubtries<V, A>>(&mut self, read_zipper: &Z) { self.z.graft(read_zipper) }
     fn graft_map(&mut self, map: PathMap<V, A>) { self.z.graft_map(map) }
+    fn graft_child_maps<I: IntoIterator<Item=PathMap<V, A>>>(&mut self, child_mask: ByteMask, maps: I, remove_unset: bool) { self.z.graft_child_maps(child_mask, maps, remove_unset) }
     fn join_into<Z: ZipperSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus where V: Lattice { self.z.join_into(read_zipper) }
     fn join_map_into(&mut self, map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice { self.z.join_map_into(map) }
     fn join_into_take<Z: ZipperSubtries<V, A> + ZipperWriting<V, A>>(&mut self, src_zipper: &mut Z, prune: bool) -> AlgebraicStatus where V: Lattice { self.z.join_into_take(src_zipper, prune) }
@@ -1424,6 +1428,101 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             None => self.remove_val(false)
         };
     }
+
+    /// Optimized implementation of [ZipperWriting::graft_child_maps] for WriteZipperCore
+    ///
+    /// This implementation constructs a new node with the appropriate children directly,
+    /// rather than descending/ascending for each child.
+    pub fn graft_child_maps<I: IntoIterator<Item=PathMap<V, A>>>(&mut self, child_mask: ByteMask, maps: I, remove_unset: bool) {
+        let map_count = child_mask.count_bits();
+
+        // If we're replacing all children, and we have enough children to justify a ByteNode,
+        // then we want to build a new node with the children from the maps
+        if map_count > 2 && remove_unset {
+            //GOAT, we could add a fast-path for `map_count > 2 && !remove_unset`, but for now
+            // we'll let the slow-path handle it, since it requires logic to upgrade the focus_node to ByteNode
+
+            let mut new_node = crate::dense_byte_node::DenseByteNode::with_capacity_in(map_count, self.alloc.clone());
+            let mut maps_iter = maps.into_iter();
+            for child_byte in child_mask.iter() {
+                let map = maps_iter.next().expect("maps iterator returned fewer items than the number of set bits in child_mask");
+                let (src_root_node, src_root_val) = map.into_root();
+                if let Some(node) = src_root_node {
+                    new_node.set_child(child_byte, node);
+                }
+                if let Some(val) = src_root_val {
+                    new_node.set_val(child_byte, val);
+                }
+            }
+            let new_node_odrc = TrieNodeODRc::new_in(new_node, self.alloc.clone());
+            self.graft_internal(Some(new_node_odrc));
+        } else {
+            //GOAT: This is the slow default impl, because I didn't have time to get the impl below working
+            if remove_unset {
+                self.remove_unmasked_branches(child_mask, false);
+            }
+            let mut maps_iter = maps.into_iter();
+            for child_byte in child_mask.iter() {
+                let map = maps_iter.next().expect("maps iterator returned fewer items than the number of set bits in child_mask");
+                self.descend_to_byte(child_byte);
+                self.graft_map(map);
+                self.ascend_byte();
+            }
+
+
+            // // If we don't have enough children to justify forcing a new ByteNode, just set the nodes
+            // if remove_unset {
+            //     self.remove_branches(false);
+            // }
+
+            // let mut maps_iter = maps.into_iter();
+            // for child_byte in child_mask.iter() {
+            //     let map = maps_iter.next().expect("maps iterator returned fewer items than the number of set bits in child_mask");
+            //     let (src_root_node, src_root_val) = map.into_root();
+
+            //     if let Some(node) = src_root_node {
+            //         self.set_node_at_child_byte(child_byte, node)
+            //     }
+            //     if let Some(val) = src_root_val {
+            //         self.set_val_at_child_byte(child_byte, val)
+            //     }
+            // }
+        }
+    }
+
+    //GOAT.  These functions are both busted.  They need to handle the case where there is a child node at
+    // partial_key, and also we need to handle the case where the focus node gets upgraded.
+    // /// Sets a child node one byte below the focus
+    // #[inline]
+    // fn set_node_at_child_byte(&mut self, byte: u8, node: TrieNodeODRc<V, A>) {
+    //     let _ = self.in_zipper_mut_static_result(
+    //         |focus_node, partial_key| {
+    //             let mut key_buf = [0u8; MAX_NODE_KEY_BYTES + 1];
+    //             key_buf[0..partial_key.len()].copy_from_slice(partial_key);
+    //             key_buf[partial_key.len()] = byte;
+    //             let full_key = &key_buf[0..partial_key.len() + 1];
+    //             focus_node.node_set_branch(full_key, node)
+    //         },
+    //         |_, _| true
+    //     );
+    // }
+
+    //GOAT see above
+    // /// Sets a child value one byte below the focus
+    // #[inline]
+    // fn set_val_at_child_byte(&mut self, byte: u8, val: V) {
+    //     let _ = self.in_zipper_mut_static_result(
+    //         |focus_node, partial_key| {
+    //             let mut key_buf = [0u8; MAX_NODE_KEY_BYTES + 1];
+    //             key_buf[0..partial_key.len()].copy_from_slice(partial_key);
+    //             key_buf[partial_key.len()] = byte;
+    //             let full_key = &key_buf[0..partial_key.len() + 1];
+    //             focus_node.node_set_val(full_key, val)
+    //         },
+    //         |_, _| (None, true)
+    //     );
+    // }
+
     /// See [ZipperWriting::join_into]
     pub fn join_into<Z: ZipperSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus where V: Lattice {
         let src = read_zipper.get_focus();
@@ -4557,8 +4656,8 @@ mod tests {
 
         // After grafting with remove_unset=false, 'a' and 'c' should remain, 'b' should be replaced
         assert_eq!(map2.get_val_at(b"root:a:old"), Some(&100));
-        assert_eq!(map2.get_val_at(b"root:b:new_b"), Some(&222));
         assert_eq!(map2.get_val_at(b"root:b:old"), None);
+        assert_eq!(map2.get_val_at(b"root:b:new_b"), Some(&222));
         assert_eq!(map2.get_val_at(b"root:c:old"), Some(&300));
 
         // Test 3: Graft multiple child maps

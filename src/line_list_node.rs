@@ -518,6 +518,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         None
     }
     /// If the node has a sentinel empty node in either slot with a key that's a subset of `key` then remove it
+    #[inline]
     fn remove_dangling_payload_along_key(&mut self, key: &[u8]) {
         if self.is_used::<0>() && self.is_child_ptr::<0>() {
             if unsafe { &self.val_or_child0.child }.is_empty() {
@@ -955,14 +956,14 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             return Ok((Some(ValOrChild::from_union::<IS_CHILD>(payload)), false));
         }
 
+        //If we have an empty (dangling) payload anywhere along the new key, remove it
+        self.remove_dangling_payload_along_key(key);
+
         //If this node is empty, insert the new key-payload into slot_0
         if !self.is_used::<0>() {
             let created_subnode = unsafe{ self.set_payload_0_no_overflow(key, IS_CHILD, payload) };
             return Ok((None, created_subnode))
         }
-
-        //If we have an empty (dangling) payload anywhere along the new key, remove it
-        self.remove_dangling_payload_along_key(key);
 
         //If the key has overlap with slot_0, split the key, and add the payload to the child
         let node_key_0 = unsafe{ self.key_unchecked::<0>() };
