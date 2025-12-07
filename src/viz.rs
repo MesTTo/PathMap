@@ -437,6 +437,32 @@ mod test {
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
+    /// From the Rust lightning talk
+    #[test]
+    fn person_viz() {
+        let mut hand = PathMap::<char>::new();
+        hand.insert("Finger.0-Thumb", '👍');
+        hand.insert("Finger.1-Index", '🫵');
+        hand.insert("Finger.2-Middle", '🖕');
+        hand.insert("Finger.3-Ring", '💍');
+        hand.insert("Finger.4-Pinky", '🤙');
+
+        let mut body = PathMap::<char>::new();
+        body.insert("0-Head.0-Eyes", '👀');
+        body.insert("0-Head.1-Nose", '🤥');
+        body.insert("0-Head.3-Mouth", '👄');
+
+        let mut wz = body.write_zipper();
+        wz.move_to_path("1-Hand.0-Left.");
+        wz.graft_map(hand.clone());
+        wz.move_to_path("1-Hand.1-Right.");
+        wz.graft_map(hand);
+
+        let mut out_buf = Vec::new();
+        viz_maps(&[body], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: true }, &mut out_buf).unwrap();
+        // println!("{}", String::from_utf8_lossy(&out_buf));
+    }
+
     #[test]
     fn fizzbuzz() {
         let n = 50;
