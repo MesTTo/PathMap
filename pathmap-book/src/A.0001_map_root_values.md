@@ -29,7 +29,7 @@ This still may be preferable to the currently-implemented design however, as it'
 
 ## Alternative 2: Redo the abstract node interface to change CoFree assumption
 
-The node contract expressed throught the [`TrieNode`] trait dictates that a node never holds a value at its root.  Instead the current trait dictates that an associated value is owned by the parent.  However this mismatch is in tension with the external API.
+The node contract expressed throught the `TrieNode` trait dictates that a node never holds a value at its root.  Instead the current trait dictates that an associated value is owned by the parent.  However this mismatch is in tension with the external API.
 
 I think my preferred fix would be to change the trait methods to reflect the implications of values associated with node roots.
 

@@ -131,3 +131,11 @@
 [`val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValues.html#tymethod.val
 [`witness`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlyConditionalValues.html#tymethod.witness
 [`restrict`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.restrict
+[`Send`]: https://doc.rust-lang.org/std/marker/trait.Send.html
+[`Sync`]: https://doc.rust-lang.org/std/marker/trait.Sync.html
+[`is_shared`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperConcrete.html#tymethod.is_shared
+[`join`]: https://docs.rs/pathmap/latest/pathmap/struct.PathMap.html#method.join
+[`meet`]: https://docs.rs/pathmap/latest/pathmap/struct.PathMap.html#method.meet
+[`subtract`]: https://docs.rs/pathmap/latest/pathmap/struct.PathMap.html#method.subtract
+[`restrict`]: https://docs.rs/pathmap/latest/pathmap/struct.PathMap.html#method.restrict
+[`join_k_path_into`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.join_k_path_into
