@@ -49,3 +49,5 @@ Another consideration is whether we want a solution that extends beyond just cat
 * Eventually support a `logical_cached_cata` (name subject to debate) that provides a path arg to the closure, and the prefix that becomes part of the cached value's hash (option 2).
 
 * Update ACT format and zipper to support structural sharing.
+
+{{#include api_links.md}}

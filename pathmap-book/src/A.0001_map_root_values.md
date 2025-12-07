@@ -65,3 +65,5 @@ Either of these changes have the promise to greatly simplify the code and probab
 I personally believe Alternative 2 is a better option, not least because I think the external API is actually ok as it is and avoiding big changes to that limits the disruption to the internals of PathMap.  However both options imply a massive amount of churn.
 
 Therefore, I think much more complete fuzz tests are a prerequisite to embarking on either change.
+
+{{#include api_links.md}}

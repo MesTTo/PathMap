@@ -48,3 +48,5 @@ GOAT: Multi-Threaded Map-Reduce
 - [Scouting WriteZipper](./A.0004_scouting_write_zipper.md)
 - [Cached Cata and Paths](./A.0005_cached_cata_and_path_visibility.md)
 
+
+{{#include api_links.md}}

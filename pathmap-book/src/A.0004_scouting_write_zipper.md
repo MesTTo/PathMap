@@ -60,3 +60,5 @@ My current proposed solution is to essentilly postpone the `make_mut` operation 
 This sounds like twice as much traversal work - and it is, but at least the re-traversal is likely to hit cache.  More importantly, if it saves even a little bit of unnecessary node duplication (and thus breaking sharing) then I feel that it will be a net win.
 
 I'm open to alternative ideas, however.
+
+{{#include api_links.md}}

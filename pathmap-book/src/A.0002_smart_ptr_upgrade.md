@@ -388,3 +388,5 @@ Probably unneeded, as it only allows for a handful more path bytes above the LOU
 A format appropriate for zero-sized V types, able to express dangling paths or paths terminating in values with only 2 bits-per-path.
 
 GOAT TODO...  We should probably measure whether a Star node would ever get used.  In addition to identifying other node formats we could design to address frequently observed patterns.
+
+{{#include api_links.md}}
