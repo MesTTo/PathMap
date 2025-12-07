@@ -1,6 +1,6 @@
 [package]
 name = "pathmap"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -11,13 +11,16 @@ categories = ["algorithms", "data-structures", "database-implementations"]
 readme = "README.md"
 exclude = ["target/", "benches/", "pathmap-book/", ".*"]
 
+[package.metadata.docs.rs]
+rustc-args = ["-C", "target-feature=+aes,+sse2"]
+
 [lib]
 name = "pathmap"
 path = "src/lib.rs"
 
 [dependencies]
 # pathmap-derive = { path = "./pathmap-derive" }
-pathmap-derive = { version = "0.2.0-alpha0" }
+pathmap-derive = { version = "0.2.1" }
 maybe-dangling = "0.1.1"
 dyn-clone = "1.0.17" # NOTE, we can eliminate this when we eliminate `!slim_ptrs`
 local-or-heap = "0.1.0"
