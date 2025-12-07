@@ -1150,6 +1150,15 @@ mod tests {
         let _wz = zh.write_zipper_at_exclusive_path([4, 196, 95, 95, 95, 95, 193, 95, 1, 193, 95, 1, 193, 95]).unwrap();
     }
 
+    /// Tests using a ZipperHead to create a zipper at a dangling path that already exists
+    #[test]
+    fn zipper_headk() {
+        let mut map: PathMap<()> = PathMap::new();
+        map.create_path(&[1, 255, 0]);
+        let zh = map.zipper_head();
+        let _rz = zh.read_zipper_at_path(&[1, 255, 0]).unwrap();
+    }
+
     #[test]
     fn hierarchical_zipper_heads1() {
         let mut map = PathMap::<isize>::new();

@@ -2633,6 +2633,11 @@ mod opaque_dyn_rc_trie_node {
         /// Increases the node refcount.  See the implementation of Arc::clone in the stdlib
         #[inline]
         fn clone(&self) -> Self {
+            // Empty nodes are sentinels with invalid pointers (0xBAADF00D), don't need refcounting
+            if self.is_empty() {
+                return Self{ ptr: self.ptr.clone(), alloc: MaybeUninit::uninit() };
+            }
+
             //NOTE: This explanation copied verbatim from the Arc implementation in stdlib
             // -------------------------------------------------------------------------------
             // Using a relaxed ordering is alright here, as knowledge of the
@@ -2837,6 +2842,9 @@ mod opaque_dyn_rc_trie_node {
         /// Ensures that we hold the only reference to a node, by cloning it if necessary
         #[inline]
         pub(crate) fn make_unique(&mut self) {
+            // Empty nodes are sentinels and cannot be made unique/mutable
+            assert!(!self.is_empty(), "Attempted to make_unique on an empty sentinel node");
+
             let (ptr, _tag) = self.ptr.get_raw_parts();
 
             if unsafe{ &*ptr }.compare_exchange(1, 0, Acquire, Relaxed).is_err() {
