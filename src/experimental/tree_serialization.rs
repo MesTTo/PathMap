@@ -56,7 +56,7 @@ pub fn deserialize_fork<V: TrieValue, A: Allocator, WZ : ZipperWriting<V, A> + z
 
 #[cfg(test)]
 mod tests {
-    use crate::tree_serialization::{serialize_fork, deserialize_fork};
+    use crate::experimental::tree_serialization::{serialize_fork, deserialize_fork};
     use crate::PathMap;
 
     #[ignore] //GOAT, re-enable if/when this code is ready.

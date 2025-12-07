@@ -123,11 +123,7 @@ pub mod alloc;
 pub mod viz;
 
 #[cfg(feature = "serialization")]
-pub mod serialization;
-#[cfg(feature = "serialization")]
 pub mod paths_serialization;
-#[cfg(feature = "serialization")]
-pub mod tree_serialization;
 
 mod trie_node;
 mod write_zipper;

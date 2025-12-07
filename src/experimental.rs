@@ -9,6 +9,11 @@ use crate::ring::{AlgebraicStatus, DistributiveLattice, Lattice};
 use crate::TrieValue;
 use crate::write_zipper::write_zipper_priv::WriteZipperPriv;
 
+#[cfg(feature = "serialization")]
+pub mod serialization;
+#[cfg(feature = "serialization")]
+pub mod tree_serialization;
+
 struct FullZipper {
     path: Vec<u8>
 }

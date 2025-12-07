@@ -15,9 +15,7 @@ Check out the [book](https://pathmap-rs.github.io/).
 
 The crate name **`pathmap`** was previously used by **Canmi** for a different project, 
 [`kvmap`](https://github.com/canmi21/kvmap) *(formerly published as `pathmap`)*, 
-which is a **SQL-driven key-value store**.
-
-If you are looking for Canmi’s SQL-based KVMap project, please visit:  
+which is a SQL-driven key-value store.  If you are looking for Canmi’s SQL-based KVMap project, please visit:  
 [https://github.com/canmi21/kvmap](https://github.com/canmi21/kvmap)
 
 ## Getting Started
@@ -25,10 +23,10 @@ If you are looking for Canmi’s SQL-based KVMap project, please visit:
 Add the following to your Cargo.toml:
 
 ```toml
-pathmap = ">=0.2.0-alpha0, <0.3.0"
+pathmap = "0.2"
 ```
 
-**NOTE** This is pre-release software and there is likely to be further API churn.  Specify an exact version to be insulated from the churn until the `0.2.0` release.
+**NOTE** This is pre-release software and there is going to be further API churn.  We will try to respect semver, but you may want to specify an exact version to be insulated from the churn.
 
 ## Optional Cargo features
 
