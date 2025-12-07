@@ -4603,7 +4603,7 @@ mod tests {
     }
 
     #[test]
-    fn write_zipper_graft_child_maps_test() {
+    fn write_zipper_graft_child_maps_test1() {
         // Create a base map with some initial structure
         let mut map: PathMap<i32> = PathMap::new();
         map.set_val_at(b"root:a:x", 1);
@@ -4698,6 +4698,136 @@ mod tests {
 
         assert_eq!(map4.get_val_at(b"root:a"), None);
         assert_eq!(map4.get_val_at(b"root:b"), None);
+    }
+
+    #[test]
+    fn write_zipper_graft_child_maps_test2() {
+        // This test explicitly covers all 4 code paths through the optimized graft_child_maps implementation:
+        // 1. map_count < 2 && remove_unset == true
+        // 2. map_count < 2 && remove_unset == false
+        // 3. map_count > 2 && remove_unset == true
+        // 4. map_count > 2 && remove_unset == false
+
+        // Path 1: map_count < 2 (specifically 1) && remove_unset == true
+        // This tests the slow path with a single child being grafted and other children removed
+        let mut map1: PathMap<i32> = PathMap::new();
+        map1.set_val_at(b"root:a:old1", 1);
+        map1.set_val_at(b"root:b:old2", 2);
+        map1.set_val_at(b"root:c:old3", 3);
+
+        let mut map_for_a: PathMap<i32> = PathMap::new();
+        map_for_a.set_val_at(b":new_a", 100);
+        map_for_a.set_val_at(b":nested:deep", 101);
+
+        let child_mask1 = ByteMask::from(b'a');  // Only 1 child, so map_count == 1
+        let maps1 = vec![map_for_a];
+
+        let mut wz1 = map1.write_zipper_at_path(b"root:");
+        wz1.graft_child_maps(child_mask1, maps1, true);
+        drop(wz1);
+
+        // Only 'a' branch should exist, 'b' and 'c' should be removed
+        assert_eq!(map1.get_val_at(b"root:a:new_a"), Some(&100));
+        assert_eq!(map1.get_val_at(b"root:a:nested:deep"), Some(&101));
+        assert_eq!(map1.get_val_at(b"root:a:old1"), None);
+        assert_eq!(map1.get_val_at(b"root:b:old2"), None);
+        assert_eq!(map1.get_val_at(b"root:c:old3"), None);
+
+        // Path 2: map_count < 2 (specifically 1) && remove_unset == false
+        // This tests the slow path with a single child being grafted but other children preserved
+        let mut map2: PathMap<i32> = PathMap::new();
+        map2.set_val_at(b"root:x:old_x", 10);
+        map2.set_val_at(b"root:y:old_y", 20);
+        map2.set_val_at(b"root:z:old_z", 30);
+
+        let mut map_for_y: PathMap<i32> = PathMap::new();
+        map_for_y.set_val_at(b":new_y", 200);
+
+        let child_mask2 = ByteMask::from(b'y');  // Only 1 child, so map_count == 1
+        let maps2 = vec![map_for_y];
+
+        let mut wz2 = map2.write_zipper_at_path(b"root:");
+        wz2.graft_child_maps(child_mask2, maps2, false);
+        drop(wz2);
+
+        // 'y' should be replaced, 'x' and 'z' should be preserved
+        assert_eq!(map2.get_val_at(b"root:x:old_x"), Some(&10));
+        assert_eq!(map2.get_val_at(b"root:y:old_y"), None);
+        assert_eq!(map2.get_val_at(b"root:y:new_y"), Some(&200));
+        assert_eq!(map2.get_val_at(b"root:z:old_z"), Some(&30));
+
+        // Path 3: map_count > 2 (specifically 3) && remove_unset == true
+        // This tests the FAST PATH optimized implementation that builds a new ByteNode directly
+        let mut map3: PathMap<i32> = PathMap::new();
+        map3.set_val_at(b"root:a:old", 1);
+        map3.set_val_at(b"root:b:old", 2);
+        map3.set_val_at(b"root:c:old", 3);
+        map3.set_val_at(b"root:d:old", 4);
+        map3.set_val_at(b"root:e:old", 5);
+
+        let mut map_for_a: PathMap<i32> = PathMap::new();
+        map_for_a.set_val_at(b":new_a", 300);
+
+        let mut map_for_c: PathMap<i32> = PathMap::new();
+        map_for_c.set_val_at(b":new_c", 301);
+
+        let mut map_for_e: PathMap<i32> = PathMap::new();
+        map_for_e.set_val_at(b":new_e", 302);
+
+        let child_mask3 = ByteMask::from(b'a') | ByteMask::from(b'c') | ByteMask::from(b'e');  // 3 children, map_count == 3
+        let maps3 = vec![map_for_a, map_for_c, map_for_e];
+
+        let mut wz3 = map3.write_zipper_at_path(b"root:");
+        wz3.graft_child_maps(child_mask3, maps3, true);
+        drop(wz3);
+
+        // Only 'a', 'c', and 'e' branches should exist, 'b' and 'd' should be removed
+        assert_eq!(map3.get_val_at(b"root:a:new_a"), Some(&300));
+        assert_eq!(map3.get_val_at(b"root:c:new_c"), Some(&301));
+        assert_eq!(map3.get_val_at(b"root:e:new_e"), Some(&302));
+        assert_eq!(map3.get_val_at(b"root:a:old"), None);
+        assert_eq!(map3.get_val_at(b"root:b:old"), None);
+        assert_eq!(map3.get_val_at(b"root:d:old"), None);
+        assert_eq!(map3.val_count(), 3);
+
+        // Path 4: map_count > 2 (specifically 4) && remove_unset == false
+        // This tests the slow path with multiple children being grafted but others preserved
+        let mut map4: PathMap<i32> = PathMap::new();
+        map4.set_val_at(b"root:p:old_p", 40);
+        map4.set_val_at(b"root:q:old_q", 41);
+        map4.set_val_at(b"root:r:old_r", 42);
+        map4.set_val_at(b"root:s:old_s", 43);
+        map4.set_val_at(b"root:t:old_t", 44);
+
+        let mut map_for_p: PathMap<i32> = PathMap::new();
+        map_for_p.set_val_at(b":new_p", 400);
+
+        let mut map_for_q: PathMap<i32> = PathMap::new();
+        map_for_q.set_val_at(b":new_q", 401);
+
+        let mut map_for_r: PathMap<i32> = PathMap::new();
+        map_for_r.set_val_at(b":new_r", 402);
+
+        let mut map_for_s: PathMap<i32> = PathMap::new();
+        map_for_s.set_val_at(b":new_s", 403);
+
+        let child_mask4 = ByteMask::from(b'p') | ByteMask::from(b'q') | ByteMask::from(b'r') | ByteMask::from(b's');  // 4 children, map_count == 4
+        let maps4 = vec![map_for_p, map_for_q, map_for_r, map_for_s];
+
+        let mut wz4 = map4.write_zipper_at_path(b"root:");
+        wz4.graft_child_maps(child_mask4, maps4, false);
+        drop(wz4);
+
+        // 'p', 'q', 'r', 's' should be replaced, 't' should be preserved
+        assert_eq!(map4.get_val_at(b"root:p:old_p"), None);
+        assert_eq!(map4.get_val_at(b"root:p:new_p"), Some(&400));
+        assert_eq!(map4.get_val_at(b"root:q:old_q"), None);
+        assert_eq!(map4.get_val_at(b"root:q:new_q"), Some(&401));
+        assert_eq!(map4.get_val_at(b"root:r:old_r"), None);
+        assert_eq!(map4.get_val_at(b"root:r:new_r"), Some(&402));
+        assert_eq!(map4.get_val_at(b"root:s:old_s"), None);
+        assert_eq!(map4.get_val_at(b"root:s:new_s"), Some(&403));
+        assert_eq!(map4.get_val_at(b"root:t:old_t"), Some(&44));  // 't' preserved
     }
 
     crate::zipper::zipper_moving_tests::zipper_moving_tests!(write_zipper,
