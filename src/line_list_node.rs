@@ -1139,12 +1139,15 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         let path = unsafe{ self.key_unchecked::<SLOT>() };
         if let Some((onward_key, onward_node)) = follow_path(other, path) {
             if self.is_child_ptr::<SLOT>() {
-                let self_onward_link = unsafe{ self.child_in_slot::<SLOT>() };
+                let self_onward_link = unsafe{ self.child_in_slot::<SLOT>() }.as_tagged();
                 let difference = if onward_key.len() == 0 {
-                    self_onward_link.as_tagged().psubtract_dyn(onward_node)
+                    self_onward_link.psubtract_dyn(onward_node)
                 } else {
+                    if self_onward_link.node_is_empty() {
+                        return AlgebraicResult::None
+                    }
                     match onward_node.get_node_at_key(onward_key).into_option() {
-                        Some(other_onward_node) => self_onward_link.as_tagged().psubtract_dyn(other_onward_node.as_tagged()),
+                        Some(other_onward_node) => self_onward_link.psubtract_dyn(other_onward_node.as_tagged()),
                         None => return AlgebraicResult::Identity(SELF_IDENT)
                     }
                 };

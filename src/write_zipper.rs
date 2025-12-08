@@ -3243,10 +3243,91 @@ mod tests {
         drop(zh);
         assert_eq!(btm.read_zipper().child_count(), 1);
         assert_eq!(btm.read_zipper().child_mask(), ByteMask::from(1));
+    }
 
-        // let mut out_buf = Vec::new();
-        // crate::viz::viz_maps(&[btm], &crate::viz::DrawConfig{ ascii: false, hide_value_paths: false, minimize_values: false, logical: false }, &mut out_buf).unwrap();
-        // println!("{}", String::from_utf8_lossy(&out_buf));
+    /// Tests `subtract_into` interactions specifically involving Dangling Paths
+    #[test]
+    fn write_zipper_subtract_into_test3() {
+        // Case 1: Value - Dangling Path (Same Path)
+        // Subtracting a path with NO value from a path WITH a value should change nothing.
+        {
+            let mut map: PathMap<()> = PathMap::new();
+            map.insert(b"a", ());
+            let mut sub: PathMap<()> = PathMap::new();
+            sub.create_path(b"a");
+
+            let mut wz = map.write_zipper();
+            let rz = sub.read_zipper();
+            wz.descend_to(b"a");
+            assert_eq!(wz.subtract_into(&rz, true), AlgebraicStatus::Identity);
+            drop(wz);
+            assert!(map.get_val_at(b"a").is_some());
+        }
+
+        // Case 2: Dangling Path - Value (Same Path)
+        // Subtracting a value from a dangling path should result in a removed path.
+        {
+            let mut map: PathMap<()> = PathMap::new();
+            map.create_path(b"b");
+            let mut sub: PathMap<()> = PathMap::new();
+            sub.insert(b"b", ());
+
+            let mut wz = map.write_zipper();
+            let rz = sub.read_zipper();
+            assert_eq!(wz.subtract_into(&rz, true), AlgebraicStatus::None);
+            drop(wz);
+            assert!(!map.path_exists_at(b"b"));
+        }
+
+        // Case 3: Dangling Path - Dangling Path (Same Path)
+        // Subtracting a dangling path from a dangling path should result in a removed path.
+        // (Empty - Empty -> Empty -> Prune)
+        {
+            let mut map: PathMap<()> = PathMap::new();
+            map.create_path(b"c");
+            let mut sub: PathMap<()> = PathMap::new();
+            sub.create_path(b"c");
+
+            let mut wz = map.write_zipper();
+            let rz = sub.read_zipper();
+            assert_eq!(wz.subtract_into(&rz, true), AlgebraicStatus::None);
+            drop(wz);
+            assert!(!map.path_exists_at(b"c"));
+        }
+
+        // Case 4: Dangling Path - Deep Value
+        // Subtracting a deep value from a shallow dangling path.
+        // 'map' has no value at 'd'. 'sub' has value at 'd/sub'.
+        // The result at 'd' is still no value, so it should be pruned.
+        {
+            let mut map: PathMap<()> = PathMap::new();
+            map.create_path(b"d");
+            let mut sub: PathMap<()> = PathMap::new();
+            sub.insert(b"d/sub", ());
+
+            let mut wz = map.write_zipper();
+            let rz = sub.read_zipper();
+            assert_eq!(wz.subtract_into(&rz, true), AlgebraicStatus::None);
+            drop(wz);
+            assert!(!map.path_exists_at(b"d"));
+        }
+
+        // Case 5: Deep Value - Dangling Path
+        // Subtracting a shallow dangling path from a deep value.
+        // 'map' has value at 'e/sub'. 'sub' has dangling path at 'e'.
+        // The dangling path at 'e' has no value to subtract from 'map's structure.
+        {
+            let mut map: PathMap<()> = PathMap::new();
+            map.insert(b"e/sub", ());
+            let mut sub: PathMap<()> = PathMap::new();
+            sub.create_path(b"e");
+
+            let mut wz = map.write_zipper();
+            let rz = sub.read_zipper();
+            assert_eq!(wz.subtract_into(&rz, true), AlgebraicStatus::Identity);
+            drop(wz);
+            assert!(map.get_val_at(b"e/sub").is_some());
+        }
     }
 
     /// Tests how `join_into` handles dangling path arguments (no values, just path structure)
