@@ -1729,6 +1729,10 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         rec_status.merge(val_status, true, true)
     }
     fn pmeet(&self, other: &OtherCf) -> AlgebraicResult<Self> {
+        //If two dangling paths meet, it's an identity result
+        if !self.has_rec() && !self.has_val() && !other.has_rec() && !other.has_val() {
+            return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)
+        }
         let rec = self.rec().pmeet(&other.rec());
         let val = self.val().pmeet(&other.val());
         self.combine_algebraic_results(other, rec, val)

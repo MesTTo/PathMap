@@ -3327,10 +3327,10 @@ mod tests {
         drop(zh2);
 
         // Verify the meet operation did what it should have
-        assert_eq!(btm.path_exists_at(&[1, 255, 0]), true);
-        assert_eq!(btm.path_exists_at(&[0, 255, 0]), true);
-        assert_eq!(btm.path_exists_at(&[0, 200, 5]), false);
-        assert_eq!(btm.path_exists_at(&[0, 255, 1]), false);
+        assert_eq!(btm2.path_exists_at(&[1, 255, 0]), true);
+        assert_eq!(btm2.path_exists_at(&[0, 255, 0]), true);
+        assert_eq!(btm2.path_exists_at(&[0, 200, 5]), false);
+        assert_eq!(btm2.path_exists_at(&[0, 255, 1]), false);
     }
 
     /// Tests whether the [WriteZipper::subtract_into] operation will do the right thing with the root value
