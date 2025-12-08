@@ -1507,7 +1507,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     pub fn join_into<Z: ZipperSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus where V: Lattice {
         let src = read_zipper.get_focus();
         let self_focus = self.get_focus();
-        if src.is_none() {
+        if src.is_none() || src.as_tagged().node_is_empty() {
             if self_focus.is_none() || self_focus.as_tagged().node_is_empty() {
                 return AlgebraicStatus::None
             } else {
@@ -2909,7 +2909,7 @@ mod tests {
     }
 
     #[test]
-    fn write_zipper_join_into_test() {
+    fn write_zipper_join_into_test1() {
         let a_keys = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
         let mut a: PathMap<u64> = a_keys.iter().enumerate().map(|(i, k)| (k, i as u64)).collect();
         assert_eq!(a.val_count(), 12);
@@ -2949,6 +2949,55 @@ mod tests {
         assert_eq!(a.get_val_at(b"root").unwrap(), &1005);
         assert_eq!(a.get_val_at(b"rough").unwrap(), &1006);
         assert_eq!(a.get_val_at(b"round").unwrap(), &1007);
+    }
+
+    /// Tests how `join_into` handles dangling path arguments (no values, just path structure)
+    #[test]
+    fn write_zipper_join_into_test2() {
+        // Test 1: join_into with read zipper at a dangling path
+        let mut btm: PathMap<()> = PathMap::new();
+        btm.create_path(&[1, 255, 0]);
+        let zh = btm.zipper_head();
+
+        let mut wz = zh.write_zipper_at_exclusive_path(&[0, 255, 0]).unwrap();
+        wz.create_path();
+        let rz = zh.read_zipper_at_path(&[1, 255, 0]).unwrap();
+        let alg_result = wz.join_into(&rz);
+        assert_eq!(alg_result, AlgebraicStatus::None); // Both zippers are at dangling paths
+        drop(wz);
+        drop(rz);
+        drop(zh);
+
+        // Verify both dangling paths exist but no values
+        assert_eq!(btm.get_val_at(&[0, 255, 0]), None);
+        assert_eq!(btm.get_val_at(&[1, 255, 0]), None);
+
+        // Test 2: join_into to move some dangling paths
+        let mut btm2: PathMap<()> = PathMap::new();
+        btm2.create_path(&[1, 255, 0]);
+        btm2.create_path(&[1, 255, 1]);
+        btm2.create_path(&[1, 200, 5]);
+        let zh2 = btm2.zipper_head();
+
+        let mut wz = zh2.write_zipper_at_exclusive_path(&[0]).unwrap();
+        let rz = zh2.read_zipper_at_path(&[1]).unwrap();
+        let alg_result = wz.join_into(&rz);
+        assert_eq!(alg_result, AlgebraicStatus::Element); // We created some new dangling paths
+
+        drop(wz);
+        drop(rz);
+        drop(zh2);
+
+        // Verify the structure was joined but no values exist
+        assert_eq!(btm2.path_exists_at(&[0, 255, 0]), true);
+        assert_eq!(btm2.path_exists_at(&[0, 255, 1]), true);
+        assert_eq!(btm2.path_exists_at(&[0, 200, 5]), true);
+        assert_eq!(btm2.get_val_at(&[0, 255, 0]), None);
+        assert_eq!(btm2.get_val_at(&[0, 255, 1]), None);
+        assert_eq!(btm2.get_val_at(&[0, 200, 5]), None);
+        assert_eq!(btm2.get_val_at(&[1, 255, 0]), None);
+        let rz = btm2.read_zipper();
+        assert_eq!(rz.child_count(), 2); // Should have both [0] and [1] branches
     }
 
     #[test]
@@ -3328,72 +3377,6 @@ mod tests {
             drop(wz);
             assert!(map.get_val_at(b"e/sub").is_some());
         }
-    }
-
-    /// Tests how `join_into` handles dangling path arguments (no values, just path structure)
-    #[test]
-    fn write_zipper_join_into_test2() {
-        // Test 1: join_into with read zipper at a dangling path
-        let mut btm: PathMap<()> = PathMap::new();
-        btm.create_path(&[1, 255, 0]);
-        let zh = btm.zipper_head();
-
-        let mut wz = zh.write_zipper_at_exclusive_path(&[0, 255, 0]).unwrap();
-        wz.create_path();
-        let rz = zh.read_zipper_at_path(&[1, 255, 0]).unwrap();
-        let alg_result = wz.join_into(&rz);
-        assert_eq!(alg_result, AlgebraicStatus::None); // Both are dangling, no values
-        drop(wz);
-        drop(rz);
-        drop(zh);
-
-        // Verify both dangling paths exist but no values
-        assert_eq!(btm.get_val_at(&[0, 255, 0]), None);
-        assert_eq!(btm.get_val_at(&[1, 255, 0]), None);
-
-        // Test 2: join_into from a higher-level dangling path
-        let mut btm2: PathMap<()> = PathMap::new();
-        btm2.create_path(&[1, 255, 0]);
-        btm2.create_path(&[1, 255, 1]);
-        btm2.create_path(&[1, 200, 5]);
-        let zh2 = btm2.zipper_head();
-
-        let mut wz = zh2.write_zipper_at_exclusive_path(&[0]).unwrap();
-        let rz = zh2.read_zipper_at_path(&[1]).unwrap();
-        let alg_result = wz.join_into(&rz);
-        assert_eq!(alg_result, AlgebraicStatus::None); // All paths are dangling, no values
-
-        drop(wz);
-        drop(rz);
-        drop(zh2);
-
-        // Verify the structure was joined but no values exist
-        assert_eq!(btm2.get_val_at(&[0, 255, 0]), None);
-        assert_eq!(btm2.get_val_at(&[0, 255, 1]), None);
-        assert_eq!(btm2.get_val_at(&[0, 200, 5]), None);
-        assert_eq!(btm2.get_val_at(&[1, 255, 0]), None);
-
-        // But the path structure should exist
-        let rz = btm2.read_zipper();
-        assert_eq!(rz.child_count(), 2); // Should have both [0] and [1] branches
-
-        // Test 3: join_into where write zipper is empty but read zipper has dangling paths
-        let mut btm3: PathMap<()> = PathMap::new();
-        btm3.create_path(&[1, 255, 0]);
-        btm3.create_path(&[1, 255, 1]);
-        let zh3 = btm3.zipper_head();
-
-        let mut wz = zh3.write_zipper_at_exclusive_path(&[0]).unwrap();
-        let rz = zh3.read_zipper_at_path(&[1]).unwrap();
-        let alg_result = wz.join_into(&rz);
-        assert_eq!(alg_result, AlgebraicStatus::None);
-        drop(wz);
-        drop(rz);
-
-        drop(zh3);
-        // Dangling paths should be copied to [0]
-        assert_eq!(btm3.get_val_at(&[0, 255, 0]), None);
-        assert_eq!(btm3.get_val_at(&[0, 255, 1]), None);
     }
 
     /// Tests how `meet_into` handles dangling path arguments (no values, just path structure)
