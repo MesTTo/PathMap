@@ -3001,7 +3001,7 @@ mod tests {
     }
 
     #[test]
-    fn write_zipper_join_take_test1() {
+    fn write_zipper_join_into_take_test1() {
         let keys = ["a:arrow", "a:bow", "a:cannon", "a:roman", "a:romane", "a:romanus", "a:romulus", "a:rubens", "a:ruber", "a:rubicon", "a:rubicundus", "a:rom'i",
             "b:road", "b:rod", "b:roll", "b:roof", "b:room", "b:root", "b:rough", "b:round"];
         let mut map: PathMap<u64> = keys.iter().enumerate().map(|(i, k)| (k, i as u64)).collect();
@@ -3062,6 +3062,57 @@ mod tests {
 
         assert_eq!(map.get_val_at(b"b:road"), None);
         assert_eq!(map.get_val_at(b"b:round"), None);
+    }
+
+    /// Tests how `join_into_take` handles dangling path arguments with prune parameter
+    #[test]
+    fn write_zipper_join_into_take_test2() {
+        // Test 1: Join and take dangling paths from [1] into [0] with prune=true
+        let mut btm: PathMap<()> = PathMap::new();
+        btm.create_path(&[1, 255, 0]);
+        btm.create_path(&[1, 255, 1]);
+        let zh = btm.zipper_head();
+
+        let mut wz = zh.write_zipper_at_exclusive_path(&[0, 255]).unwrap();
+        let mut src_wz = zh.write_zipper_at_exclusive_path(&[1]).unwrap();
+        src_wz.descend_to_byte(255);
+        let alg_result = wz.join_into_take(&mut src_wz, true);
+        assert_eq!(alg_result, AlgebraicStatus::Element); // All paths are dangling
+        drop(wz);
+        zh.cleanup_write_zipper(src_wz);
+        drop(zh);
+
+        // Dangling paths should be moved to [0] and removed from [1]
+        assert_eq!(btm.path_exists_at(&[1]), false);
+        assert_eq!(btm.path_exists_at(&[0, 255, 0]), true);
+        assert_eq!(btm.path_exists_at(&[0, 255, 1]), true);
+        assert_eq!(btm.get_val_at(&[0, 255, 0]), None);
+        assert_eq!(btm.get_val_at(&[0, 255, 1]), None);
+        let rz = btm.read_zipper();
+        assert_eq!(rz.child_count(), 1);
+        assert_eq!(rz.child_mask(), ByteMask::from(0));
+
+        // Test 2: with prune=false to leave dangling paths
+        let mut btm2: PathMap<()> = PathMap::new();
+        btm2.create_path(&[1, 255, 0]);
+        let zh2 = btm2.zipper_head();
+
+        let mut wz = zh2.write_zipper_at_exclusive_path(&[0, 255]).unwrap();
+        let mut src_wz = zh2.write_zipper_at_exclusive_path(&[1]).unwrap();
+        src_wz.descend_to_byte(255);
+        let alg_result = wz.join_into_take(&mut src_wz, false);
+        assert_eq!(alg_result, AlgebraicStatus::Element);
+        drop(wz);
+        zh2.cleanup_write_zipper(src_wz);
+        drop(zh2);
+
+        assert_eq!(btm2.path_exists_at(&[1, 255, 0]), false);
+        assert_eq!(btm2.path_exists_at(&[1, 255]), true);
+        assert_eq!(btm2.path_exists_at(&[0, 255, 0]), true);
+        assert_eq!(btm2.get_val_at(&[0, 255, 0]), None);
+        let rz = btm2.read_zipper();
+        assert_eq!(rz.child_count(), 2);
+        assert_eq!(rz.child_mask(), ByteMask::from_iter([0, 1]));
     }
 
     #[test]
@@ -3522,55 +3573,6 @@ mod tests {
         // Verify structure exists
         let rz = btm3.read_zipper();
         assert!(rz.child_count() >= 1); // Should have at least [1] branch
-    }
-
-    /// Tests how `join_into_take` handles dangling path arguments with prune parameter
-    #[test]
-    fn write_zipper_join_into_take_test2() {
-        // Test 1: Join and take dangling paths from [1] into [0] with prune=true
-        let mut btm: PathMap<()> = PathMap::new();
-        btm.create_path(&[1, 255, 0]);
-        btm.create_path(&[1, 255, 1]);
-        let zh = btm.zipper_head();
-
-        let mut wz = zh.write_zipper_at_exclusive_path(&[0]).unwrap();
-        let mut src_wz = zh.write_zipper_at_exclusive_path(&[1]).unwrap();
-        let alg_result = wz.join_into_take(&mut src_wz, true);
-        assert_eq!(alg_result, AlgebraicStatus::None); // All dangling, no values
-        drop(wz);
-        drop(src_wz);
-
-        drop(zh);
-        // Dangling paths should be moved to [0] and removed from [1]
-        assert_eq!(btm.get_val_at(&[0, 255, 0]), None);
-        assert_eq!(btm.get_val_at(&[0, 255, 1]), None);
-        assert_eq!(btm.get_val_at(&[1, 255, 0]), None);
-        assert_eq!(btm.get_val_at(&[1, 255, 1]), None);
-
-        // With prune=true, the [1] branch should be pruned
-        let rz = btm.read_zipper();
-        assert_eq!(rz.child_count(), 1);
-        assert_eq!(rz.child_mask(), ByteMask::from(0));
-
-        // Test 2: with prune=false to leave dangling paths
-        let mut btm2: PathMap<()> = PathMap::new();
-        btm2.create_path(&[1, 255, 0]);
-        let zh2 = btm2.zipper_head();
-
-        let mut wz = zh2.write_zipper_at_exclusive_path(&[0]).unwrap();
-        let mut src_wz = zh2.write_zipper_at_exclusive_path(&[1]).unwrap();
-        let alg_result = wz.join_into_take(&mut src_wz, false);
-        assert_eq!(alg_result, AlgebraicStatus::None); // All dangling
-        drop(wz);
-        drop(src_wz);
-
-        drop(zh2);
-        assert_eq!(btm2.get_val_at(&[0, 255, 0]), None);
-        assert_eq!(btm2.get_val_at(&[1, 255, 0]), None);
-
-        // With prune=false, dangling paths under [1] may remain
-        let rz = btm2.read_zipper();
-        assert!(rz.child_count() >= 1); // Should have at least [0] branch
     }
 
     #[test]
