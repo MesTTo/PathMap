@@ -1745,37 +1745,42 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         let node_was_none;
         let node_status = match self.get_focus().try_as_tagged() {
             Some(self_node) => {
-                node_was_none = false;
-                let src = read_zipper.get_focus();
-                if src.is_none() {
-                    self.graft_internal(None);
-                    if prune {
-                        self.prune_path();
-                    }
-                    AlgebraicStatus::None
-                } else {
-                    match self_node.pmeet_dyn(src.as_tagged()) {
-                        AlgebraicResult::Element(intersection) => {
-                            self.graft_internal(Some(intersection));
-                            AlgebraicStatus::Element
-                        },
-                        AlgebraicResult::None => {
-                            self.graft_internal(None);
-                            if prune {
-                                self.prune_path();
-                            }
-                            AlgebraicStatus::None
-                        },
-                        AlgebraicResult::Identity(mask) => {
-                            if mask & SELF_IDENT > 0 {
-                                AlgebraicStatus::Identity
-                            } else {
-                                debug_assert_eq!(mask, COUNTER_IDENT); //It's gotta be self or other
-                                self.graft_internal(Some(src.into_option().unwrap()));
+                if !self_node.node_is_empty() {
+                    node_was_none = false;
+                    let src = read_zipper.get_focus();
+                    if src.is_none() {
+                        self.graft_internal(None);
+                        if prune {
+                            self.prune_path();
+                        }
+                        AlgebraicStatus::None
+                    } else {
+                        match self_node.pmeet_dyn(src.as_tagged()) {
+                            AlgebraicResult::Element(intersection) => {
+                                self.graft_internal(Some(intersection));
                                 AlgebraicStatus::Element
-                            }
-                        },
+                            },
+                            AlgebraicResult::None => {
+                                self.graft_internal(None);
+                                if prune {
+                                    self.prune_path();
+                                }
+                                AlgebraicStatus::None
+                            },
+                            AlgebraicResult::Identity(mask) => {
+                                if mask & SELF_IDENT > 0 {
+                                    AlgebraicStatus::Identity
+                                } else {
+                                    debug_assert_eq!(mask, COUNTER_IDENT); //It's gotta be self or other
+                                    self.graft_internal(Some(src.into_option().unwrap()));
+                                    AlgebraicStatus::Element
+                                }
+                            },
+                        }
                     }
+                } else {
+                    node_was_none = true;
+                    AlgebraicStatus::None
                 }
             },
             None => {
@@ -3267,6 +3272,60 @@ mod tests {
         assert_eq!(map.iter().count(), 2);
     }
 
+    /// Tests how `meet_into` handles dangling path arguments (no values, just path structure)
+    #[test]
+    fn write_zipper_meet_into_test4() {
+        // Test 1: meet_into at leaf level with both paths dangling
+        let mut btm: PathMap<()> = PathMap::new();
+        btm.create_path(&[1, 255, 0]);
+        btm.create_path(&[0, 255, 0]);
+        btm.create_path(&[0, 255, 1]);
+        let zh = btm.zipper_head();
+
+        let mut wz = zh.write_zipper_at_exclusive_path(&[0, 255, 0]).unwrap();
+        let rz = zh.read_zipper_at_path(&[1, 255, 0]).unwrap();
+        let alg_result = wz.meet_into(&rz, true);
+        assert_eq!(alg_result, AlgebraicStatus::None); // We're at the end of two dangling paths
+        drop(wz);
+        drop(rz);
+
+        // Test 2: meet where read zipper is at a non-existent path
+        let mut wz = zh.write_zipper_at_exclusive_path(&[0, 255, 1]).unwrap();
+        let rz = zh.read_zipper_at_path(&[1, 255, 1]).unwrap();
+        let alg_result = wz.meet_into(&rz, true);
+        assert_eq!(alg_result, AlgebraicStatus::None);
+        zh.cleanup_write_zipper(wz);
+        drop(rz);
+        drop(zh);
+
+        // Verify the wz's path was pruned, but the other paths are left alone
+        assert_eq!(btm.path_exists_at(&[0, 255, 1]), false);
+        assert_eq!(btm.path_exists_at(&[1, 255, 0]), true);
+        assert_eq!(btm.path_exists_at(&[0, 255, 0]), true);
+
+        // Test 3: meet from a higher level with all dangling paths and prune=true
+        let mut btm2: PathMap<()> = PathMap::new();
+        btm2.create_path(&[0, 255, 0]);
+        btm2.create_path(&[0, 255, 1]);
+        btm2.create_path(&[0, 200, 5]);
+        btm2.create_path(&[1, 255, 0]);
+        let zh2 = btm2.zipper_head();
+
+        let mut wz = zh2.write_zipper_at_exclusive_path(&[0]).unwrap();
+        let rz = zh2.read_zipper_at_path(&[1]).unwrap();
+        let alg_result = wz.meet_into(&rz, true);
+        assert_eq!(alg_result, AlgebraicStatus::Element);
+        drop(wz);
+        drop(rz);
+        drop(zh2);
+
+        // Verify the meet operation did what it should have
+        assert_eq!(btm.path_exists_at(&[1, 255, 0]), true);
+        assert_eq!(btm.path_exists_at(&[0, 255, 0]), true);
+        assert_eq!(btm.path_exists_at(&[0, 200, 5]), false);
+        assert_eq!(btm.path_exists_at(&[0, 255, 1]), false);
+    }
+
     /// Tests whether the [WriteZipper::subtract_into] operation will do the right thing with the root value
     #[test]
     fn write_zipper_subtract_into_test1() {
@@ -3428,84 +3487,6 @@ mod tests {
             drop(wz);
             assert!(map.get_val_at(b"e/sub").is_some());
         }
-    }
-
-    /// Tests how `meet_into` handles dangling path arguments (no values, just path structure)
-    #[test]
-    fn write_zipper_meet_into_test4() {
-        // Test 1: meet_into at leaf level with both paths dangling
-        let mut btm: PathMap<()> = PathMap::new();
-        btm.create_path(&[1, 255, 0]);
-        btm.create_path(&[0, 255, 0]);
-        btm.create_path(&[0, 255, 1]);
-        let zh = btm.zipper_head();
-
-        let mut wz = zh.write_zipper_at_exclusive_path(&[0, 255, 0]).unwrap();
-        let rz = zh.read_zipper_at_path(&[1, 255, 0]).unwrap();
-        let alg_result = wz.meet_into(&rz, true);
-        assert_eq!(alg_result, AlgebraicStatus::None); // No values in either path
-        drop(wz);
-        drop(rz);
-        drop(zh);
-
-        // Verify no values exist (paths might remain depending on prune)
-        assert_eq!(btm.get_val_at(&[0, 255, 0]), None);
-
-        // Test 2: meet where read zipper is at a non-existent path
-        let zh = btm.zipper_head();
-        let mut wz = zh.write_zipper_at_exclusive_path(&[0, 255, 1]).unwrap();
-        let rz = zh.read_zipper_at_path(&[1, 255, 1]).unwrap();
-        let alg_result = wz.meet_into(&rz, true);
-        assert_eq!(alg_result, AlgebraicStatus::None);
-        drop(wz);
-        drop(rz);
-        drop(zh);
-
-        // Verify the dangling path was pruned
-        assert_eq!(btm.get_val_at(&[0, 255, 1]), None);
-
-        // Test 3: meet from a higher level with all dangling paths and prune=true
-        let mut btm2: PathMap<()> = PathMap::new();
-        btm2.create_path(&[0, 255, 0]);
-        btm2.create_path(&[0, 255, 1]);
-        btm2.create_path(&[0, 200, 5]);
-        btm2.create_path(&[1, 255, 0]);
-        let zh2 = btm2.zipper_head();
-
-        let mut wz = zh2.write_zipper_at_exclusive_path(&[0]).unwrap();
-        let rz = zh2.read_zipper_at_path(&[1]).unwrap();
-        let alg_result = wz.meet_into(&rz, true);
-        assert_eq!(alg_result, AlgebraicStatus::None); // All dangling, no values
-
-        drop(wz);
-        drop(rz);
-        drop(zh2);
-
-        // Only paths that exist in both should remain (structure-wise)
-        assert_eq!(btm2.get_val_at(&[0, 255, 0]), None);
-        assert_eq!(btm2.get_val_at(&[0, 255, 1]), None);
-        assert_eq!(btm2.get_val_at(&[0, 200, 5]), None);
-        assert_eq!(btm2.get_val_at(&[1, 255, 0]), None);
-
-        // Test 4: meet with prune=false to keep dangling paths
-        let mut btm3: PathMap<()> = PathMap::new();
-        btm3.create_path(&[0, 255, 0]);
-        btm3.create_path(&[0, 255, 1]);
-        btm3.create_path(&[1, 255, 0]);
-        let zh3 = btm3.zipper_head();
-
-        let mut wz = zh3.write_zipper_at_exclusive_path(&[0]).unwrap();
-        let rz = zh3.read_zipper_at_path(&[1]).unwrap();
-        let alg_result = wz.meet_into(&rz, false);
-        assert_eq!(alg_result, AlgebraicStatus::None); // All dangling
-
-        drop(wz);
-        drop(rz);
-        drop(zh3);
-
-        // No values should exist
-        assert_eq!(btm3.get_val_at(&[0, 255, 0]), None);
-        assert_eq!(btm3.get_val_at(&[0, 255, 1]), None);
     }
 
     /// Tests how `restrict` handles dangling path arguments (no values, just path structure)
