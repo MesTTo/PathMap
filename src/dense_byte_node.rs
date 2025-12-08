@@ -360,23 +360,26 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
 
                 //If there is an onward link, see if there is a matching link in other, and subtract them
                 if let Some(self_child) = cf.rec() {
-                    let other_child = other.get_node_at_key(&[key_byte]);
-                    match other_child.try_as_tagged() {
-                        Some(other_child) => {
-                            match self_child.as_tagged().psubtract_dyn(other_child) {
-                                AlgebraicResult::None => { is_identity = false; }
-                                AlgebraicResult::Identity(mask) => {
-                                    debug_assert_eq!(mask, SELF_IDENT); //subtract is not commutative
-                                    new_cf.set_rec(self_child.clone());
-                                },
-                                AlgebraicResult::Element(e) => {
-                                    is_identity = false;
-                                    new_cf.set_rec(e);
-                                },
+                    let self_child_tagged = self_child.as_tagged();
+                    if !self_child_tagged.node_is_empty() {
+                        let other_child = other.get_node_at_key(&[key_byte]);
+                        match other_child.try_as_tagged() {
+                            Some(other_child) => {
+                                match self_child_tagged.psubtract_dyn(other_child) {
+                                    AlgebraicResult::None => { is_identity = false; }
+                                    AlgebraicResult::Identity(mask) => {
+                                        debug_assert_eq!(mask, SELF_IDENT); //subtract is not commutative
+                                        new_cf.set_rec(self_child.clone());
+                                    },
+                                    AlgebraicResult::Element(e) => {
+                                        is_identity = false;
+                                        new_cf.set_rec(e);
+                                    },
+                                }
+                            },
+                            None => {
+                                new_cf.set_rec(self_child.clone())
                             }
-                        },
-                        None => {
-                            new_cf.set_rec(self_child.clone())
                         }
                     }
                 }

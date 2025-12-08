@@ -2938,6 +2938,13 @@ pub struct ReadZipperPathIter<'a, 'path, V: Clone + Send + Sync, A: Allocator = 
     zipper: Option<ReadZipperCore<'a, 'path, V, A>>,
 }
 
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ReadZipperPathIter<'_, '_, V, A> {
+    /// Returns a reference to the value at the last-returned path 
+    pub fn val(&self) -> Option<&V> {
+        self.zipper.as_ref().and_then(|z| z.val())
+    }
+}
+
 impl<'a, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> Iterator for ReadZipperPathIter<'a, '_, V, A> {
     type Item = Vec<u8>;
 
