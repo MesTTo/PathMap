@@ -928,11 +928,18 @@ impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zipper for Wri
         }
     }
     fn child_count(&self) -> usize {
-        let focus_node = self.focus_stack.top().unwrap();
-        node_count_branches_recursive(focus_node, self.key.node_key())
+        match self.focus_stack.top() {
+            Some(focus_node) => {
+                node_count_branches_recursive(focus_node, self.key.node_key())
+            },
+            None => 0
+        }
     }
     fn child_mask(&self) -> ByteMask {
-        let focus_node = self.focus_stack.top().unwrap();
+        let focus_node = match self.focus_stack.top() {
+            Some(focus_node) => focus_node,
+            None => return ByteMask::EMPTY
+        };
         let node_key = self.key.node_key();
         if node_key.len() == 0 {
             return focus_node.node_branches_mask(b"")
@@ -1967,7 +1974,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             }
         } else {
             debug_assert_eq!(self.focus_stack.depth(), 1);
-            if self.focus_stack.top().unwrap().node_is_empty() {
+            if self.focus_stack.top().map(|node| node.node_is_empty()).unwrap_or(false) {
                 return false
             } else {
                 self.focus_stack.to_root();
@@ -3501,21 +3508,19 @@ mod tests {
         let zh = btm.zipper_head();
 
         // Restrict [0] subtree to paths that exist in [1] subtree (all dangling)
+        // NOTE: For now, it's values and not dangling paths that define which paths should be included,
+        // but we'll likely revisit this when restrict becomes a meet policy
         let mut wz = zh.write_zipper_at_exclusive_path(&[0]).unwrap();
         let rz = zh.read_zipper_at_path(&[1]).unwrap();
         let alg_result = wz.restrict(&rz);
-        assert_eq!(alg_result, AlgebraicStatus::None); // All dangling, no values
+        assert_eq!(alg_result, AlgebraicStatus::None);
         drop(wz);
         drop(rz);
-
         drop(zh);
-        // Only paths under [0] that have corresponding structure in [1] should remain
-        assert_eq!(btm.get_val_at(&[0, 255, 0]), None);
-        assert_eq!(btm.get_val_at(&[0, 255, 1]), None);
-        assert_eq!(btm.get_val_at(&[0, 200, 5]), None);
-        assert_eq!(btm.get_val_at(&[1, 255, 0]), None);
 
         // Test 2: restrict at leaf level with dangling paths
+        // NOTE: Once again it's values and not dangling paths that inform restrict, but this will probably
+        // be changed in the future
         let mut btm2: PathMap<()> = PathMap::new();
         btm2.create_path(&[0, 255, 0]);
         btm2.create_path(&[1, 255, 0]);
@@ -3527,9 +3532,7 @@ mod tests {
         assert_eq!(alg_result, AlgebraicStatus::None); // Both dangling
         drop(wz);
         drop(rz);
-
         drop(zh2);
-        assert_eq!(btm2.get_val_at(&[0, 255, 0]), None);
 
         // Test 3: restrict where read zipper has no matching paths - should remove everything
         let mut btm3: PathMap<()> = PathMap::new();
@@ -3542,18 +3545,17 @@ mod tests {
         let rz = zh3.read_zipper_at_path(&[1]).unwrap();
         let alg_result = wz.restrict(&rz);
         assert_eq!(alg_result, AlgebraicStatus::None); // No matching structure
-        drop(wz);
+        zh3.cleanup_write_zipper(wz);
         drop(rz);
-
         drop(zh3);
-        // All paths under [0] should be removed since [1] has no matching structure
-        assert_eq!(btm3.get_val_at(&[0, 255, 0]), None);
-        assert_eq!(btm3.get_val_at(&[0, 255, 1]), None);
-        assert_eq!(btm3.get_val_at(&[1, 200, 5]), None);
 
-        // Verify structure exists
+        // All paths under [0] should be removed since [1] has no matching structure
+        assert_eq!(btm3.path_exists_at(&[0, 255]), false);
+        assert_eq!(btm3.path_exists_at(&[0]), false);
+        assert_eq!(btm3.path_exists_at(&[1, 200, 5]), true);
         let rz = btm3.read_zipper();
-        assert!(rz.child_count() >= 1); // Should have at least [1] branch
+        assert_eq!(rz.child_count(), 1);
+        assert_eq!(rz.child_mask(), ByteMask::from(1));
     }
 
     #[test]
