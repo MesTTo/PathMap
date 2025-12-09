@@ -1753,7 +1753,8 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
 
 impl<V: Clone + Send + Sync + DistributiveLattice, A: Allocator, Cf: CoFree<V=V, A=A>, OtherCf: CoFree<V=V, A=A>> HeteroDistributiveLattice<OtherCf> for Cf {
     fn psubtract(&self, other: &OtherCf) -> AlgebraicResult<Self> where Self: Sized {
-        let rec = self.rec().psubtract(&other.rec());
+        let self_rec = self.rec().filter(|child| child.as_tagged().node_is_empty());
+        let rec = self_rec.psubtract(&other.rec());
         let val = self.val().psubtract(&other.val());
         self.combine_algebraic_results(other, rec, val)
     }
@@ -1761,8 +1762,7 @@ impl<V: Clone + Send + Sync + DistributiveLattice, A: Allocator, Cf: CoFree<V=V,
 
 impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>, OtherCf: CoFree<V=V, A=A>> HeteroQuantale<OtherCf> for Cf {
     fn prestrict(&self, other: &OtherCf) -> AlgebraicResult<Self> {
-        debug_assert!(self.has_rec() || self.has_val());
-        if other.has_val() { AlgebraicResult::Identity(SELF_IDENT) } // assumes self can never be CoFree{None, None}
+        if other.has_val() { AlgebraicResult::Identity(SELF_IDENT) }
         else {
             match (self.rec(), other.rec()) {
                 (Some(l), Some(r)) => {
