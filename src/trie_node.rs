@@ -341,10 +341,20 @@ pub const NODE_ITER_INVALID: u128 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
 pub const NODE_ITER_FINISHED: u128 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE;
 
 /// Internal.  A pointer to an onward link or a value contained within a node
-pub enum PayloadRef<'a, V: Clone + Send + Sync, A: Allocator> {
+pub(crate) enum PayloadRef<'a, V: Clone + Send + Sync, A: Allocator> {
     None,
     Val(&'a V),
     Child(&'a TrieNodeODRc<V, A>),
+}
+
+impl<V: Clone + Send + Sync, A: Allocator> core::fmt::Debug for PayloadRef<'_, V, A> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::None => write!(f, "ValOrChild::None"),
+            Self::Val(_v) => write!(f, "ValOrChild::Val"), //Don't want to restrict the impl to V: Debug
+            Self::Child(c) => write!(f, "ValOrChild::Child{{ {c:?} }}"),
+        }
+    }
 }
 
 // Deriving Clone puts an unnecessary bound on `V`
@@ -625,7 +635,12 @@ pub(crate) fn pmeet_generic_internal<'trie, const MAX_PAYLOAD_CNT: usize, V, A: 
                                 .map(|child| ValOrChild::Child(child))
                         },
                         None => {
-                            FatAlgebraicResult::new(COUNTER_IDENT, None)
+                            //Check to see if we have a dangling path, because a dangling path meet with a value should result in a path, but no value
+                            if self_link.is_empty() && other_node.node_get_val(keys[idx].0).is_some() {
+                                FatAlgebraicResult::new(SELF_IDENT, Some(ValOrChild::Child(TrieNodeODRc::new_empty())))
+                            } else {
+                                FatAlgebraicResult::new(COUNTER_IDENT, None)
+                            }
                         }
                     }
                 },
@@ -1091,7 +1106,7 @@ mod tagged_node_ref {
             }
         }
 
-        pub fn node_get_payloads<'res>(&self, keys: &[(&[u8], bool)], results: &'res mut [(usize, PayloadRef<'a, V, A>)]) -> bool {
+        pub(crate) fn node_get_payloads<'res>(&self, keys: &[(&[u8], bool)], results: &'res mut [(usize, PayloadRef<'a, V, A>)]) -> bool {
             match self {
                 Self::DenseByteNode(node) => node.node_get_payloads(keys, results),
                 Self::LineListNode(node) => node.node_get_payloads(keys, results),

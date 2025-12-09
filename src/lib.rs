@@ -513,10 +513,9 @@ mod tests {
 
     #[test]
     fn map_meet_dangling_branching_factor_test() {
-        // Left contains a path with a 2-way split at level 2
+        // Left contains a path without a split
         let mut left: PathMap<u64> = PathMap::new();
         left.create_path([7u8, 1u8, 0u8]);
-        left.create_path([7u8, 1u8, 1u8]);
 
         // Right has a 3-way split and fans out at level 1
         let mut right: PathMap<u64> = PathMap::new();
@@ -525,12 +524,38 @@ mod tests {
         right.create_path([7u8, 3u8]);
 
         let intersection = left.meet(&right);
-
         assert_eq!(intersection.path_exists_at([7u8, 1u8, 0u8]), true); //Should have had its value removed, but the path should remain
         assert_eq!(intersection.get_val_at([7u8, 1u8, 0u8]), None);
         assert_eq!(intersection.path_exists_at([7u8, 2u8, 0u8]), false);
         assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
-        assert_eq!(intersection.path_exists_at([7u8, 1u8, 1u8]), false);
+
+        //Make sure the result is the same with the opposite operand order
+        let intersection = right.meet(&left);
+        assert_eq!(intersection.path_exists_at([7u8, 1u8, 0u8]), true);
+        assert_eq!(intersection.get_val_at([7u8, 1u8, 0u8]), None);
+        assert_eq!(intersection.path_exists_at([7u8, 2u8, 0u8]), false);
+        assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
+
+        // TEST 2.  Same as above, but with less nesting
+        let mut left: PathMap<u64> = PathMap::new();
+        left.create_path([7u8, 1u8]);
+        let mut right: PathMap<u64> = PathMap::new();
+        right.set_val_at([7u8, 1u8], 10);
+        right.set_val_at([7u8, 2u8], 20);
+        right.create_path([7u8, 3u8]);
+
+        let intersection = left.meet(&right);
+        assert_eq!(intersection.path_exists_at([7u8, 1u8]), true); //Should have had its value removed, but the path should remain
+        assert_eq!(intersection.get_val_at([7u8, 1u8]), None);
+        assert_eq!(intersection.path_exists_at([7u8, 2u8]), false);
+        assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
+
+        //Make sure the result is the same with the opposite operand order
+        let intersection = right.meet(&left);
+        assert_eq!(intersection.path_exists_at([7u8, 1u8]), true);
+        assert_eq!(intersection.get_val_at([7u8, 1u8]), None);
+        assert_eq!(intersection.path_exists_at([7u8, 2u8]), false);
+        assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
     }
 
     #[test]
