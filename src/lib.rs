@@ -329,6 +329,58 @@ mod tests {
     }
 
     #[test]
+    fn btm_join_dangling_branching_factor_test() {
+        // Left has a single downstream dangling branch
+        let mut left: PathMap<u64> = PathMap::new();
+        left.create_path([9u8, 40u8, 1u8]);
+
+        // Right fans out the same prefix with three branches (mix of dangling and valued)
+        let mut right: PathMap<u64> = PathMap::new();
+        right.create_path([9u8, 10u8]); // dangling branch only
+        right.set_val_at([9u8, 11u8], 11);
+        right.set_val_at([9u8, 12u8, 0u8], 12);
+
+        let joined = left.join(&right);
+
+        assert!(joined.path_exists_at([9u8, 40u8, 1u8]));
+        assert!(joined.path_exists_at([9u8, 10u8]));
+        assert_eq!(joined.get_val_at([9u8, 10u8]), None);
+        assert_eq!(joined.get_val_at([9u8, 11u8]), Some(&11));
+        assert_eq!(joined.get_val_at([9u8, 12u8, 0u8]), Some(&12));
+
+        let mut rz = joined.read_zipper();
+        rz.descend_to([9u8]);
+        assert_eq!(rz.child_count(), 4);
+    }
+
+    #[test]
+    fn btm_subtract_dangling_branching_factor_test() {
+        // Left has one populated branch under [5] alongside an unrelated top-level key
+        let mut left: PathMap<()> = PathMap::new();
+        left.create_path([5u8, 0u8, 9u8]);
+        left.create_path([8u8]);
+
+        // Right overlaps [5] but introduces additional branches (value + dangling)
+        let mut right: PathMap<()> = PathMap::new();
+        right.create_path([5u8, 0u8, 9u8]);
+        right.create_path([5u8, 1u8, 1u8]);
+        right.create_path([5u8, 2u8]); // dangling extra branch
+
+        let remaining = left.subtract(&right);
+        assert_eq!(remaining.path_exists_at([5u8, 0u8, 9u8]), false);
+        assert_eq!(remaining.path_exists_at([5u8, 1u8, 1u8]), false);
+        assert_eq!(remaining.path_exists_at([8u8]), true);
+        assert_eq!(remaining.path_exists_at([5u8, 2u8]), false);
+
+        //Try the subtraction the other way
+        let remaining = right.subtract(&left);
+        assert_eq!(remaining.path_exists_at([5u8, 0u8, 9u8]), false);
+        assert_eq!(remaining.path_exists_at([5u8, 1u8, 1u8]), true);
+        assert_eq!(remaining.path_exists_at([8u8]), false);
+        assert_eq!(remaining.path_exists_at([5u8, 2u8]), true);
+    }
+
+    #[test]
     fn btm_test_restrict1() {
         let mut l: PathMap<&str> = PathMap::new();
         l.set_val_at(b"alligator", "alligator");
@@ -457,6 +509,28 @@ mod tests {
         assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
         assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), Some(&9));
         assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
+    }
+
+    #[test]
+    fn map_meet_dangling_branching_factor_test() {
+        // Left contains a path with a 2-way split at level 2
+        let mut left: PathMap<u64> = PathMap::new();
+        left.create_path([7u8, 1u8, 0u8]);
+        left.create_path([7u8, 1u8, 1u8]);
+
+        // Right has a 3-way split and fans out at level 1
+        let mut right: PathMap<u64> = PathMap::new();
+        right.set_val_at([7u8, 1u8, 0u8], 10);
+        right.set_val_at([7u8, 2u8, 0u8], 20);
+        right.create_path([7u8, 3u8]);
+
+        let intersection = left.meet(&right);
+
+        assert_eq!(intersection.path_exists_at([7u8, 1u8, 0u8]), true); //Should have had its value removed, but the path should remain
+        assert_eq!(intersection.get_val_at([7u8, 1u8, 0u8]), None);
+        assert_eq!(intersection.path_exists_at([7u8, 2u8, 0u8]), false);
+        assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
+        assert_eq!(intersection.path_exists_at([7u8, 1u8, 1u8]), false);
     }
 
     #[test]
