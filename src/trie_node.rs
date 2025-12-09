@@ -1308,7 +1308,7 @@ mod tagged_node_ref {
                 Self::LineListNode(node) => node.pmeet_dyn(other),
                 Self::CellByteNode(node) => node.pmeet_dyn(other),
                 Self::TinyRefNode(node) => node.pmeet_dyn(other),
-                Self::EmptyNode => AlgebraicResult::None,
+                Self::EmptyNode => EmptyNode.pmeet_dyn(other),
             }
         }
 

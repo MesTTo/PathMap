@@ -512,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn map_meet_dangling_branching_factor_test() {
+    fn map_meet_dangling_branching_factor_test1() {
         // Left contains a path without a split
         let mut left: PathMap<u64> = PathMap::new();
         left.create_path([7u8, 1u8, 0u8]);
@@ -556,6 +556,20 @@ mod tests {
         assert_eq!(intersection.get_val_at([7u8, 1u8]), None);
         assert_eq!(intersection.path_exists_at([7u8, 2u8]), false);
         assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
+    }
+
+    #[test]
+    fn map_meet_dangling_branching_factor_test2() {
+        //Test 1: Path subsets
+        let mut left: PathMap<()> = PathMap::new();
+        left.create_path(b"OneTwo");
+        let mut right: PathMap<()> = PathMap::new();
+        right.create_path(b"OneTwoThree");
+
+        let intersection = left.meet(&right);
+        assert_eq!(intersection.path_exists_at(b"OneTwo"), true);
+        assert_eq!(intersection.path_exists_at(b"OneTwoThree"), false);
+        assert_eq!(intersection.path_exists_at(b"OneTwoT"), false);
     }
 
     #[test]
