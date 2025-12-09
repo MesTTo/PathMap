@@ -1753,7 +1753,7 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
 
 impl<V: Clone + Send + Sync + DistributiveLattice, A: Allocator, Cf: CoFree<V=V, A=A>, OtherCf: CoFree<V=V, A=A>> HeteroDistributiveLattice<OtherCf> for Cf {
     fn psubtract(&self, other: &OtherCf) -> AlgebraicResult<Self> where Self: Sized {
-        let self_rec = self.rec().filter(|child| child.as_tagged().node_is_empty());
+        let self_rec = self.rec().filter(|child| !child.as_tagged().node_is_empty());
         let rec = self_rec.psubtract(&other.rec());
         let val = self.val().psubtract(&other.val());
         self.combine_algebraic_results(other, rec, val)
