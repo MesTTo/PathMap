@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::hash::{Hash, DefaultHasher, Hasher};
 use std::io::{self, Write};
@@ -8,6 +8,7 @@ use crate::trie_map::PathMap;
 use crate::trie_node::{TaggedNodeRef, TrieNodeODRc, NODE_ITER_FINISHED};
 use crate::zipper::*;
 use crate::TrieValue;
+use crate::utils::debug::{render_debug_path, PathRenderMode};
 
 /// Configuration settings for rendering a graph of a `pathmap` trie
 pub struct DrawConfig {
@@ -162,6 +163,157 @@ pub fn viz_maps<V : TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc:
         }
     }
     Ok(())
+}
+
+/// Output a logical ascii art representation of the trie within the provided [PathMap]s
+///
+/// Panics if `dc.logical` is `false`.
+pub fn viz_maps_ascii<V: TrieValue + Debug, W: Write>(btms: &[PathMap<V>], dc: &DrawConfig, mut out: W) -> io::Result<()> {
+    assert!(dc.logical, "viz_maps_ascii only supports logical rendering");
+
+    for (idx, map) in btms.iter().enumerate() {
+        if idx > 0 {
+            writeln!(out)?;
+        }
+
+        let root = build_ascii_tree(map);
+        let root_value = if dc.hide_value_paths { None } else { root.value };
+        let root_value_part = render_value_part(root_value, dc);
+        writeln!(out, "PathMap[{idx}]{root_value_part}")?;
+
+        let has_renderable_children = root.children.values().any(|child| subtree_has_renderable(child, dc));
+        if !has_renderable_children && root_value.is_none() {
+            writeln!(out, "(empty)")?;
+            continue;
+        }
+
+        render_ascii_children(&root, "", dc, &mut out)?;
+    }
+
+    Ok(())
+}
+
+struct AsciiNode<'a, V> {
+    value: Option<&'a V>,
+    children: BTreeMap<u8, AsciiNode<'a, V>>,
+}
+
+impl<'a, V> Default for AsciiNode<'a, V> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            children: BTreeMap::new(),
+        }
+    }
+}
+
+impl<'a, V> AsciiNode<'a, V> {
+    fn insert(&mut self, path: &[u8], value: &'a V) {
+        if path.is_empty() {
+            self.value = Some(value);
+            return;
+        }
+
+        let child = self.children.entry(path[0]).or_default();
+        child.insert(&path[1..], value);
+    }
+}
+
+fn build_ascii_tree<'a, V: TrieValue + Debug>(map: &'a PathMap<V>) -> AsciiNode<'a, V> {
+    let mut root = AsciiNode::default();
+    for (path, value) in map.iter() {
+        root.insert(&path, value);
+    }
+    root
+}
+
+fn subtree_has_renderable<'a, V: Debug>(node: &'a AsciiNode<'a, V>, dc: &DrawConfig) -> bool {
+    if !dc.hide_value_paths && node.value.is_some() {
+        return true;
+    }
+
+    node.children.values().any(|child| subtree_has_renderable(child, dc))
+}
+
+fn render_ascii_children<'a, V: Debug, W: Write>(
+    node: &'a AsciiNode<'a, V>,
+    prefix: &str,
+    dc: &DrawConfig,
+    out: &mut W,
+) -> io::Result<()> {
+    let mut renderable_children = Vec::new();
+    for (&byte, child) in node.children.iter() {
+        if subtree_has_renderable(child, dc) {
+            renderable_children.push((byte, child));
+        }
+    }
+
+    let renderable_len = renderable_children.len();
+    for (idx, (byte, child)) in renderable_children.into_iter().enumerate() {
+        let is_last = idx + 1 == renderable_len;
+        render_ascii_branch(byte, child, prefix, is_last, dc, out)?;
+    }
+
+    Ok(())
+}
+
+fn render_ascii_branch<'a, V: Debug, W: Write>(
+    start_byte: u8,
+    node: &'a AsciiNode<'a, V>,
+    prefix: &str,
+    is_last: bool,
+    dc: &DrawConfig,
+    out: &mut W,
+) -> io::Result<()> {
+    let mut label = vec![start_byte];
+    let mut cursor = node;
+
+    loop {
+        let has_value = cursor.value.is_some();
+        let child_count = cursor.children.len();
+        let can_compress = child_count == 1 && (!has_value || dc.hide_value_paths);
+        if !can_compress {
+            break;
+        }
+
+        let (&next_byte, next_node) = cursor.children.iter().next().unwrap();
+        label.push(next_byte);
+        cursor = next_node;
+    }
+
+    let value = if dc.hide_value_paths { None } else { cursor.value };
+    let connector = if is_last { "└ " } else { "├ " };
+    let label_str = render_path_label(&label, dc);
+    let value_part = render_value_part(value, dc);
+    writeln!(out, "{prefix}{connector}{label_str}{value_part}")?;
+
+    let next_prefix = if is_last {
+        format!("{prefix}  ")
+    } else {
+        format!("{prefix}│ ")
+    };
+
+    render_ascii_children(cursor, &next_prefix, dc, out)
+}
+
+fn render_path_label(path: &[u8], dc: &DrawConfig) -> String {
+    let mode = if dc.ascii { PathRenderMode::TryAscii } else { PathRenderMode::ByteList };
+    render_debug_path(path, mode)
+        .unwrap_or_else(|| format!("{path:?}").into())
+        .into_owned()
+}
+
+fn render_value_part<V: Debug>(value: Option<&V>, dc: &DrawConfig) -> String {
+    match value {
+        None => String::new(),
+        Some(v) => {
+            if dc.minimize_values {
+                " = .".to_string()
+            } else {
+                format!(" = {v:?}")
+            }
+        }
+    }
 }
 
 fn color_for_bitmask(mask: u64) -> &'static str {
@@ -347,6 +499,17 @@ fn viz_node_physical<V : TrieValue + Debug + Hash, A : Allocator>(n: &TrieNodeOD
 mod test {
     use crate::zipper::{ZipperCreation, ZipperMoving, ZipperWriting};
     use super::*;
+
+    #[test]
+    fn small_ascii_viz() {
+        let mut btm = PathMap::new();
+        let rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
+        rs.iter().enumerate().for_each(|(i, r)| { btm.insert(r.as_bytes(), i); });
+
+        let mut out_buf = Vec::new();
+        viz_maps_ascii(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: true }, &mut out_buf).unwrap();
+        println!("{}", String::from_utf8_lossy(&out_buf));
+    }
 
     #[test]
     fn small_viz() {
