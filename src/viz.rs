@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::{Hash, DefaultHasher, Hasher};
 use std::io::{self, Write};
@@ -24,6 +24,8 @@ pub struct DrawConfig {
     /// If `true`, renders the trie irrespective of the pysical (in-memory) representation,
     /// otherwise also renders the nodes that comprise the layout of the trie structure
     pub logical: bool,
+    /// If `true`, use ANSI escape codes to color shared-subtrie markers in ascii output
+    pub ascii_color: bool,
 }
 
 impl Default for DrawConfig {
@@ -33,6 +35,7 @@ impl Default for DrawConfig {
             hide_value_paths: false,
             minimize_values: false,
             logical: true,
+            ascii_color: true,
         }
     }
 }
@@ -168,132 +171,283 @@ pub fn viz_maps<V : TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc:
 /// Output a logical ascii art representation of the trie within the provided [PathMap]s
 ///
 /// Panics if `dc.logical` is `false`.
-pub fn viz_maps_ascii<V: TrieValue + Debug, W: Write>(btms: &[PathMap<V>], dc: &DrawConfig, mut out: W) -> io::Result<()> {
+pub fn viz_maps_ascii<V: TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc: &DrawConfig, mut out: W) -> io::Result<()> {
     assert!(dc.logical, "viz_maps_ascii only supports logical rendering");
 
+    let mut ds = DrawState{ root: 0, nodes: HashMap::new(), cmds: vec![] };
+    for map in btms.iter() {
+        pre_init_node_hashes(map.root().unwrap(), &mut ds);
+        ds.root += 1;
+    }
+
+    ds.root = 0;
     for (idx, map) in btms.iter().enumerate() {
         if idx > 0 {
             writeln!(out)?;
         }
 
-        let root = build_ascii_tree(map);
-        let root_value = if dc.hide_value_paths { None } else { root.value };
-        let root_value_part = render_value_part(root_value, dc);
-        writeln!(out, "PathMap[{idx}]{root_value_part}")?;
+        for meta in ds.nodes.values_mut() {
+            meta.taken = false;
+        }
 
-        let has_renderable_children = root.children.values().any(|child| subtree_has_renderable(child, dc));
-        if !has_renderable_children && root_value.is_none() {
+        let (root_id, graph) = build_ascii_graph_logical(map.read_zipper(), dc, &mut ds);
+        render_ascii_graph(idx, root_id, &graph, dc, &mut out)?;
+
+        ds.root += 1;
+    }
+
+    Ok(())
+}
+
+struct AsciiGraphNode<V> {
+    inline_value: Option<*const V>,
+    children: Vec<AsciiEdge<V>>,
+    shared_addr: Option<u64>,
+}
+
+struct AsciiEdge<V> {
+    label: Vec<u8>,
+    target: AsciiEdgeTarget<V>,
+}
+
+enum AsciiEdgeTarget<V> {
+    Node(u64),
+    Value(*const V),
+}
+
+fn build_ascii_graph_logical<V: TrieValue + Debug, Z: zipper_priv::ZipperPriv + ZipperMoving + ZipperIteration + ZipperValues<V>>(
+    mut z: Z,
+    dc: &DrawConfig,
+    ds: &mut DrawState,
+) -> (u64, HashMap<u64, AsciiGraphNode<V>>) {
+    let root_focus = z.get_focus();
+    let root_node = root_focus.borrow().unwrap();
+    let root_addr = root_node.shared_node_id();
+    let root_id = hash_pair(root_addr, &[]);
+
+    let mut graph: HashMap<u64, AsciiGraphNode<V>> = HashMap::new();
+    let root_shared = ds.nodes.get(&root_addr).map_or(false, |meta| meta.ref_cnt > 1);
+    ensure_ascii_graph_node(&mut graph, root_id, root_shared.then_some(root_addr));
+
+    if !dc.hide_value_paths {
+        if let Some(v) = z.val() {
+            if let Some(node) = graph.get_mut(&root_id) {
+                node.inline_value = Some(v as *const V);
+            }
+        }
+    }
+
+    let mut trie_stack = vec![(0, root_addr)];
+    let mut graph_stack = vec![(0, root_id)];
+    let mut skip_node = false;
+
+    while z.to_next_step() {
+        if skip_node {
+            z.ascend_byte();
+            while !z.to_next_sibling_byte() {
+                if !z.ascend_byte() {
+                    return (root_id, graph);
+                }
+            }
+        }
+        skip_node = false;
+
+        let path = z.path();
+
+        while path.len() <= trie_stack.last().unwrap().0 {
+            trie_stack.pop();
+        }
+
+        let new_focus = z.get_focus();
+        let mut node_is_shared = false;
+        if let Some(node) = new_focus.borrow() {
+            let node_addr = node.shared_node_id();
+            trie_stack.push((path.len(), node_addr));
+            if let Some(meta) = ds.nodes.get_mut(&node_addr) {
+                if meta.ref_cnt > 1 {
+                    node_is_shared = true;
+                }
+                skip_node = meta.taken;
+                meta.taken = true;
+            }
+        }
+
+        let node_addr = trie_stack.last().unwrap().1;
+        let node_key = &path[trie_stack.last().unwrap().0..];
+
+        while path.len() <= graph_stack.last().unwrap().0 {
+            graph_stack.pop();
+        }
+
+        if z.child_count() > 1 || (z.is_val() && z.child_count() == 1 && !dc.hide_value_paths) || node_is_shared {
+            let parent_node_id = graph_stack.last().unwrap().1;
+            let edge_path = &path[graph_stack.last().unwrap().0..];
+            let graph_node_id = hash_pair(node_addr, node_key);
+            graph_stack.push((z.path().len(), graph_node_id));
+
+            let shared_addr = node_is_shared.then_some(node_addr);
+            ensure_ascii_graph_node(&mut graph, graph_node_id, shared_addr);
+            push_ascii_edge(&mut graph, parent_node_id, edge_path, AsciiEdgeTarget::Node(graph_node_id));
+        }
+
+        let graph_node_id = graph_stack.last().unwrap().1;
+        let edge_path = &path[graph_stack.last().unwrap().0..];
+
+        if !skip_node && !dc.hide_value_paths {
+            if let Some(v) = z.val() {
+                if edge_path.is_empty() {
+                    if let Some(node) = graph.get_mut(&graph_node_id) {
+                        if node.inline_value.is_none() {
+                            node.inline_value = Some(v as *const V);
+                        }
+                    }
+                } else {
+                    push_ascii_edge(&mut graph, graph_node_id, edge_path, AsciiEdgeTarget::Value(v as *const V));
+                }
+            }
+        }
+    }
+
+    (root_id, graph)
+}
+
+fn ensure_ascii_graph_node<V>(
+    graph: &mut HashMap<u64, AsciiGraphNode<V>>,
+    node_id: u64,
+    shared_addr: Option<u64>,
+) {
+    let entry = graph.entry(node_id).or_insert(AsciiGraphNode {
+        inline_value: None,
+        children: Vec::new(),
+        shared_addr,
+    });
+    if entry.shared_addr.is_none() {
+        entry.shared_addr = shared_addr;
+    }
+}
+
+fn push_ascii_edge<V>(
+    graph: &mut HashMap<u64, AsciiGraphNode<V>>,
+    parent_id: u64,
+    label: &[u8],
+    target: AsciiEdgeTarget<V>,
+) {
+    if let Some(parent) = graph.get_mut(&parent_id) {
+        parent.children.push(AsciiEdge {
+            label: label.to_vec(),
+            target,
+        });
+    }
+}
+
+fn render_ascii_graph<V: Debug, W: Write>(
+    map_idx: usize,
+    root_id: u64,
+    graph: &HashMap<u64, AsciiGraphNode<V>>,
+    dc: &DrawConfig,
+    out: &mut W,
+) -> io::Result<()> {
+    let mut shared_ids = BTreeMap::new();
+    let mut shared_addrs: Vec<u64> = graph.values().filter_map(|node| node.shared_addr).collect();
+    shared_addrs.sort_unstable();
+    shared_addrs.dedup();
+    for (idx, addr) in shared_addrs.into_iter().enumerate() {
+        shared_ids.insert(addr, idx + 1);
+    }
+
+    let mut visited_shared: HashSet<u64> = HashSet::new();
+    let root_node = match graph.get(&root_id) {
+        Some(node) => node,
+        None => {
+            writeln!(out, "PathMap[{map_idx}]")?;
             writeln!(out, "(empty)")?;
-            continue;
+            return Ok(());
         }
-
-        render_ascii_children(&root, "", dc, &mut out)?;
-    }
-
-    Ok(())
-}
-
-struct AsciiNode<'a, V> {
-    value: Option<&'a V>,
-    children: BTreeMap<u8, AsciiNode<'a, V>>,
-}
-
-impl<'a, V> Default for AsciiNode<'a, V> {
-    fn default() -> Self {
-        Self {
-            value: None,
-            children: BTreeMap::new(),
-        }
-    }
-}
-
-impl<'a, V> AsciiNode<'a, V> {
-    fn insert(&mut self, path: &[u8], value: &'a V) {
-        if path.is_empty() {
-            self.value = Some(value);
-            return;
-        }
-
-        let child = self.children.entry(path[0]).or_default();
-        child.insert(&path[1..], value);
-    }
-}
-
-fn build_ascii_tree<'a, V: TrieValue + Debug>(map: &'a PathMap<V>) -> AsciiNode<'a, V> {
-    let mut root = AsciiNode::default();
-    for (path, value) in map.iter() {
-        root.insert(&path, value);
-    }
-    root
-}
-
-fn subtree_has_renderable<'a, V: Debug>(node: &'a AsciiNode<'a, V>, dc: &DrawConfig) -> bool {
-    if !dc.hide_value_paths && node.value.is_some() {
-        return true;
-    }
-
-    node.children.values().any(|child| subtree_has_renderable(child, dc))
-}
-
-fn render_ascii_children<'a, V: Debug, W: Write>(
-    node: &'a AsciiNode<'a, V>,
-    prefix: &str,
-    dc: &DrawConfig,
-    out: &mut W,
-) -> io::Result<()> {
-    let mut renderable_children = Vec::new();
-    for (&byte, child) in node.children.iter() {
-        if subtree_has_renderable(child, dc) {
-            renderable_children.push((byte, child));
-        }
-    }
-
-    let renderable_len = renderable_children.len();
-    for (idx, (byte, child)) in renderable_children.into_iter().enumerate() {
-        let is_last = idx + 1 == renderable_len;
-        render_ascii_branch(byte, child, prefix, is_last, dc, out)?;
-    }
-
-    Ok(())
-}
-
-fn render_ascii_branch<'a, V: Debug, W: Write>(
-    start_byte: u8,
-    node: &'a AsciiNode<'a, V>,
-    prefix: &str,
-    is_last: bool,
-    dc: &DrawConfig,
-    out: &mut W,
-) -> io::Result<()> {
-    let mut label = vec![start_byte];
-    let mut cursor = node;
-
-    loop {
-        let has_value = cursor.value.is_some();
-        let child_count = cursor.children.len();
-        let can_compress = child_count == 1 && (!has_value || dc.hide_value_paths);
-        if !can_compress {
-            break;
-        }
-
-        let (&next_byte, next_node) = cursor.children.iter().next().unwrap();
-        label.push(next_byte);
-        cursor = next_node;
-    }
-
-    let value = if dc.hide_value_paths { None } else { cursor.value };
-    let connector = if is_last { "└ " } else { "├ " };
-    let label_str = render_path_label(&label, dc);
-    let value_part = render_value_part(value, dc);
-    writeln!(out, "{prefix}{connector}{label_str}{value_part}")?;
-
-    let next_prefix = if is_last {
-        format!("{prefix}  ")
-    } else {
-        format!("{prefix}│ ")
     };
 
-    render_ascii_children(cursor, &next_prefix, dc, out)
+    let mut root_line = format!("PathMap[{map_idx}]{}", render_value_ptr_part(root_node.inline_value, dc));
+    if let Some(addr) = root_node.shared_addr {
+        if let Some(id) = shared_ids.get(&addr) {
+            visited_shared.insert(addr);
+            root_line.push_str(&format!(" {}", render_shared_marker(*id, dc)));
+        }
+    }
+
+    writeln!(out, "{root_line}")?;
+    if root_node.children.is_empty() && root_node.inline_value.is_none() {
+        writeln!(out, "(empty)")?;
+        return Ok(());
+    }
+    render_ascii_graph_children(root_node, graph, dc, &shared_ids, &mut visited_shared, "", out)
+}
+
+fn render_ascii_graph_children<V: Debug, W: Write>(
+    node: &AsciiGraphNode<V>,
+    graph: &HashMap<u64, AsciiGraphNode<V>>,
+    dc: &DrawConfig,
+    shared_ids: &BTreeMap<u64, usize>,
+    visited_shared: &mut HashSet<u64>,
+    prefix: &str,
+    out: &mut W,
+) -> io::Result<()> {
+    let mut edges: Vec<&AsciiEdge<V>> = node.children.iter().collect();
+    edges.sort_by(|a, b| a.label.cmp(&b.label));
+
+    for (idx, edge) in edges.iter().enumerate() {
+        let is_last = idx + 1 == edges.len();
+        render_ascii_edge(edge, graph, dc, shared_ids, visited_shared, prefix, is_last, out)?;
+    }
+
+    Ok(())
+}
+
+fn render_ascii_edge<V: Debug, W: Write>(
+    edge: &AsciiEdge<V>,
+    graph: &HashMap<u64, AsciiGraphNode<V>>,
+    dc: &DrawConfig,
+    shared_ids: &BTreeMap<u64, usize>,
+    visited_shared: &mut HashSet<u64>,
+    prefix: &str,
+    is_last: bool,
+    out: &mut W,
+) -> io::Result<()> {
+    let connector = if is_last { "└── " } else { "├── " };
+    let label_str = render_path_label(&edge.label, dc);
+    match edge.target {
+        AsciiEdgeTarget::Value(v) => {
+            let value_part = render_value_ptr_part(Some(v), dc);
+            writeln!(out, "{prefix}{connector}{label_str}{value_part}")?;
+        }
+        AsciiEdgeTarget::Node(node_id) => {
+            if let Some(child_node) = graph.get(&node_id) {
+                let value_part = render_value_ptr_part(child_node.inline_value, dc);
+                if let Some(shared_addr) = child_node.shared_addr {
+                    if let Some(shared_id) = shared_ids.get(&shared_addr).copied() {
+                        if visited_shared.contains(&shared_addr) {
+                            writeln!(out, "{prefix}{connector}{label_str}{value_part} ↩ {}", render_shared_marker(shared_id, dc))?;
+                            return Ok(());
+                        }
+                        visited_shared.insert(shared_addr);
+                        writeln!(out, "{prefix}{connector}{label_str}{value_part} {}", render_shared_marker(shared_id, dc))?;
+                    } else {
+                        writeln!(out, "{prefix}{connector}{label_str}{value_part}")?;
+                    }
+                } else {
+                    writeln!(out, "{prefix}{connector}{label_str}{value_part}")?;
+                }
+
+                let next_prefix = if is_last {
+                    format!("{prefix}    ")
+                } else {
+                    format!("{prefix}│   ")
+                };
+
+                render_ascii_graph_children(child_node, graph, dc, shared_ids, visited_shared, &next_prefix, out)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn render_path_label(path: &[u8], dc: &DrawConfig) -> String {
@@ -313,6 +467,21 @@ fn render_value_part<V: Debug>(value: Option<&V>, dc: &DrawConfig) -> String {
                 format!(" = {v:?}")
             }
         }
+    }
+}
+
+fn render_value_ptr_part<V: Debug>(value: Option<*const V>, dc: &DrawConfig) -> String {
+    let vref = value.map(|ptr| unsafe { &*ptr });
+    render_value_part(vref, dc)
+}
+
+fn render_shared_marker(id: usize, dc: &DrawConfig) -> String {
+    if dc.ascii_color {
+        const SHARED_COLORS: [&str; 6] = ["31", "32", "33", "34", "35", "36"];
+        let color = SHARED_COLORS[(id - 1) % SHARED_COLORS.len()];
+        format!("\x1b[{color}m◆{id}\x1b[0m")
+    } else {
+        format!("◆{id}")
     }
 }
 
@@ -501,24 +670,13 @@ mod test {
     use super::*;
 
     #[test]
-    fn small_ascii_viz() {
-        let mut btm = PathMap::new();
-        let rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
-        rs.iter().enumerate().for_each(|(i, r)| { btm.insert(r.as_bytes(), i); });
-
-        let mut out_buf = Vec::new();
-        viz_maps_ascii(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: true }, &mut out_buf).unwrap();
-        println!("{}", String::from_utf8_lossy(&out_buf));
-    }
-
-    #[test]
     fn small_viz() {
         let mut btm = PathMap::new();
         let rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
         rs.iter().enumerate().for_each(|(i, r)| { btm.insert(r.as_bytes(), i); });
 
         let mut out_buf = Vec::new();
-        viz_maps(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: false }, &mut out_buf).unwrap();
+        viz_maps(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: false, ascii_color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -529,7 +687,7 @@ mod test {
         rs.iter().for_each(|path| { btm.insert(path.as_bytes(), ()); });
 
         let mut out_buf = Vec::new();
-        viz_maps(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: true, logical: true }, &mut out_buf).unwrap();
+        viz_maps(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: true, logical: true, ascii_color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -565,7 +723,7 @@ mod test {
         drop(wz);
 
         let mut out_buf = Vec::new();
-        viz_maps(&[l0_map], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: true, logical: true }, &mut out_buf).unwrap();
+        viz_maps(&[l0_map], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: true, logical: true, ascii_color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -576,7 +734,7 @@ mod test {
         rs.iter().enumerate().for_each(|(i, r)| { btm.insert(r.as_bytes(), i); });
 
         let mut out_buf = Vec::new();
-        viz_maps(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: true }, &mut out_buf).unwrap();
+        viz_maps(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: true, ascii_color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -596,7 +754,7 @@ mod test {
         let joined = a.join(&b);
 
         let mut out_buf = Vec::new();
-        viz_maps(&[a, b, joined], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: false }, &mut out_buf).unwrap();
+        viz_maps(&[a, b, joined], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: false, ascii_color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -622,7 +780,7 @@ mod test {
         wz.graft_map(hand);
 
         let mut out_buf = Vec::new();
-        viz_maps(&[body], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: true }, &mut out_buf).unwrap();
+        viz_maps(&[body], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: true, ascii_color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -745,8 +903,43 @@ mod test {
         // println!("space size {}", space.val_count());
 
         let mut out_buf = Vec::new();
-        viz_maps(&[space], &DrawConfig{ ascii: false, hide_value_paths: true, minimize_values: true, logical: false }, &mut out_buf).unwrap();
+        viz_maps(&[space], &DrawConfig{ ascii: false, hide_value_paths: true, minimize_values: true, logical: false, ascii_color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
+    #[test]
+    fn small_ascii_viz() {
+        let mut btm = PathMap::new();
+        let rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
+        rs.iter().enumerate().for_each(|(i, r)| { btm.insert(r.as_bytes(), i); });
+
+        let mut out_buf = Vec::new();
+        viz_maps_ascii(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: true, ascii_color: false }, &mut out_buf).unwrap();
+        // println!("{}", String::from_utf8_lossy(&out_buf));
+    }
+
+    #[test]
+    fn person_viz_ascii() {
+        let mut hand = PathMap::<char>::new();
+        hand.insert("Finger.0-Thumb", '👍');
+        hand.insert("Finger.1-Index", '🫵');
+        hand.insert("Finger.2-Middle", '🖕');
+        hand.insert("Finger.3-Ring", '💍');
+        hand.insert("Finger.4-Pinky", '🤙');
+
+        let mut body = PathMap::<char>::new();
+        body.insert("0-Head.0-Eyes", '👀');
+        body.insert("0-Head.1-Nose", '🤥');
+        body.insert("0-Head.3-Mouth", '👄');
+
+        let mut wz = body.write_zipper();
+        wz.move_to_path("1-Hand.0-Left.");
+        wz.graft_map(hand.clone());
+        wz.move_to_path("1-Hand.1-Right.");
+        wz.graft_map(hand);
+
+        let mut out_buf = Vec::new();
+        viz_maps_ascii(&[body], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: true, ascii_color: true }, &mut out_buf).unwrap();
+        println!("{}", String::from_utf8_lossy(&out_buf));
+    }
 }
