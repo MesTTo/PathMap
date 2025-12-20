@@ -480,7 +480,7 @@ fn render_value_part<V: Debug>(value: Option<&V>, dc: &DrawConfig) -> String {
         None => String::new(),
         Some(v) => {
             if dc.minimize_values {
-                " = .".to_string()
+                String::new()
             } else {
                 format!(" = {v:?}")
             }
@@ -958,6 +958,6 @@ mod test {
 
         let mut out_buf = Vec::new();
         viz_maps(&[body], &DrawConfig{ mode: VizMode::Ascii, ascii_path: true, hide_value_paths: false, minimize_values: false, logical: true, color: true }, &mut out_buf).unwrap();
-        println!("{}", String::from_utf8_lossy(&out_buf));
+        // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 }
