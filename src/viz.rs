@@ -10,11 +10,23 @@ use crate::zipper::*;
 use crate::TrieValue;
 use crate::utils::debug::{render_debug_path, PathRenderMode};
 
+/// Rendering modes that can be used for visualization
+#[derive(Debug, Default)]
+pub enum VizMode {
+    /// Output [Mermaid](https://mermaid.js.org) markup commands to render a graph of the trie
+    #[default]
+    Mermaid,
+    /// Output a terminal-friendly ascii tree rendering
+    Ascii
+}
+
 /// Configuration settings for rendering a graph of a `pathmap` trie
 pub struct DrawConfig {
+    /// The rendering mode to use for the visualization
+    pub mode: VizMode,
     /// If `true`, render path substrings as ascii, otherwise render them as strings of
     /// byte-sized numbers
-    pub ascii: bool,
+    pub ascii_path: bool,
     /// If `true`, skips rendering of the paths that terminate in values, otherwise renders
     /// all paths in the trie
     pub hide_value_paths: bool,
@@ -24,18 +36,19 @@ pub struct DrawConfig {
     /// If `true`, renders the trie irrespective of the pysical (in-memory) representation,
     /// otherwise also renders the nodes that comprise the layout of the trie structure
     pub logical: bool,
-    /// If `true`, use ANSI escape codes to color shared-subtrie markers in ascii output
-    pub ascii_color: bool,
+    /// If `true`, use color in the rendering
+    pub color: bool,
 }
 
 impl Default for DrawConfig {
     fn default() -> Self {
         Self{
-            ascii: false,
+            mode: VizMode::Mermaid,
+            ascii_path: false,
             hide_value_paths: false,
             minimize_values: false,
             logical: true,
-            ascii_color: true,
+            color: true,
         }
     }
 }
@@ -70,9 +83,16 @@ struct DrawState {
     cmds: Vec<DrawCmd>
 }
 
-/// Output [Mermaid](https://mermaid.js.org) markup commands to render a graph of the trie
-/// within the provided [PathMap]s
-pub fn viz_maps<V : TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc: &DrawConfig, mut out: W) -> io::Result<()> {
+/// Output a render trie within the provided [PathMap]s.  See [VizMode] and [DrawConfig] for rendering options
+pub fn viz_maps<V : TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc: &DrawConfig, out: W) -> io::Result<()> {
+    match dc.mode {
+        VizMode::Mermaid => viz_maps_mermaid(btms, dc, out),
+        VizMode::Ascii => viz_maps_ascii(btms, dc, out),
+    }
+}
+
+/// Output [Mermaid](https://mermaid.js.org) markup commands to render a graph of the trie within the provided [PathMap]s
+fn viz_maps_mermaid<V : TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc: &DrawConfig, mut out: W) -> io::Result<()> {
     writeln!(out, "flowchart LR")?;
     let mut ds = DrawState{ root: 0, nodes: HashMap::new(), cmds: vec![] };
 
@@ -128,7 +148,7 @@ pub fn viz_maps<V : TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc:
             }
             DrawCmd::Edge(src, dst, key_bytes) => {
                 let debug_jump = format!("{:?}", key_bytes);
-                let jump = if dc.ascii { std::str::from_utf8(&key_bytes[..]).unwrap_or_else(|_| debug_jump.as_str()) }
+                let jump = if dc.ascii_path { std::str::from_utf8(&key_bytes[..]).unwrap_or_else(|_| debug_jump.as_str()) }
                 else { debug_jump.as_str() };
 
                 if jump.len() > 0 {
@@ -140,7 +160,7 @@ pub fn viz_maps<V : TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc:
             DrawCmd::Value(parent, address, key_bytes) => {
                 if dc.hide_value_paths { continue }
                 let debug_jump = format!("{:?}", key_bytes);
-                let jump = if dc.ascii { std::str::from_utf8(&key_bytes[..]).unwrap_or_else(|_| debug_jump.as_str()) }
+                let jump = if dc.ascii_path { std::str::from_utf8(&key_bytes[..]).unwrap_or_else(|_| debug_jump.as_str()) }
                 else { debug_jump.as_str() };
 
                 let address_string = format!("{parent}");
@@ -168,10 +188,8 @@ pub fn viz_maps<V : TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc:
     Ok(())
 }
 
-/// Output a logical ascii art representation of the trie within the provided [PathMap]s
-///
-/// Panics if `dc.logical` is `false`.
-pub fn viz_maps_ascii<V: TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc: &DrawConfig, mut out: W) -> io::Result<()> {
+/// Output a logical ascii art representation of the trie within the provided [PathMap]s. Panics if `dc.logical` is `false`.
+fn viz_maps_ascii<V: TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc: &DrawConfig, mut out: W) -> io::Result<()> {
     assert!(dc.logical, "viz_maps_ascii only supports logical rendering");
 
     let mut ds = DrawState{ root: 0, nodes: HashMap::new(), cmds: vec![] };
@@ -451,7 +469,7 @@ fn render_ascii_edge<V: Debug, W: Write>(
 }
 
 fn render_path_label(path: &[u8], dc: &DrawConfig) -> String {
-    let mode = if dc.ascii { PathRenderMode::TryAscii } else { PathRenderMode::ByteList };
+    let mode = if dc.ascii_path { PathRenderMode::TryAscii } else { PathRenderMode::ByteList };
     render_debug_path(path, mode)
         .unwrap_or_else(|| format!("{path:?}").into())
         .into_owned()
@@ -476,7 +494,7 @@ fn render_value_ptr_part<V: Debug>(value: Option<*const V>, dc: &DrawConfig) -> 
 }
 
 fn render_shared_marker(id: usize, dc: &DrawConfig) -> String {
-    if dc.ascii_color {
+    if dc.color {
         const SHARED_COLORS: [&str; 6] = ["31", "32", "33", "34", "35", "36"];
         let color = SHARED_COLORS[(id - 1) % SHARED_COLORS.len()];
         format!("\x1b[{color}m◆{id}\x1b[0m")
@@ -676,7 +694,7 @@ mod test {
         rs.iter().enumerate().for_each(|(i, r)| { btm.insert(r.as_bytes(), i); });
 
         let mut out_buf = Vec::new();
-        viz_maps(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: false, ascii_color: false }, &mut out_buf).unwrap();
+        viz_maps(&[btm], &DrawConfig{ mode: VizMode::Mermaid, ascii_path: true, hide_value_paths: false, minimize_values: false, logical: false, color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -687,7 +705,7 @@ mod test {
         rs.iter().for_each(|path| { btm.insert(path.as_bytes(), ()); });
 
         let mut out_buf = Vec::new();
-        viz_maps(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: true, logical: true, ascii_color: false }, &mut out_buf).unwrap();
+        viz_maps(&[btm], &DrawConfig{ mode: VizMode::Mermaid, ascii_path: true, hide_value_paths: false, minimize_values: true, logical: true, color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -723,7 +741,7 @@ mod test {
         drop(wz);
 
         let mut out_buf = Vec::new();
-        viz_maps(&[l0_map], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: true, logical: true, ascii_color: false }, &mut out_buf).unwrap();
+        viz_maps(&[l0_map], &DrawConfig{ mode: VizMode::Mermaid, ascii_path: true, hide_value_paths: false, minimize_values: true, logical: true, color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -734,7 +752,7 @@ mod test {
         rs.iter().enumerate().for_each(|(i, r)| { btm.insert(r.as_bytes(), i); });
 
         let mut out_buf = Vec::new();
-        viz_maps(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: true, ascii_color: false }, &mut out_buf).unwrap();
+        viz_maps(&[btm], &DrawConfig{ mode: VizMode::Mermaid, ascii_path: true, hide_value_paths: false, minimize_values: false, logical: true, color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -754,7 +772,7 @@ mod test {
         let joined = a.join(&b);
 
         let mut out_buf = Vec::new();
-        viz_maps(&[a, b, joined], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: false, ascii_color: false }, &mut out_buf).unwrap();
+        viz_maps(&[a, b, joined], &DrawConfig{ mode: VizMode::Mermaid, ascii_path: true, hide_value_paths: false, minimize_values: false, logical: false, color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -780,7 +798,7 @@ mod test {
         wz.graft_map(hand);
 
         let mut out_buf = Vec::new();
-        viz_maps(&[body], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: true, ascii_color: false }, &mut out_buf).unwrap();
+        viz_maps(&[body], &DrawConfig{ mode: VizMode::Mermaid, ascii_path: true, hide_value_paths: false, minimize_values: false, logical: true, color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -903,7 +921,7 @@ mod test {
         // println!("space size {}", space.val_count());
 
         let mut out_buf = Vec::new();
-        viz_maps(&[space], &DrawConfig{ ascii: false, hide_value_paths: true, minimize_values: true, logical: false, ascii_color: false }, &mut out_buf).unwrap();
+        viz_maps(&[space], &DrawConfig{ mode: VizMode::Mermaid, ascii_path: false, hide_value_paths: true, minimize_values: true, logical: false, color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -914,7 +932,7 @@ mod test {
         rs.iter().enumerate().for_each(|(i, r)| { btm.insert(r.as_bytes(), i); });
 
         let mut out_buf = Vec::new();
-        viz_maps_ascii(&[btm], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: true, ascii_color: false }, &mut out_buf).unwrap();
+        viz_maps(&[btm], &DrawConfig{ mode: VizMode::Ascii, ascii_path: true, hide_value_paths: false, minimize_values: false, logical: true, color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
     }
 
@@ -939,7 +957,7 @@ mod test {
         wz.graft_map(hand);
 
         let mut out_buf = Vec::new();
-        viz_maps_ascii(&[body], &DrawConfig{ ascii: true, hide_value_paths: false, minimize_values: false, logical: true, ascii_color: true }, &mut out_buf).unwrap();
+        viz_maps(&[body], &DrawConfig{ mode: VizMode::Ascii, ascii_path: true, hide_value_paths: false, minimize_values: false, logical: true, color: true }, &mut out_buf).unwrap();
         println!("{}", String::from_utf8_lossy(&out_buf));
     }
 }
