@@ -81,13 +81,15 @@ use std::cell::Cell;
 use std::marker::PhantomData;
 use fast_slice_utils::starts_with;
 
+use crate::alloc::GlobalAlloc;
 use crate::{
+    PathMap,
     morphisms::Catamorphism,
     utils::{BitMask, ByteMask, find_prefix_overlap},
     zipper::{
         Zipper, ZipperValues, ZipperForking, ZipperAbsolutePath, ZipperIteration,
-        ZipperMoving, ZipperPathBuffer, ZipperReadOnlyValues,
-        ZipperConcrete, ZipperReadOnlyConditionalValues,
+        ZipperMoving, ZipperPathBuffer, ZipperReadOnlyValues, ZipperSubtries,
+        ZipperConcrete, ZipperReadOnlyConditionalValues, TrieRef
     },
 };
 
@@ -1462,6 +1464,14 @@ where Storage: AsRef<[u8]>
     }
 }
 
+impl<'tree, Storage> ZipperSubtries<(), GlobalAlloc> for ACTZipper<'tree, Storage, ()>
+where Storage: AsRef<[u8]>
+{
+    fn native_subtries(&self) -> bool { false }
+    fn try_make_map(&self) -> Option<PathMap<(), GlobalAlloc>> { None }
+    fn trie_ref(&self) -> Option<TrieRef<'_, (), GlobalAlloc>> { None }
+}
+
 const DO_TRACE: bool = false;
 impl<'tree, Storage, Value> ACTZipper<'tree, Storage, Value>
 where Storage: AsRef<[u8]>
@@ -1696,7 +1706,7 @@ where Storage: AsRef<[u8]>
     fn get_val(&self) -> Option<&'tree u64> {
         let value = self.get_value()?;
         if self.tree.value.get() != value {
-            self.tree.value.set(value);            
+            self.tree.value.set(value);
         }
         let ptr = self.tree.value.as_ptr();
         Some(unsafe { &*ptr })
