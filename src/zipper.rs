@@ -81,9 +81,15 @@ pub trait ZipperForking<V> {
 }
 
 /// Methods for zippers that can access concrete subtries
-pub trait ZipperSubtries<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: ZipperValues<V> + zipper_priv::ZipperPriv<V=V, A=A> {
-    /// Returns a new [PathMap] containing everything below the zipper's focus or `None` if no
-    /// subtrie exists below the focus
+pub trait ZipperSubtries<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: ZipperValues<V> {
+    /// Returns `true` if the zipper can access a subtrie in constant time
+    ///
+    /// Sometimes this trait will be implemented on abstract zipper types, in which case this method will return
+    /// `false`.  When it returns `true` other methods in this trait should return `Some`.
+    fn native_subtries(&self) -> bool;
+
+    /// Returns a new [PathMap] containing everything below the zipper's focus or `None` if the zipper doesn't
+    /// suppot creating a new `PathMap`.
     ///
     /// GOAT: This method's behavior is affected by the `graft_root_vals` feature
     /// This method does not clone the value at the focus as the map's root.
@@ -99,7 +105,10 @@ pub trait ZipperSubtries<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Zi
     /// Luke: Personally I think it might make sense for all of the entry points to change behavior.
     /// Perhaps the biggest argument against the change is that it effectively doubles the cost of
     /// graft.  This is related to a similar question on [ZipperWriting::join_map_into]
-    fn make_map(&self) -> Option<PathMap<Self::V, A>>;
+    fn try_make_map(&self) -> Option<PathMap<V, A>>;
+
+    /// Attempts to return a [TrieRef] from the current focus
+    fn trie_ref(&self) -> Option<TrieRef<'_, V, A>>;
 }
 
 /// An interface to enable moving a zipper around the trie and inspecting paths
@@ -483,6 +492,15 @@ pub trait ZipperReadOnlyConditionalIteration<'a, V>: ZipperReadOnlyConditionalVa
     }
 }
 
+/// Similar to [ZipperSubtries], but with the stronger guarantee that subtrie access will be constant-time and won't fail
+pub trait ZipperInfallibleSubtries<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: ZipperValues<V> + zipper_priv::ZipperPriv<V=V, A=A> {
+    /// Returns a new [PathMap] containing everything below the zipper's focus
+    fn make_map(&self) -> PathMap<V, A>;
+
+    /// Return a [TrieRef] from the current focus
+    fn get_trie_ref(&self) -> TrieRef<'_, V, A>;
+}
+
 /// An interface to access subtries through a [Zipper] that cannot modify the trie.  Allows
 /// references with lifetimes that may outlive the zipper
 ///
@@ -800,7 +818,14 @@ impl<V, Z> ZipperForking<V> for &mut Z where Z: ZipperForking<V> {
 }
 
 impl<V: Clone + Send + Sync, Z, A: Allocator> ZipperSubtries<V, A> for &mut Z where Z: ZipperSubtries<V, A> {
-    fn make_map(&self) -> Option<PathMap<Self::V, A>> { (**self).make_map() }
+    fn native_subtries(&self) -> bool { (**self).native_subtries() }
+    fn try_make_map(&self) -> Option<PathMap<V, A>> { (**self).try_make_map() }
+    fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { (**self).trie_ref() }
+}
+
+impl<V: Clone + Send + Sync, Z, A: Allocator> ZipperInfallibleSubtries<V, A> for &mut Z where Z: ZipperInfallibleSubtries<V, A> {
+    fn make_map(&self) -> PathMap<V, A> { (**self).make_map() }
+    fn get_trie_ref(&self) -> TrieRef<'_, V, A> { (**self).get_trie_ref() }
 }
 
 impl<'a, V: Clone + Send + Sync, Z> ZipperReadOnlyValues<'a, V> for &mut Z where Z: ZipperReadOnlyValues<'a, V>, Self: ZipperValues<V> {
@@ -909,8 +934,15 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipp
     }
 }
 
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for ReadZipperTracked<'_, '_, V, A>{
-    fn make_map(&self) -> Option<PathMap<Self::V, A>> { self.z.make_map() }
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for ReadZipperTracked<'_, '_, V, A> {
+    fn native_subtries(&self) -> bool { self.z.native_subtries() }
+    fn try_make_map(&self) -> Option<PathMap<V, A>> { self.z.try_make_map() }
+    fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { self.z.trie_ref() }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for ReadZipperTracked<'_, '_, V, A> {
+    fn make_map(&self) -> PathMap<V, A> { self.z.make_map() }
+    fn get_trie_ref(&self) -> TrieRef<'_, V, A> { self.z.get_trie_ref() }
 }
 
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperMoving for ReadZipperTracked<'trie, '_, V, A> {
@@ -1063,7 +1095,14 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipp
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for ReadZipperUntracked<'_, '_, V, A> {
-    fn make_map(&self) -> Option<PathMap<Self::V, A>> { self.z.make_map() }
+    fn native_subtries(&self) -> bool { self.z.native_subtries() }
+    fn try_make_map(&self) -> Option<PathMap<V, A>> { self.z.try_make_map() }
+    fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { self.z.trie_ref() }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for ReadZipperUntracked<'_, '_, V, A> {
+    fn make_map(&self) -> PathMap<V, A> { self.z.make_map() }
+    fn get_trie_ref(&self) -> TrieRef<'_, V, A> { self.z.get_trie_ref() }
 }
 
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperMoving for ReadZipperUntracked<'trie, '_, V, A> {
@@ -1285,7 +1324,14 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipp
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for ReadZipperOwned<V, A> {
-    fn make_map(&self) -> Option<PathMap<Self::V, A>> { self.z.make_map() }
+    fn native_subtries(&self) -> bool { self.z.native_subtries() }
+    fn try_make_map(&self) -> Option<PathMap<V, A>> { self.z.try_make_map() }
+    fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { self.z.trie_ref() }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for ReadZipperOwned<V, A> {
+    fn make_map(&self) -> PathMap<V, A> { self.z.make_map() }
+    fn get_trie_ref(&self) -> TrieRef<'_, V, A> { self.z.get_trie_ref() }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperMoving for ReadZipperOwned<V, A> {
@@ -1584,20 +1630,30 @@ pub(crate) mod read_zipper_core {
     }
 
     impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for ReadZipperCore<'_, '_, V, A> {
-        fn make_map(&self) -> Option<PathMap<Self::V, A>> {
+        fn native_subtries(&self) -> bool { true }
+        fn try_make_map(&self) -> Option<PathMap<V, A>> {
+            Some(self.make_map())
+        }
+        fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> {
+            Some(self.get_trie_ref())
+        }
+    }
+
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for ReadZipperCore<'_, '_, V, A> {
+        fn make_map(&self) -> PathMap<V, A> {
             #[cfg(not(feature = "graft_root_vals"))]
             let root_val = None;
             #[cfg(feature = "graft_root_vals")]
             let root_val = self.val().cloned();
 
             let root_node = self.get_focus().into_option();
-            if root_node.is_some() || root_val.is_some() {
-                Some(PathMap::new_with_root_in(root_node, root_val, self.alloc.clone()))
-            } else {
-                None
-            }
+            PathMap::new_with_root_in(root_node, root_val, self.alloc.clone())
+        }
+        fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
+            TrieRefBorrowed::new_with_key_and_path_in(self.focus_parent_borrowed(), self.val(), self.node_key(), b"", self.alloc.clone()).into()
         }
     }
+
 
     impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperMoving for ReadZipperCore<'trie, '_, V, A> {
         fn at_root(&self) -> bool {

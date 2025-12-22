@@ -1205,7 +1205,7 @@ impl<V: Clone + Send + Sync, W: Default, A: Allocator> TrieBuilder<V, W, A> {
     ///
     /// WARNING: This method is incompatible with [Self::set_child_mask] and must follow the same
     /// rules as [Self::push_byte]
-    pub fn graft_at_byte<Z: ZipperSubtries<V, A>>(&mut self, byte: u8, read_zipper: &Z) {
+    pub fn graft_at_byte<Z: ZipperInfallibleSubtries<V, A>>(&mut self, byte: u8, read_zipper: &Z) {
         let mask_word = (byte / 64) as usize;
         if mask_word < self.cur_mask_word {
             panic!("children must be pushed in sorted order")

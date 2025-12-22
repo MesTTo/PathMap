@@ -440,6 +440,34 @@ pub fn derive_poly_zipper(input: TokenStream) -> TokenStream {
         }
     };
 
+    // Generate ZipperSubtries trait implementation
+    //GOAT, TODO: We ought to use the generic allocator A, if the enum has one, but use the default if not
+    let zipper_subtries_impl = {
+        quote! {
+            impl #impl_generics pathmap::zipper::ZipperSubtries<V> for #enum_name #ty_generics
+            where
+                #(#inner_types: pathmap::zipper::ZipperSubtries<V>,)*
+                #where_clause
+            {
+                fn native_subtries(&self) -> bool {
+                    match self {
+                        #(#variant_arms => inner.native_subtries(),)*
+                    }
+                }
+                fn try_make_map(&self) -> Option<pathmap::PathMap<V>> {
+                    match self {
+                        #(#variant_arms => inner.try_make_map(),)*
+                    }
+                }
+                fn trie_ref(&self) -> Option<pathmap::zipper::TrieRef<'_, V>> {
+                    match self {
+                        #(#variant_arms => inner.trie_ref(),)*
+                    }
+                }
+            }
+        }
+    };
+
     let expanded = quote! {
         #(#from_impls)*
         #zipper_impl
@@ -454,6 +482,7 @@ pub fn derive_poly_zipper(input: TokenStream) -> TokenStream {
         #zipper_iteration_impl
         #zipper_read_only_iteration_impl
         #zipper_read_only_conditional_iteration_impl
+        #zipper_subtries_impl
     };
 
     TokenStream::from(expanded)

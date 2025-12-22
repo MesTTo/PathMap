@@ -521,7 +521,17 @@ impl<'prefix, V: Clone + Send + Sync, Z, A: Allocator> ZipperSubtries<V, A> for 
     where
         Z: ZipperSubtries<V, A>
 {
-    fn make_map(&self) -> Option<PathMap<Self::V, A>> { self.source.make_map() }
+    fn native_subtries(&self) -> bool { self.source.native_subtries() }
+    fn try_make_map(&self) -> Option<PathMap<V, A>> { self.source.try_make_map() }
+    fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { self.source.trie_ref() }
+}
+
+impl<'prefix, V: Clone + Send + Sync, Z, A: Allocator> ZipperInfallibleSubtries<V, A> for PrefixZipper<'prefix, Z>
+    where
+        Z: ZipperInfallibleSubtries<V, A>
+{
+    fn make_map(&self) -> PathMap<Self::V, A> { self.source.make_map() }
+    fn get_trie_ref(&self) -> TrieRef<'_, V, A> { self.source.get_trie_ref() }
 }
 
 impl<'prefix, 'a, V: Clone + Send + Sync + 'a, Z, A: Allocator + 'a> ZipperReadOnlySubtries<'a, V, A> for PrefixZipper<'prefix, Z> where Z: ZipperReadOnlySubtries<'a, V, A>, Self: zipper_priv::ZipperReadOnlyPriv<'a, V, A> + ZipperSubtries<V, A> {

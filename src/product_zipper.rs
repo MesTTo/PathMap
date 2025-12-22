@@ -15,7 +15,7 @@ pub struct ProductZipper<'factor_z, 'trie, V: Clone + Send + Sync, A: Allocator 
     /// which is conceptually the same as the end-point of each indexed factor
     factor_paths: Vec<usize>,
     /// We need to hang onto the zippers for the life of this object, so their trackers stay alive
-    source_zippers: Vec<Box<dyn zipper_priv::ZipperReadOnlyPriv<'trie, V, A> + 'factor_z>>
+    source_zippers: Vec<Box<dyn ZipperSubtries<V, A> + 'factor_z>>
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ProductZipper<'_, '_, V, A> {
@@ -35,12 +35,14 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ProductZ
 impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipper<'factor_z, 'trie, V, A> {
     /// Creates a new `ProductZipper` from the provided zippers
     ///
+    /// Panics if any of the provided factor zippers return `false` from the [`ZipperSubtries::native_subtries`].
+    ///
     /// WARNING: passing `other_zippers` that are not at node roots may lead to a panic.  This is
     /// an implementation issue, but would be very difficult to fix and may not be worth fixing.
     pub fn new<PrimaryZ, OtherZ, ZipperList>(mut primary_z: PrimaryZ, other_zippers: ZipperList) -> Self
         where
         PrimaryZ: ZipperMoving + ZipperReadOnlySubtries<'trie, V, A> + 'factor_z,
-        OtherZ: ZipperReadOnlySubtries<'trie, V, A> + 'factor_z,
+        OtherZ: ZipperSubtries<V, A> + 'factor_z,
         ZipperList: IntoIterator<Item=OtherZ>,
     {
         let other_z_iter = other_zippers.into_iter();
@@ -52,11 +54,13 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
         //Get the core out of the primary zipper
         //This unwrap won't fail because all the types that implement `ZipperMoving` have cores
         let core_z = primary_z.take_core().unwrap();
-        source_zippers.push(Box::new(primary_z) as Box<dyn zipper_priv::ZipperReadOnlyPriv<V, A>>);
+        source_zippers.push(Box::new(primary_z) as Box<dyn ZipperSubtries<V, A>>);
 
         //Get TrieRefs for the remaining zippers
         for other_z in other_z_iter {
-            let trie_ref: TrieRef<'trie, V, A> = other_z.trie_ref_at_path("").into();
+            //SAFETY: We ensure the trie accessible from this TrieRef remains accessible by ensuring the zipper
+            // won't be dropped until the PZ is dropped
+            let trie_ref: TrieRef<'trie, V, A> = unsafe{ core::mem::transmute(other_z.trie_ref().unwrap()) };
             secondaries.push(trie_ref);
             source_zippers.push(Box::new(other_z));
         }
@@ -73,22 +77,26 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
         //Get the core out of the primary zipper
         //This unwrap won't fail because all the types that implement `ZipperMoving` have cores
         let core_z = primary_z.take_core().unwrap();
-        source_zippers.push(Box::new(primary_z) as Box<dyn zipper_priv::ZipperReadOnlyPriv<V, A>>);
+        source_zippers.push(Box::new(primary_z) as Box<dyn ZipperSubtries<V, A>>);
 
         Self{z: core_z, factor_paths: Vec::new(), secondaries: vec![], source_zippers}
     }
     /// Appends additional factors to a `ProductZipper`.  This is useful when dealing with
     /// factor zippers of different types
     ///
+    /// Panics the provided factor zipper returns `false` from the [`ZipperSubtries::native_subtries`].
+    ///
     /// WARNING: the same warning as above applies about passing other zippers that aren't at node roots
     pub fn new_factors<OtherZ, ZipperList>(&mut self, other_zippers: ZipperList)
         where
-        OtherZ: ZipperReadOnlySubtries<'trie, V, A> + 'factor_z,
+        OtherZ: ZipperSubtries<V, A> + 'factor_z,
         ZipperList: IntoIterator<Item=OtherZ>,
     {
         let other_z_iter = other_zippers.into_iter();
         for other_z in other_z_iter {
-            let trie_ref: TrieRef<'trie, V, A> = other_z.trie_ref_at_path("").into();
+            //SAFETY: We ensure the trie accessible from this TrieRef remains accessible by ensuring the zipper
+            // won't be dropped until the PZ is dropped
+            let trie_ref: TrieRef<'trie, V, A> = unsafe{ core::mem::transmute(other_z.trie_ref().unwrap()) };
             self.secondaries.push(trie_ref);
             self.source_zippers.push(Box::new(other_z));
         }

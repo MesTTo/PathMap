@@ -243,18 +243,23 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for TrieRefB
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for TrieRefBorrowed<'_, V, A> {
-    fn make_map(&self) -> Option<PathMap<Self::V, A>> {
+    fn native_subtries(&self) -> bool { true }
+    fn try_make_map(&self) -> Option<PathMap<V, A>> { Some(self.make_map()) }
+    fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { Some(self.get_trie_ref()) }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for TrieRefBorrowed<'_, V, A> {
+    fn make_map(&self) -> PathMap<Self::V, A> {
         #[cfg(not(feature = "graft_root_vals"))]
         let root_val = None;
         #[cfg(feature = "graft_root_vals")]
         let root_val = self.val().cloned();
 
         let root_node = self.get_focus().into_option();
-        if root_node.is_some() || root_val.is_some() {
-            Some(PathMap::new_with_root_in(root_node, root_val, self.alloc.clone()))
-        } else {
-            None
-        }
+        PathMap::new_with_root_in(root_node, root_val, self.alloc.clone())
+    }
+    fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
+        self.clone().into()
     }
 }
 
@@ -398,6 +403,13 @@ impl<V> ValOrKey<V> {
 }
 
 impl<V: Clone + Send + Sync, A: Allocator> TrieRefOwned<V, A> {
+    /// Makes a `TrieRefOwned` from a node and a val
+    pub(crate) fn new_with_node_and_val_in(focus_node: Option<TrieNodeODRc<V, A>>, val: Option<V>, alloc: A) -> Self {
+        match focus_node {
+            Some(_) => Self { focus_node: focus_node, val_or_key: ValOrKey { val: (VAL_SENTINEL, core::mem::ManuallyDrop::new(val)) }, alloc },
+            None => Self::new_invalid_in(alloc)
+        }
+    }
     /// Makes a new sentinel that points to nothing.  THe allocator is just to keep the type system happy
     pub(crate) fn new_invalid_in(alloc: A) -> Self {
         Self { focus_node: None, val_or_key: ValOrKey { val: (BAD_SENTINEL, core::mem::ManuallyDrop::new(None)) }, alloc }
@@ -572,18 +584,23 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for TrieRefO
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for TrieRefOwned<V, A> {
-    fn make_map(&self) -> Option<PathMap<Self::V, A>> {
+    fn native_subtries(&self) -> bool { true }
+    fn try_make_map(&self) -> Option<PathMap<V, A>> { Some(self.make_map()) }
+    fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { Some(self.get_trie_ref()) }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for TrieRefOwned<V, A> {
+    fn make_map(&self) -> PathMap<Self::V, A> {
         #[cfg(not(feature = "graft_root_vals"))]
         let root_val = None;
         #[cfg(feature = "graft_root_vals")]
         let root_val = self.val().cloned();
 
         let root_node = self.get_focus().into_option();
-        if root_node.is_some() || root_val.is_some() {
-            Some(PathMap::new_with_root_in(root_node, root_val, self.alloc.clone()))
-        } else {
-            None
-        }
+        PathMap::new_with_root_in(root_node, root_val, self.alloc.clone())
+    }
+    fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
+        self.clone().into()
     }
 }
 
@@ -740,11 +757,20 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for TrieRef<
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for TrieRef<'_, V, A> {
-    fn make_map(&self) -> Option<PathMap<Self::V, A>> {
+    fn native_subtries(&self) -> bool { true }
+    fn try_make_map(&self) -> Option<PathMap<V, A>> { Some(self.make_map()) }
+    fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { Some(self.get_trie_ref()) }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for TrieRef<'_, V, A> {
+    fn make_map(&self) -> PathMap<Self::V, A> {
         match self {
             TrieRef::Borrowed(trie_ref) => trie_ref.make_map(),
             TrieRef::Owned(trie_ref) => trie_ref.make_map(),
         }
+    }
+    fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
+        self.clone()
     }
 }
 
@@ -951,7 +977,7 @@ mod tests {
         assert_eq!(z.path(), b"om");
         assert_eq!(z.origin_path(), b"om");
 
-        let new_map = trie_ref.make_map().unwrap();
+        let new_map = trie_ref.make_map();
         assert_eq!(new_map.val_count(), 9);
     }
 
