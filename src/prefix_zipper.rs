@@ -183,6 +183,19 @@ impl<'prefix, Z>  PrefixZipper<'prefix, Z>
     }
 }
 
+impl<'prefix, Z>  PrefixZipper<'prefix, Z> {
+    /// Returns the path that must be descended before the PrefixZipper's focus is at the root of the inner zipper, or
+    /// `None` if the focus is no longer along the prefix path
+    #[inline]
+    pub fn prefix_path_below_focus(&self) -> Option<&[u8]> {
+        match self.position {
+            PrefixPos::Prefix { valid } => Some( &self.prefix[self.origin_depth + valid..] ),
+            PrefixPos::PrefixOff { valid: _, invalid: _ } => None,
+            PrefixPos::Source => Some(&[]),
+        }
+    }
+}
+
 impl<'prefix, Z> ZipperConcrete for PrefixZipper<'prefix, Z>
     where
         Z: ZipperConcrete
@@ -517,21 +530,87 @@ impl<'prefix, 'a, V: Clone + Send + Sync, Z, A: Allocator> zipper_priv::ZipperRe
     fn take_core(&mut self) -> Option<read_zipper_core::ReadZipperCore<'a, 'static, V, A>> { self.source.take_core() }
 }
 
-impl<'prefix, V: Clone + Send + Sync, Z, A: Allocator> ZipperSubtries<V, A> for PrefixZipper<'prefix, Z>
+impl<'prefix, V: Clone + Send + Sync + Unpin, Z, A: Allocator> ZipperSubtries<V, A> for PrefixZipper<'prefix, Z>
     where
         Z: ZipperSubtries<V, A>
 {
     fn native_subtries(&self) -> bool { self.source.native_subtries() }
-    fn try_make_map(&self) -> Option<PathMap<V, A>> { self.source.try_make_map() }
-    fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { self.source.trie_ref() }
+    fn try_make_map(&self) -> Option<PathMap<V, A>> {
+        if !self.native_subtries() {
+            return None
+        }
+        let leaf_map = self.source.try_make_map();
+        match self.prefix_path_below_focus() {
+            Some(prefix_path) => {
+                if prefix_path.len() > 0 {
+                    let mut new_map = PathMap::new_in(self.source.alloc());
+                    let mut wz = new_map.write_zipper_at_path(prefix_path);
+                    let leaf_map = match leaf_map {
+                        Some(map) => map,
+                        None => PathMap::new_in(self.source.alloc())
+                    };
+                    wz.graft_map(leaf_map);
+                    Some(new_map)
+                } else {
+                    leaf_map
+                }
+            },
+            None => {
+                leaf_map
+            }
+        }
+    }
+    fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> {
+        if !self.native_subtries() {
+            return None
+        }
+        if let Some(prefix_path) = self.prefix_path_below_focus() {
+            if prefix_path.len() > 0 {
+                return self.try_make_map().map(|temp_map| TrieRef::from(temp_map))
+            } else {
+                return self.source.trie_ref()
+            }
+        } else {
+            Some(TrieRefOwned::new_invalid_in(self.source.alloc()).into())
+        }
+    }
+    fn alloc(&self) -> A { self.source.alloc() }
 }
 
-impl<'prefix, V: Clone + Send + Sync, Z, A: Allocator> ZipperInfallibleSubtries<V, A> for PrefixZipper<'prefix, Z>
+impl<'prefix, V: Clone + Send + Sync + Unpin, Z, A: Allocator> ZipperInfallibleSubtries<V, A> for PrefixZipper<'prefix, Z>
     where
-        Z: ZipperInfallibleSubtries<V, A>
+        Z: ZipperInfallibleSubtries<V, A> + ZipperSubtries<V, A>
 {
-    fn make_map(&self) -> PathMap<Self::V, A> { self.source.make_map() }
-    fn get_trie_ref(&self) -> TrieRef<'_, V, A> { self.source.get_trie_ref() }
+    fn make_map(&self) -> PathMap<Self::V, A> {
+        let leaf_map = self.source.make_map();
+        match self.prefix_path_below_focus() {
+            Some(prefix_path) => {
+                if prefix_path.len() > 0 {
+                    let mut new_map = PathMap::new_in(leaf_map.alloc.clone());
+                    let mut wz = new_map.write_zipper_at_path(prefix_path);
+                    wz.graft_map(leaf_map);
+                    new_map
+                } else {
+                    leaf_map
+                }
+            },
+            None => {
+                leaf_map
+            }
+        }
+    }
+    fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
+        if let Some(prefix_path) = self.prefix_path_below_focus() {
+            if prefix_path.len() > 0 {
+                let temp_map = self.make_map();
+                return TrieRef::from(temp_map)
+            } else {
+                return self.source.get_trie_ref()
+            }
+        } else {
+            TrieRefOwned::new_invalid_in(self.source.alloc()).into()
+        }
+    }
 }
 
 impl<'prefix, 'a, V: Clone + Send + Sync + 'a, Z, A: Allocator + 'a> ZipperReadOnlySubtries<'a, V, A> for PrefixZipper<'prefix, Z> where Z: ZipperReadOnlySubtries<'a, V, A>, Self: zipper_priv::ZipperReadOnlyPriv<'a, V, A> + ZipperSubtries<V, A> {

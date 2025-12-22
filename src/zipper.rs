@@ -109,6 +109,9 @@ pub trait ZipperSubtries<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Zi
 
     /// Attempts to return a [TrieRef] from the current focus
     fn trie_ref(&self) -> Option<TrieRef<'_, V, A>>;
+
+    /// Returns a clone of the allocator used by the zipper
+    fn alloc(&self) -> A;
 }
 
 /// An interface to enable moving a zipper around the trie and inspecting paths
@@ -821,6 +824,7 @@ impl<V: Clone + Send + Sync, Z, A: Allocator> ZipperSubtries<V, A> for &mut Z wh
     fn native_subtries(&self) -> bool { (**self).native_subtries() }
     fn try_make_map(&self) -> Option<PathMap<V, A>> { (**self).try_make_map() }
     fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { (**self).trie_ref() }
+    fn alloc(&self) -> A { (**self).alloc() }
 }
 
 impl<V: Clone + Send + Sync, Z, A: Allocator> ZipperInfallibleSubtries<V, A> for &mut Z where Z: ZipperInfallibleSubtries<V, A> {
@@ -938,6 +942,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for Read
     fn native_subtries(&self) -> bool { self.z.native_subtries() }
     fn try_make_map(&self) -> Option<PathMap<V, A>> { self.z.try_make_map() }
     fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { self.z.trie_ref() }
+    fn alloc(&self) -> A { self.z.alloc() }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for ReadZipperTracked<'_, '_, V, A> {
@@ -1098,6 +1103,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for Read
     fn native_subtries(&self) -> bool { self.z.native_subtries() }
     fn try_make_map(&self) -> Option<PathMap<V, A>> { self.z.try_make_map() }
     fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { self.z.trie_ref() }
+    fn alloc(&self) -> A { self.z.alloc() }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for ReadZipperUntracked<'_, '_, V, A> {
@@ -1327,6 +1333,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for Read
     fn native_subtries(&self) -> bool { self.z.native_subtries() }
     fn try_make_map(&self) -> Option<PathMap<V, A>> { self.z.try_make_map() }
     fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { self.z.trie_ref() }
+    fn alloc(&self) -> A { self.z.alloc() }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for ReadZipperOwned<V, A> {
@@ -1637,6 +1644,7 @@ pub(crate) mod read_zipper_core {
         fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> {
             Some(self.get_trie_ref())
         }
+        fn alloc(&self) -> A { self.alloc.clone() }
     }
 
     impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for ReadZipperCore<'_, '_, V, A> {

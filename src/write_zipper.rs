@@ -376,6 +376,7 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperSubtries<V, A>
     fn native_subtries(&self) -> bool { true }
     fn try_make_map(&self) -> Option<PathMap<V, A>> { Some(self.z.make_map()) }
     fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { Some(self.z.get_trie_ref()) }
+    fn alloc(&self) -> A { self.z.alloc.clone() }
 }
 
 impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperInfallibleSubtries<V, A> for WriteZipperTracked<'a, '_, V, A>{
@@ -536,6 +537,7 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperSubtries<V, A>
     fn native_subtries(&self) -> bool { true }
     fn try_make_map(&self) -> Option<PathMap<V, A>> { Some(self.z.make_map()) }
     fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { Some(self.z.get_trie_ref()) }
+    fn alloc(&self) -> A { self.z.alloc.clone() }
 }
 
 impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperInfallibleSubtries<V, A> for WriteZipperUntracked<'a, '_, V, A> {
@@ -710,6 +712,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for Writ
     fn native_subtries(&self) -> bool { true }
     fn try_make_map(&self) -> Option<PathMap<V, A>> { Some(self.z.make_map()) }
     fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { Some(self.z.get_trie_ref()) }
+    fn alloc(&self) -> A { self.z.alloc.clone() }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for WriteZipperOwned<V, A> {

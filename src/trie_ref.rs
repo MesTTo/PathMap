@@ -246,6 +246,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for Trie
     fn native_subtries(&self) -> bool { true }
     fn try_make_map(&self) -> Option<PathMap<V, A>> { Some(self.make_map()) }
     fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { Some(self.get_trie_ref()) }
+    fn alloc(&self) -> A { self.alloc.clone() }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for TrieRefBorrowed<'_, V, A> {
@@ -399,6 +400,14 @@ impl<V> ValOrKey<V> {
         } else {
             false
         }
+    }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> From<PathMap<V, A>> for TrieRefOwned<V, A> {
+    fn from(map: PathMap<V, A>) -> Self {
+        let alloc = map.alloc.clone();
+        let (node, val) = map.into_root();
+        Self::new_with_node_and_val_in(node, val, alloc)
     }
 }
 
@@ -587,6 +596,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for Trie
     fn native_subtries(&self) -> bool { true }
     fn try_make_map(&self) -> Option<PathMap<V, A>> { Some(self.make_map()) }
     fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { Some(self.get_trie_ref()) }
+    fn alloc(&self) -> A { self.alloc.clone() }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for TrieRefOwned<V, A> {
@@ -697,7 +707,6 @@ pub enum TrieRef<'a, V: Clone + Send + Sync, A: Allocator = GlobalAlloc> {
     Borrowed(TrieRefBorrowed<'a, V, A>),
     Owned(TrieRefOwned<V, A>)
 }
-
 impl<'a, V: Clone + Send + Sync, A: Allocator> From<TrieRefBorrowed<'a, V, A>> for TrieRef<'a, V, A> {
     fn from(src: TrieRefBorrowed<'a, V, A>) -> Self {
         TrieRef::Borrowed(src)
@@ -707,6 +716,12 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> From<TrieRefBorrowed<'a, V, A>> f
 impl<V: Clone + Send + Sync, A: Allocator> From<TrieRefOwned<V, A>> for TrieRef<'_, V, A> {
     fn from(src: TrieRefOwned<V, A>) -> Self {
         TrieRef::Owned(src)
+    }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> From<PathMap<V, A>> for TrieRef<'_, V, A> {
+    fn from(map: PathMap<V, A>) -> Self {
+        TrieRefOwned::from(map).into()
     }
 }
 
@@ -760,6 +775,12 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for Trie
     fn native_subtries(&self) -> bool { true }
     fn try_make_map(&self) -> Option<PathMap<V, A>> { Some(self.make_map()) }
     fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { Some(self.get_trie_ref()) }
+    fn alloc(&self) -> A {
+        match self {
+            TrieRef::Borrowed(trie_ref) => trie_ref.alloc(),
+            TrieRef::Owned(trie_ref) => trie_ref.alloc(),
+        }
+    }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for TrieRef<'_, V, A> {

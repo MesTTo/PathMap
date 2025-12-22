@@ -441,7 +441,8 @@ pub fn derive_poly_zipper(input: TokenStream) -> TokenStream {
     };
 
     // Generate ZipperSubtries trait implementation
-    //GOAT, TODO: We ought to use the generic allocator A, if the enum has one, but use the default if not
+    //GOAT, TODO: We ought to use the generic allocator A, if the enum has one, but use the GlobalAlloc if not,
+    // this requires parsing the impl_generics to see if there is an `A: Allocator` that is defined
     let zipper_subtries_impl = {
         quote! {
             impl #impl_generics pathmap::zipper::ZipperSubtries<V> for #enum_name #ty_generics
@@ -463,6 +464,9 @@ pub fn derive_poly_zipper(input: TokenStream) -> TokenStream {
                     match self {
                         #(#variant_arms => inner.trie_ref(),)*
                     }
+                }
+                fn alloc(&self) -> pathmap::alloc::GlobalAlloc {
+                    pathmap::alloc::global_alloc()
                 }
             }
         }

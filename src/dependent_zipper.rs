@@ -1,5 +1,5 @@
 
-use crate::alloc::GlobalAlloc;
+use crate::alloc::{GlobalAlloc, global_alloc};
 use crate::PathMap;
 
 // note, this is almost identical in implementation to ProductZipperG
@@ -466,6 +466,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V: Clone + Send + Sync + Unpin, C, F : Clone +
     fn native_subtries(&self) -> bool { false }
     fn try_make_map(&self) -> Option<PathMap<V, GlobalAlloc>> { None }
     fn trie_ref(&self) -> Option<TrieRef<'_, V, GlobalAlloc>> { None }
+    fn alloc(&self) -> GlobalAlloc { global_alloc() }
 }
 
 #[cfg(test)]

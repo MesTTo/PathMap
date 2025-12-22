@@ -81,7 +81,7 @@ use std::cell::Cell;
 use std::marker::PhantomData;
 use fast_slice_utils::starts_with;
 
-use crate::alloc::GlobalAlloc;
+use crate::alloc::{GlobalAlloc, global_alloc};
 use crate::{
     PathMap,
     morphisms::Catamorphism,
@@ -1470,6 +1470,7 @@ where Storage: AsRef<[u8]>
     fn native_subtries(&self) -> bool { false }
     fn try_make_map(&self) -> Option<PathMap<(), GlobalAlloc>> { None }
     fn trie_ref(&self) -> Option<TrieRef<'_, (), GlobalAlloc>> { None }
+    fn alloc(&self) -> GlobalAlloc { global_alloc() }
 }
 
 const DO_TRACE: bool = false;
