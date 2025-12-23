@@ -16,6 +16,7 @@ use crate::zipper::*;
 ///
 /// GOAT: The shape of this API is still experimental.  Creating new owned zippers is not great for performance and
 /// there is probably a design that allows mutable references to be returned from an object with an appropriate lifetime.
+#[derive(Clone)]
 pub struct DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
     where
         V: Clone + Send + Sync,
@@ -473,7 +474,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V: Clone + Send + Sync + Unpin, C, F : Clone +
 mod tests {
     use crate::zipper::*;
     use crate::PathMap;
-    
+
     #[test]
     fn dep_test_1() {
         let mut btm = PathMap::new();

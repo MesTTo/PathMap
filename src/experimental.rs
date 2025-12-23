@@ -140,7 +140,7 @@ impl<V: TrieValue, A: Allocator> WriteZipperPriv<V, A> for NullZipper {
     }
 }
 
-impl <V: TrieValue, A: Allocator> ZipperWriting<V, A> for NullZipper {
+impl <V: TrieValue + 'static, A: Allocator> ZipperWriting<V, A> for NullZipper {
     type ZipperHead<'z> = ZipperHead<'z, 'static, V> where Self: 'z;
 
     fn get_val_mut(&mut self) -> Option<&mut V> { None }

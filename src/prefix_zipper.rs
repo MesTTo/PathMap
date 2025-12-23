@@ -6,6 +6,7 @@ use crate::PathMap;
 use crate::trie_node::{AbstractNodeRef, TrieNodeODRc, TaggedNodeRef};
 use crate::zipper::*;
 
+#[derive(Clone)]
 enum PrefixPos {
     Prefix { valid: usize },
     PrefixOff { valid: usize, invalid: usize },
@@ -51,6 +52,7 @@ impl PrefixPos {
 /// assert_eq!(rz.path(), b"prefix.A");
 /// assert_eq!(rz.root_prefix_path(), b"origin.");
 /// ```
+#[derive(Clone)]
 pub struct PrefixZipper<'prefix, Z> {
     path: Vec<u8>,
     source: Z,
@@ -525,9 +527,29 @@ impl<'prefix, Z, V> ZipperForking<V> for PrefixZipper<'prefix, Z>
     }
 }
 
-impl<'prefix, 'a, V: Clone + Send + Sync, Z, A: Allocator> zipper_priv::ZipperReadOnlyPriv<'a, V, A> for PrefixZipper<'prefix, Z> where Z: zipper_priv::ZipperReadOnlyPriv<'a, V, A> {
-    fn borrow_raw_parts<'z>(&'z self) -> (TaggedNodeRef<'z, V, A>, &'z [u8], Option<&'z V>) { self.source.borrow_raw_parts() }
-    fn take_core(&mut self) -> Option<read_zipper_core::ReadZipperCore<'a, 'static, V, A>> { self.source.take_core() }
+//GOAT, Remove the 'static bound on V and A, as soon as we redo the interior of ReadZipperOwned.
+// See GOAT comment above ReadZipperOwned struct definition
+impl<'prefix, 'a, V: Clone + Send + Sync + Unpin + 'static, Z, A: Allocator + 'static> zipper_priv::ZipperReadOnlyPriv<'a, V, A> for PrefixZipper<'prefix, Z>
+    where
+        Z: zipper_priv::ZipperReadOnlyPriv<'a, V, A>,
+        Self: ZipperSubtries<V, A>
+{
+    fn borrow_raw_parts<'z>(&'z self) -> (TaggedNodeRef<'z, V, A>, &'z [u8], Option<&'z V>) { panic!() } //Not sure how we'd implement borrow_raw_parts for a PrefixZipper, in the general case
+    fn take_core(&mut self) -> Option<read_zipper_core::ReadZipperCore<'a, 'static, V, A>> {
+        if let Some(prefix_path) = self.prefix_path_below_focus() {
+            if prefix_path.len() > 0 {
+                let temp_map = self.try_make_map();
+                return temp_map.and_then(|map| {
+                    let mut owned_z: ReadZipperOwned<V, A> = map.into_read_zipper(b"");
+                    owned_z.take_core()
+                })
+            } else {
+                self.source.take_core()
+            }
+        } else {
+            self.source.take_core()
+        }
+    }
 }
 
 impl<'prefix, V: Clone + Send + Sync + Unpin, Z, A: Allocator> ZipperSubtries<V, A> for PrefixZipper<'prefix, Z>

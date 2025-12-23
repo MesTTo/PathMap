@@ -84,7 +84,7 @@ struct DrawState {
 }
 
 /// Output a render trie within the provided [PathMap]s.  See [VizMode] and [DrawConfig] for rendering options
-pub fn viz_maps<V : TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc: &DrawConfig, out: W) -> io::Result<()> {
+pub fn viz_maps<V: TrieValue + Debug + Hash, A: Allocator, W: Write>(btms: &[PathMap<V, A>], dc: &DrawConfig, out: W) -> io::Result<()> {
     match dc.mode {
         VizMode::Mermaid => viz_maps_mermaid(btms, dc, out),
         VizMode::Ascii => viz_maps_ascii(btms, dc, out),
@@ -92,7 +92,7 @@ pub fn viz_maps<V : TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc:
 }
 
 /// Output [Mermaid](https://mermaid.js.org) markup commands to render a graph of the trie within the provided [PathMap]s
-fn viz_maps_mermaid<V : TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc: &DrawConfig, mut out: W) -> io::Result<()> {
+fn viz_maps_mermaid<V: TrieValue + Debug + Hash, A: Allocator, W: Write>(btms: &[PathMap<V, A>], dc: &DrawConfig, mut out: W) -> io::Result<()> {
     writeln!(out, "flowchart LR")?;
     let mut ds = DrawState{ root: 0, nodes: HashMap::new(), cmds: vec![] };
 
@@ -189,7 +189,7 @@ fn viz_maps_mermaid<V : TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>],
 }
 
 /// Output a logical ascii art representation of the trie within the provided [PathMap]s. Panics if `dc.logical` is `false`.
-fn viz_maps_ascii<V: TrieValue + Debug + Hash, W: Write>(btms: &[PathMap<V>], dc: &DrawConfig, mut out: W) -> io::Result<()> {
+fn viz_maps_ascii<V: TrieValue + Debug + Hash, A: Allocator, W: Write>(btms: &[PathMap<V, A>], dc: &DrawConfig, mut out: W) -> io::Result<()> {
     assert!(dc.logical, "viz_maps_ascii only supports logical rendering");
 
     let mut ds = DrawState{ root: 0, nodes: HashMap::new(), cmds: vec![] };

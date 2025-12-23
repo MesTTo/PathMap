@@ -144,9 +144,9 @@ mod bridge_node;
 mod old_cursor;
 
 /// A supertrait that encapsulates the bounds for a value that can be put in a [PathMap]
-pub trait TrieValue: Clone + Send + Sync + Unpin + 'static {}
+pub trait TrieValue: Clone + Send + Sync + Unpin {}
 
-impl<T> TrieValue for T where T : Clone + Send + Sync + Unpin + 'static {}
+impl<T> TrieValue for T where T : Clone + Send + Sync + Unpin {}
 
 /// Internal macro to implement Debug on a type that just outputs the type name
 macro_rules! impl_name_only_debug {

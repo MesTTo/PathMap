@@ -1532,7 +1532,7 @@ mod test {
 // we could consider making some of the following public later
 
 // for debugging
-fn _trace<V: TrieValue>(trie : PathMap<V>) {
+fn _trace<V: TrieValue + 'static>(trie : PathMap<V>) {
   let counter = core::sync::atomic::AtomicUsize::new(0);
   trie.into_cata_jumping_side_effect(|bytemask, accs, jump_len, v, o| {
     let n = counter.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
