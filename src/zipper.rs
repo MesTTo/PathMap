@@ -1163,10 +1163,8 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ReadZipper
 impl<'a, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ZipperReadOnlyPriv<'a, V, A> for ReadZipperUntracked<'a, '_, V, A>{
     fn borrow_raw_parts<'z>(&'z self) -> (TaggedNodeRef<'z, V, A>, &'z [u8], Option<&'z V>) { self.z.borrow_raw_parts() }
     fn take_core(&mut self) -> Option<ReadZipperCore<'a, 'static, V, A>> {
-println!("BILBO first {:?}", self.z.child_mask());
         let mut temp_core = ReadZipperCore::new_with_node_and_path_internal_in(OwnedOrBorrowed::None, &[], 0, None, self.z.alloc.clone());
         core::mem::swap(&mut temp_core, &mut self.z);
-println!("BILBO last {:?}", temp_core.child_mask());
         Some(temp_core.make_static_path())
     }
 }
