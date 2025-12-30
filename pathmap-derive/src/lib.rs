@@ -67,7 +67,11 @@ pub fn derive_poly_zipper(input: TokenStream) -> TokenStream {
     let zipper_impl = {
         let variant_arms = &variant_arms;
         quote! {
-            impl #impl_generics pathmap::zipper::Zipper for #enum_name #ty_generics #where_clause {
+            impl #impl_generics pathmap::zipper::Zipper for #enum_name #ty_generics
+            where
+                #(#inner_types: pathmap::zipper::Zipper,)*
+                #where_clause
+            {
                 fn path_exists(&self) -> bool {
                     match self {
                         #(#variant_arms => inner.path_exists(),)*
@@ -406,13 +410,6 @@ pub fn derive_poly_zipper(input: TokenStream) -> TokenStream {
                 fn to_next_get_val(&mut self) -> Option<&'trie V> {
                     match self {
                         #(#variant_arms => inner.to_next_get_val(),)*
-                    }
-                }
-
-                #[deprecated]
-                fn to_next_get_value(&mut self) -> Option<&'trie V> {
-                    match self {
-                        #(#variant_arms => inner.to_next_get_value(),)*
                     }
                 }
             }
