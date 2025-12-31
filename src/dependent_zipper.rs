@@ -22,7 +22,7 @@ pub struct DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
         V: Clone + Send + Sync,
 {
     factor_paths: Vec<usize>,
-    primary: PrimaryZ,
+    primary: Box<PrimaryZ>,
     secondary: Vec<SecondaryZ>,
     enroll_payload: Option<C>,
     enroll: F,
@@ -42,7 +42,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     {
         Self {
             factor_paths: Vec::new(),
-            primary,
+            primary: Box::new(primary),
             secondary: vec![],
             enroll_payload: Some(enroll_payload),
             enroll,

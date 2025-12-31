@@ -43,6 +43,24 @@ use crate::zipper::*;
 /// ```
 pub use pathmap_derive::PolyZipper;
 
+/// Variant of [`PolyZipper`] that allows selecting which traits are derived.
+///
+/// This macro was created to work around the inability of the Rust trait solver to handle fixed point
+/// recursion.  It will be deprecated in the future when Rust is improved.
+///
+/// Usage:
+/// ```
+/// use pathmap::zipper::{PolyZipperExplicit, ReadZipperTracked, ReadZipperUntracked};
+///
+/// #[derive(PolyZipperExplicit)]
+/// #[poly_zipper_explicit(traits(Zipper, ZipperMoving, ZipperIteration))]
+/// enum MyPolyZipper<'trie, 'path, V: Clone + Send + Sync + Unpin = ()> {
+///     Tracked(ReadZipperTracked<'trie, 'path, V>),
+///     Untracked(ReadZipperUntracked<'trie, 'path, V>),
+/// }
+/// ```
+pub use pathmap_derive::PolyZipperExplicit;
+
 #[cfg(test)]
 mod tests {
     use crate as pathmap;
@@ -118,6 +136,31 @@ mod tests {
         },
         |act: &mut ACTVec, path: &[u8]| -> _ {
             TestPolyZipper::ACTVecPrefix(PrefixZipper::new(&[], act.read_zipper_at_path(path)))
+        }
+    );
+
+    // ======================================================================================
+    // Cocktail of recursive zipper madness
+    #[derive(PolyZipperExplicit)]
+    #[poly_zipper_explicit(traits(Zipper, ZipperMoving, ZipperIteration))]
+    pub enum ExprFactor<'trie, V: Clone + Send + Sync + Unpin + 'static = ()> {
+        Specific(ReadZipperOwned<V>),
+        Generic(PrefixZipper<'trie,
+            DependentProductZipperG<'trie,
+                ExprFactor<'trie, V>,
+                ExprFactor<'trie, V>,
+                V, (),
+                for<'a> fn((), &'a [u8], usize) -> ((), Option< ExprFactor<'trie, V> >)
+            >>
+        )
+    }
+
+    crate::zipper::zipper_moving_tests::zipper_moving_tests!(recursive_zipper_madness,
+        |keys: &[&[u8]]| {
+            keys.iter().map(|k| (k, ())).collect::<PathMap<()>>()
+        },
+        |btm: &mut PathMap<()>, path: &[u8]| -> _ {
+            ExprFactor::Specific(btm.clone().into_read_zipper(path))
         }
     );
 }
