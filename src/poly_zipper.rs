@@ -147,7 +147,7 @@ mod tests {
         Specific(ReadZipperOwned<V>),
         Generic(PrefixZipper<'trie,
             DependentProductZipperG<'trie,
-                ExprFactor<'trie, V>,
+                Box<ExprFactor<'trie, V>>,
                 ExprFactor<'trie, V>,
                 V, (),
                 for<'a> fn((), &'a [u8], usize) -> ((), Option< ExprFactor<'trie, V> >)

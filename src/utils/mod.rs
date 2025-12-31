@@ -19,6 +19,25 @@ impl ByteMask {
     pub const EMPTY: ByteMask = Self([0u64; 4]);
     pub const FULL: ByteMask = Self([!0u64; 4]);
 
+    const SUBSET: [ByteMask; 256] = const {
+        let mut bm = [[0u64; 4]; 256];
+        let mut i = 0;
+        while i < 256 {
+            let mut j = 0;
+            while j < 256 {
+                if i & j == j { bm[i][j / 64] |= 1 << (j % 64) }
+                j += 1;
+            }
+            i += 1;
+        }
+        unsafe { std::mem::transmute(bm) }
+    };
+
+    /// Nth row of the sierpinsky triangle
+    pub fn subset(b: u8) -> Self {
+        Self::SUBSET[b as usize]
+    }
+
     /// Create a new empty ByteMask
     #[inline]
     pub const fn new() -> Self {

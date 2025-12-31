@@ -5,7 +5,7 @@ use core::ptr::NonNull;
 use crate::alloc::{Allocator, GlobalAlloc};
 use crate::utils::{ByteMask, BitMask};
 use crate::trie_node::*;
-use crate::PathMap;
+use crate::{lens, PathMap};
 use crate::zipper::*;
 use crate::zipper::zipper_priv::*;
 use crate::zipper_tracking::*;
@@ -689,16 +689,14 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator> Clone for WriteZipp
     }
 }
 
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> Zipper for WriteZipperOwned<V, A> {
-    fn path_exists(&self) -> bool { self.z.path_exists() }
-    fn is_val(&self) -> bool { self.z.is_val() }
-    fn child_count(&self) -> usize { self.z.child_count() }
-    fn child_mask(&self) -> ByteMask { self.z.child_mask() }
-}
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> Zipper for WriteZipperOwned<V, A> { lens!(Zipper self => self.z); }
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for WriteZipperOwned<V, A> { lens!(ZipperValues self => self.z); }
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for WriteZipperOwned<V, A> { lens!(ZipperInfallibleSubtries self => self.z); }
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperMoving for WriteZipperOwned<V, A> { lens!(ZipperMoving self => self.z); }
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperPriv for WriteZipperOwned<V, A> { lens!(ZipperPriv self => self.z); }
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperPathBuffer for WriteZipperOwned<V, A> { lens!(ZipperPathBuffer self => self.z); }
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAbsolutePath for WriteZipperOwned<V, A> { lens!(ZipperAbsolutePath self => self.z); }
 
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for WriteZipperOwned<V, A> {
-    fn val(&self) -> Option<&V> { self.z.val() }
-}
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for WriteZipperOwned<V, A> {
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
@@ -709,51 +707,10 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for WriteZip
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for WriteZipperOwned<V, A> {
-    fn native_subtries(&self) -> bool { true }
+    fn native_subtries(&self) -> bool { true } // Why not self.z.native_subtries ?
     fn try_make_map(&self) -> Option<PathMap<V, A>> { Some(self.z.make_map()) }
     fn trie_ref(&self) -> Option<TrieRef<'_, V, A>> { Some(self.z.get_trie_ref()) }
     fn alloc(&self) -> A { self.z.alloc.clone() }
-}
-
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for WriteZipperOwned<V, A> {
-    fn make_map(&self) -> PathMap<V, A> { self.z.make_map() }
-    fn get_trie_ref(&self) -> TrieRef<'_, V, A> { self.z.get_trie_ref() }
-}
-
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperMoving for WriteZipperOwned<V, A> {
-    fn at_root(&self) -> bool { self.z.at_root() }
-    fn reset(&mut self) { self.z.reset() }
-    fn path(&self) -> &[u8] { self.z.path() }
-    fn val_count(&self) -> usize { self.z.val_count() }
-    fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) { self.z.descend_to(k) }
-    fn descend_to_byte(&mut self, k: u8) { self.z.descend_to_byte(k) }
-    fn descend_indexed_byte(&mut self, child_idx: usize) -> bool { self.z.descend_indexed_byte(child_idx) }
-    fn descend_first_byte(&mut self) -> bool { self.z.descend_first_byte() }
-    fn descend_until(&mut self) -> bool { self.z.descend_until() }
-    fn to_next_sibling_byte(&mut self) -> bool { self.z.to_next_sibling_byte() }
-    fn to_prev_sibling_byte(&mut self) -> bool { self.z.to_prev_sibling_byte() }
-    fn ascend(&mut self, steps: usize) -> bool { self.z.ascend(steps) }
-    fn ascend_byte(&mut self) -> bool { self.z.ascend_byte() }
-    fn ascend_until(&mut self) -> bool { self.z.ascend_until() }
-    fn ascend_until_branch(&mut self) -> bool { self.z.ascend_until_branch() }
-}
-
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> zipper_priv::ZipperPriv for WriteZipperOwned<V, A> {
-    type V = V;
-    type A = A;
-    fn get_focus(&self) -> AbstractNodeRef<'_, Self::V, Self::A> { self.z.get_focus() }
-    fn try_borrow_focus(&self) -> Option<&TrieNodeODRc<Self::V, Self::A>> { self.z.try_borrow_focus() }
-}
-
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperPathBuffer for WriteZipperOwned<V, A> {
-    unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.origin_path_assert_len(len) } }
-    fn prepare_buffers(&mut self) { self.z.prepare_buffers() }
-    fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) { self.z.reserve_buffers(path_len, stack_depth) }
-}
-
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAbsolutePath for WriteZipperOwned<V, A> {
-    fn origin_path(&self) -> &[u8] { self.z.origin_path() }
-    fn root_prefix_path(&self) -> &[u8] { self.z.root_prefix_path() }
 }
 
 impl <V: Clone + Send + Sync + Unpin> WriteZipperOwned<V> {
