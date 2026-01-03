@@ -872,23 +872,22 @@ impl <Z : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration> ZipperPr
     }
 }
 
-use crate::lens;
-impl <Z : Zipper> Zipper for OneFactor<Z> { lens!(Zipper self => self.z); }
-impl <Z : ZipperAbsolutePath> ZipperAbsolutePath for OneFactor<Z> { lens!(ZipperAbsolutePath self => self.z); }
-impl <Z : ZipperMoving> ZipperMoving for OneFactor<Z> { lens!(ZipperMoving self => self.z); }
-impl <Z : ZipperIteration> ZipperIteration for OneFactor<Z> { lens!(ZipperIteration self => self.z); }
-impl <V, Z : ZipperValues<V>> ZipperValues<V> for OneFactor<Z> { lens!(ZipperValues self => self.z); }
-impl <V, Z : ZipperForking<V>> ZipperForking<V> for OneFactor<Z> { type ReadZipperT<'a> = Z::ReadZipperT<'a> where Z: 'a; lens!(ZipperForking self => self.z); }
-impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperSubtries<V, A>> ZipperSubtries<V, A> for OneFactor<Z> { lens!(ZipperSubtries self => self.z); }
-impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperInfallibleSubtries<V, A>> ZipperInfallibleSubtries<V, A> for OneFactor<Z> { lens!(ZipperInfallibleSubtries self => self.z); }
-impl<'a, V: Clone + Send + Sync, Z> ZipperReadOnlyValues<'a, V> for OneFactor<Z> where Z: ZipperReadOnlyValues<'a, V>, Self: ZipperValues<V> { lens!(ZipperReadOnlyValues self => self.z); }
-impl<'a, V: Clone + Send + Sync, Z> ZipperReadOnlyConditionalValues<'a, V> for OneFactor<Z> where Z: ZipperReadOnlyConditionalValues<'a, V>, Self: ZipperValues<V> { type WitnessT = Z::WitnessT; lens!(ZipperReadOnlyConditionalValues self => self.z); }
-impl<'a, V, Z> ZipperReadOnlyIteration<'a, V> for OneFactor<Z> where Z: ZipperReadOnlyIteration<'a, V>, Self: ZipperReadOnlyValues<'a, V> + ZipperIteration { lens!(ZipperReadOnlyIteration self => self.z); }
-impl<'a, V, Z> ZipperReadOnlyConditionalIteration<'a, V> for OneFactor<Z> where Z: ZipperReadOnlyConditionalIteration<'a, V>, Self: ZipperReadOnlyConditionalValues<'a, V, WitnessT = Z::WitnessT> + ZipperIteration { lens!(ZipperReadOnlyConditionalIteration self => self.z); }
-impl<'a, V: Clone + Send + Sync + 'a, Z, A: Allocator + 'a> ZipperReadOnlySubtries<'a, V, A> for OneFactor<Z> where Z: ZipperReadOnlySubtries<'a, V, A>, Self: ZipperReadOnlyPriv<'a, V, A> + ZipperSubtries<V, A> { lens!(ZipperReadOnlySubtries self => self.z); }
-impl<Z> ZipperConcrete for OneFactor<Z> where Z: ZipperConcrete { lens!(ZipperConcrete self => self.z); }
-impl<V: Clone + Send + Sync, Z, A: Allocator> ZipperPriv for OneFactor<Z> where Z: ZipperPriv<V=V, A=A> { lens!(ZipperPriv self => self.z); }
-impl<Z> ZipperPathBuffer for OneFactor<Z> where Z: ZipperPathBuffer { lens!(ZipperPathBuffer self => self.z); }
+impl <Z : Zipper> Zipper for OneFactor<Z> { zipper_impl_lens!(Zipper self => self.z); }
+impl <Z : ZipperAbsolutePath> ZipperAbsolutePath for OneFactor<Z> { zipper_impl_lens!(ZipperAbsolutePath self => self.z); }
+impl <Z : ZipperMoving> ZipperMoving for OneFactor<Z> { zipper_impl_lens!(ZipperMoving self => self.z); }
+impl <Z : ZipperIteration> ZipperIteration for OneFactor<Z> { zipper_impl_lens!(ZipperIteration self => self.z); }
+impl <V, Z : ZipperValues<V>> ZipperValues<V> for OneFactor<Z> { zipper_impl_lens!(ZipperValues self => self.z); }
+impl <V, Z : ZipperForking<V>> ZipperForking<V> for OneFactor<Z> { type ReadZipperT<'a> = Z::ReadZipperT<'a> where Z: 'a; zipper_impl_lens!(ZipperForking self => self.z); }
+impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperSubtries<V, A>> ZipperSubtries<V, A> for OneFactor<Z> { zipper_impl_lens!(ZipperSubtries self => self.z); }
+impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperInfallibleSubtries<V, A>> ZipperInfallibleSubtries<V, A> for OneFactor<Z> { zipper_impl_lens!(ZipperInfallibleSubtries self => self.z); }
+impl<'a, V: Clone + Send + Sync, Z> ZipperReadOnlyValues<'a, V> for OneFactor<Z> where Z: ZipperReadOnlyValues<'a, V>, Self: ZipperValues<V> { zipper_impl_lens!(ZipperReadOnlyValues self => self.z); }
+impl<'a, V: Clone + Send + Sync, Z> ZipperReadOnlyConditionalValues<'a, V> for OneFactor<Z> where Z: ZipperReadOnlyConditionalValues<'a, V>, Self: ZipperValues<V> { type WitnessT = Z::WitnessT; zipper_impl_lens!(ZipperReadOnlyConditionalValues self => self.z); }
+impl<'a, V, Z> ZipperReadOnlyIteration<'a, V> for OneFactor<Z> where Z: ZipperReadOnlyIteration<'a, V>, Self: ZipperReadOnlyValues<'a, V> + ZipperIteration { zipper_impl_lens!(ZipperReadOnlyIteration self => self.z); }
+impl<'a, V, Z> ZipperReadOnlyConditionalIteration<'a, V> for OneFactor<Z> where Z: ZipperReadOnlyConditionalIteration<'a, V>, Self: ZipperReadOnlyConditionalValues<'a, V, WitnessT = Z::WitnessT> + ZipperIteration { zipper_impl_lens!(ZipperReadOnlyConditionalIteration self => self.z); }
+impl<'a, V: Clone + Send + Sync + 'a, Z, A: Allocator + 'a> ZipperReadOnlySubtries<'a, V, A> for OneFactor<Z> where Z: ZipperReadOnlySubtries<'a, V, A>, Self: ZipperReadOnlyPriv<'a, V, A> + ZipperSubtries<V, A> { zipper_impl_lens!(ZipperReadOnlySubtries self => self.z); }
+impl<Z> ZipperConcrete for OneFactor<Z> where Z: ZipperConcrete { zipper_impl_lens!(ZipperConcrete self => self.z); }
+impl<V: Clone + Send + Sync, Z, A: Allocator> ZipperPriv for OneFactor<Z> where Z: ZipperPriv<V=V, A=A> { zipper_impl_lens!(ZipperPriv self => self.z); }
+impl<Z> ZipperPathBuffer for OneFactor<Z> where Z: ZipperPathBuffer { zipper_impl_lens!(ZipperPathBuffer self => self.z); }
 
 
 #[cfg(test)]
