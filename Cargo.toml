@@ -111,6 +111,10 @@ harness = false
 name = "product_zipper"
 harness = false
 
+[[bench]]
+name = "sla"
+harness = false
+
 [workspace]
 members = ["pathmap-derive"]
 resolver = "2"
