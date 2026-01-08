@@ -200,15 +200,15 @@ pub trait Catamorphism<V> {
     /// trie below:
     ///
     /// ```txt
-    /// ─── c ─── o ─── m ─┬─ e ─── t               → "comet"
-    ///                    ├─ b ─── o               → "combo"
+    /// ─── c ─── o ─── m ─┬─ b ─── o               → "combo"
+    ///                    ├─ e ─── t               → "comet"
     ///                    └─ f ─── o ─── r ─── t   → "comfort"
     /// ```
     /// The `alg_f` would be called 4 times for this trie.
-    /// 1. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"t")`
-    /// 2. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"o")`
+    /// 1. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"o")`
+    /// 2. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"t")`
     /// 3. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"ort")`
-    /// 4. `alg_f(ByteMask::from_iter([b'e', b'b', b'f']), &[..], None, b"com")`
+    /// 4. `alg_f(ByteMask::from_iter([b'b', b'e', b'f']), &[..], None, b"com")`
     ///
     /// See [into_cata_cached](Catamorphism::into_cata_cached) for explanation of other arguments and behavior
     fn into_cata_jumping_cached<W, AlgF>(self, alg_f: AlgF) -> W
