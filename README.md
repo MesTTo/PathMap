@@ -7,6 +7,16 @@ PathMap is optimized for large data sets and can be used efficiently in a multi-
 
 This crate provides the low-level data structure for [MORK](https://github.com/trueagi-io/MORK/)
 
+## Why pathmap?
+
+Several crates implement radix-256 trie structures in Rust.  For example [radix_trie](https://crates.io/crates/radix_trie) does it without any unsafe code.  Pathmap is unique because of the following combination of features:
+
+* Pathmap is a DAG, not just a trie.  See the [subtrie sharing](https://pathmap-rs.github.io/#structural-sharing) section in the book.
+* A safe and sound concurrent API for reading and writing
+* Algebraic operations such as `join`, `meet`, etc. and the ability to apply them to subtries as well as whole maps
+* A *lot* of work has gone into making the implementation fast, keeping the memory footprint small, and designing the API to expose the lowest overhead paths.
+* The ACT format enables tries that don't fit in memory
+
 ## Usage
 
 Check out the [book](https://pathmap-rs.github.io/).
