@@ -991,6 +991,33 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             t + cf.has_val() as usize + cf.rec().map(|r| val_count_below_node(r, cache)).unwrap_or(0)
         });
     }
+    fn node_goat_val_count(&self) -> usize {
+        return self.values.iter().rfold(0, |t, cf| {
+            t + cf.has_val() as usize
+        });
+    }
+    fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        for (pos, cf) in self.values.iter().enumerate() {
+            match cf.rec() {
+                Some(child) => {
+                    return ((pos+1) as u64, Some(child))
+                },
+                None => {}
+            }
+        }
+        (0, None)
+    }
+    fn node_child_iter_next(&self, token: u64) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        for (pos, cf) in self.values[(token as usize)..].iter().enumerate() {
+            match cf.rec() {
+                Some(child) => {
+                    return ((pos+1) as u64 + token, Some(child))
+                },
+                None => {}
+            }
+        }
+        (0, None)
+    }
     #[cfg(feature = "counters")]
     fn item_count(&self) -> usize {
         let mut cnt = 0;

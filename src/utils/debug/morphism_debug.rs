@@ -29,7 +29,9 @@ impl<'a, Z, V: 'a> CatamorphismDebug<V> for Z where Z: Zipper + ZipperReadOnlyCo
         W: Clone,
         AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8]) -> Result<W, E>
     {
-        into_cata_cached_body::<Self, V, W, E, _, DoCache, true, true>(self, alg_f)
+        into_cata_cached_body::<Self, V, W, E, _, DoCache, true, true>(self, |mask, children, val, sub_path, debug_path, _z| {
+            alg_f(mask, children, val, sub_path, debug_path)
+        })
     }
 }
 

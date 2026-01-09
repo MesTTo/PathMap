@@ -357,22 +357,24 @@ impl<'a, Z, V: 'a> Catamorphism<V> for Z where Z: Zipper + ZipperReadOnlyConditi
     fn into_cata_side_effect_fallible<W, Err, AlgF>(self, mut alg_f: AlgF) -> Result<W, Err>
         where AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, Err>,
     {
-        cata_side_effect_body::<Self, V, W, Err, _, false>(self, |mask, children, jump_len, val, path| {
+        cata_side_effect_body::<Self, V, W, Err, _, false>(self, |mask, children, jump_len, val, path, _z| {
             debug_assert!(jump_len == 0);
             alg_f(mask, children, val, path)
         })
     }
-    fn into_cata_jumping_side_effect_fallible<W, Err, AlgF>(self, alg_f: AlgF) -> Result<W, Err>
+    fn into_cata_jumping_side_effect_fallible<W, Err, AlgF>(self, mut alg_f: AlgF) -> Result<W, Err>
         where AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> Result<W, Err>
     {
-        cata_side_effect_body::<Self, V, W, Err, AlgF, true>(self, alg_f)
+        cata_side_effect_body::<Self, V, W, Err, _, true>(self, |mask, children, jump_len, val, path, _z| {
+            alg_f(mask, children, jump_len, val, path)
+        })
     }
     fn into_cata_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
         where
             W: Clone,
             AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>
     {
-        into_cata_cached_body::<Self, V, W, E, _, DoCache, false, false>(self, |mask, children, val, sub_path, _debug_path| {
+        into_cata_cached_body::<Self, V, W, E, _, DoCache, false, false>(self, |mask, children, val, sub_path, _debug_path, _z| {
             debug_assert_eq!(sub_path.len(), 0);
             alg_f(mask, children, val)
         })
@@ -383,7 +385,7 @@ impl<'a, Z, V: 'a> Catamorphism<V> for Z where Z: Zipper + ZipperReadOnlyConditi
             AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>
     {
         into_cata_cached_body::<Self, V, W, E, _, DoCache, true, false>(self,
-            |mask, children, val, sub_path, _debug_path| alg_f(mask, children, val, sub_path))
+            |mask, children, val, sub_path, _debug_path, _z| alg_f(mask, children, val, sub_path))
     }
 }
 
@@ -422,7 +424,7 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorph
 fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z: Z, mut alg_f: AlgF) -> Result<W, Err>
     where
     Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperAbsolutePath + ZipperPathBuffer,
-    AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> Result<W, Err>
+    AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8], &Z) -> Result<W, Err>
 {
     //`stack` holds a "frame" at each forking point above the zipper position.  No frames exist for values
     let mut stack = Vec::<StackFrame>::with_capacity(12);
@@ -435,7 +437,7 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
     stack.push(StackFrame::from(&z));
     if !z.descend_first_byte() {
         //Empty trie is a special case
-        return alg_f(&ByteMask::EMPTY, &mut [], 0, z.val(), z.origin_path())
+        return alg_f(&ByteMask::EMPTY, &mut [], 0, z.val(), z.origin_path(), &z)
     }
 
     loop {
@@ -466,7 +468,7 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
                     debug_assert_eq!(stack_frame.child_idx, stack_frame.child_cnt);
                     debug_assert_eq!(stack_frame.child_cnt as usize, children.len());
                     let w = if stack_frame.child_cnt != 1 || val.is_some() || !JUMPING {
-                        alg_f(&child_mask, &mut children, 0, val, z.origin_path())?
+                        alg_f(&child_mask, &mut children, 0, val, z.origin_path(), &z)?
                     } else {
                         children.pop().unwrap()
                     };
@@ -505,7 +507,7 @@ fn ascend_to_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(z: &mut Z,
 ) -> Result<W, Err>
     where
     Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperAbsolutePath + ZipperPathBuffer,
-    AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> Result<W, Err>
+    AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8], &Z) -> Result<W, Err>
 {
     let z_witness = z.witness();
     let mut w;
@@ -527,7 +529,7 @@ fn ascend_to_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(z: &mut Z,
                 old_path_len - z.origin_path().len()
             };
 
-            w = alg_f(&child_mask, children, jump_len, old_val, origin_path)?;
+            w = alg_f(&child_mask, children, jump_len, old_val, origin_path, &z)?;
 
             if z.child_count() != 1 || z.at_root() {
                 return Ok(w)
@@ -546,7 +548,7 @@ fn ascend_to_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(z: &mut Z,
             let origin_path = z.origin_path();
             let byte = origin_path.last().copied().unwrap_or(0);
             let val = z.val();
-            w = alg_f(&child_mask, children, 0, val, origin_path)?;
+            w = alg_f(&child_mask, children, 0, val, origin_path, &z)?;
 
             let ascended = z.ascend_byte();
             debug_assert!(ascended);
@@ -726,13 +728,16 @@ impl<W: Clone> CacheStrategy<W> for DoCache {
     fn clone(w: &W) -> W { w.clone() }
 }
 
+/// Internal implementation behind all cached catas
+///
+/// AlgF args: (child_mask, children, value, sub_path, debug_path, zipper)
 pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool, const DEBUG_PATH: bool>(
     mut zipper: Z, mut alg_f: AlgF
 ) -> Result<W, E>
     where
     Cache: CacheStrategy<W>,
     Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer,
-    AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8]) -> Result<W, E>
+    AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8], &Z) -> Result<W, E>
 {
     zipper.reset();
     zipper.prepare_buffers();
@@ -771,8 +776,8 @@ pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPI
                 // If we encounter a leaf, ascend immediately.
                 // This branch will preserve the current stack frame.
                 let cur_w = ascend_to_fork::<Z, V, W, E, _, JUMPING>(
-                    &mut zipper, &mut |mask, children, jump, val, path| {
-                        alg_f(mask, children, val, &path[path.len()-jump..], path)
+                    &mut zipper, &mut |mask, children, jump, val, path, z| {
+                        alg_f(mask, children, val, &path[path.len()-jump..], path, z)
                     }, &mut [])?;
                 // Put value to cache (1)
                 Cache::insert(&mut cache, frame_mut.child_addr, &cur_w);
@@ -805,13 +810,13 @@ pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPI
                 } else {
                     &[]
                 };
-                alg_f(&child_mask, children2, value, &[], debug_path)
+                alg_f(&child_mask, children2, value, &[], debug_path, &zipper)
             };
         }
 
         let cur_w = ascend_to_fork::<Z, V, W, E, _, JUMPING>(
-            &mut zipper, &mut |mask, children, jump, val, path| {
-                alg_f(mask, children, val, &path[path.len()-jump..], path)
+            &mut zipper, &mut |mask, children, jump, val, path, z| {
+                alg_f(mask, children, val, &path[path.len()-jump..], path, z)
             }, children2)?;
         children.truncate(child_start);
 

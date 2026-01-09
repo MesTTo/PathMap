@@ -221,6 +221,19 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
         let temp_node = self.into_full().unwrap();
         temp_node.node_val_count(cache)
     }
+    fn node_goat_val_count(&self) -> usize {
+        self.into_full().unwrap().node_goat_val_count()
+    }
+    fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        if self.is_used_child() {
+            (0, Some(unsafe{ &*self.payload.child }))
+        } else {
+            (0, None)
+        }
+    }
+    fn node_child_iter_next(&self, _token: u64) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        (0, None) //A TinyNode only has, at most, one child
+    }
     #[cfg(feature = "counters")]
     fn item_count(&self) -> usize {
         panic!();

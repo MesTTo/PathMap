@@ -506,6 +506,20 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         }
     }
 
+    /// GOAT, temporary method to do side-by-side comparison between abstracted val_count and bespoke version
+    pub fn goat_val_count(&self) -> usize {
+        let root_val = unsafe{ &*self.root_val.get() }.is_some() as usize;
+        match self.root() {
+            Some(root) => {
+                traverse_physical(root,
+                    |node, ctx: usize| { ctx + node.node_goat_val_count() },
+                    |ctx, child_ctx| { ctx + child_ctx },
+                ) + root_val
+            },
+            None => root_val
+        }
+    }
+
     pub const INVIS_HASH: u128 = 0b00001110010011001111100111000110011110101111001101110110011100001011010011010011001000100111101000001100011111110100001000000111;
 
     /// Hash the logical `PathMap` and all its values with the provided hash function (which can return [PathMap::INVIS_HASH] to ignore values).

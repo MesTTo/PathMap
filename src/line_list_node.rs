@@ -1967,6 +1967,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             _ => (NODE_ITER_FINISHED, &[], None, None)
         }
     }
+    #[inline]
     fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
         let mut result = 0;
         if self.is_used_value_0() {
@@ -1984,6 +1985,60 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             result += val_count_below_node(child_node, cache);
         }
         result
+    }
+    #[inline]
+    fn node_goat_val_count(&self) -> usize {
+        //Here are 3 alternative implementations.  They're basically the same in perf, with a slight edge to the
+        // inline bitwise arithmetic version.  But if we get rid of the bit 12 madness to track a saturated key in slot0
+        // (which is probably unnecessary) then I think we can speed up all these impls
+
+        // ====================================
+        // Simplest impl
+
+        // self.is_used_value_0() as usize + self.is_used_value_1() as usize
+
+        // ====================================
+        // Inline bitwise arithmetic
+
+        let h = (self.header >> 12) as usize;
+        if (h & 0b1000) == 0 && h != 0 {
+            unsafe { core::hint::unreachable_unchecked() }
+        }
+        let s0 = ((h & 0b1000) >> 3) & (((h & 0b0010) ^ 0b0010) >> 1);
+        let s1 = ((h & 0b0100) >> 2) & ((h & 0b0001) ^ 0b0001);
+        s0 + s1
+
+        // ====================================
+        // LUT
+
+        // match (self.header >> 12) as usize {
+        //     0b0000 => 0, //Empty node.  0b0xxx with any if the 'x' bits set is an invalid config
+        //     0b1010 | 0b1011 => 0, //Slot 0 filled with an onward link, slot 1 empty
+        //     0b1111 => 0, //Both slots filled with onward links
+        //     0b1000 | 0b1001 => 1, //Slot 0 filled with a value, slot 1 empty
+        //     0b1101 => 1, //Both slots are filled, but only slot 0 is a value
+        //     0b1110 => 1, //Both slots are filled, but only slot 1 is a value
+        //     0b1100 => 2, //Both slots contain values
+        //     _ => unsafe{ unreachable_unchecked() }
+        // }
+    }
+    #[inline]
+    fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        if self.is_used_child_0() {
+            return (1, Some(unsafe{ self.child_in_slot::<0>() }))
+        }
+        if self.is_used_child_1() {
+            return (2, Some(unsafe{ self.child_in_slot::<1>() }))
+        }
+        return (0, None)
+    }
+    #[inline]
+    fn node_child_iter_next(&self, token: u64) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        if token == 1 && self.is_used_child_1() {
+            (2, Some(unsafe{ self.child_in_slot::<1>() }))
+        } else {
+            (0, None)
+        }
     }
     #[cfg(feature = "counters")]
     fn item_count(&self) -> usize {

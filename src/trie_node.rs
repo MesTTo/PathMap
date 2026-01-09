@@ -186,6 +186,22 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     fn node_is_empty(&self) -> bool;
 
     /// Generates a new iter token, to iterate the children and values contained within this node
+    ///
+    /// GOAT: Do we really *need* 128 bits for the iter token?  Or could we use 64?  The idea is that an
+    /// iter token can represent any position in any arbitrary node type, and involve a minimum of computation
+    /// to advance to the next position.  Currently the only node type that uses more than 64 bits is the
+    /// ByteNode, and that is because it represents the mask in the first 64 bits of the token.  However it
+    /// seems just as efficient (I think actually slightly more efficient) to store both one more than the path
+    /// byte returned by the last call (or 0 if iteration is starting) and the index in the values vec.  This means
+    /// we actually only need 16 bits for the byte node.
+    ///
+    /// To the more general question of whether it will be enough for any possible future node structure, that
+    /// is a more difficult consideration.  Currently MAX_NODE_KEY_BYTES is limited to 48, but there is no limit
+    /// on the branching factor within that node.  So even 128 bits is insufficient to encode all paths in theory.
+    /// However a fixed-size node structure has a physical limit on its complexity.  If we assume we will limit a
+    /// node to 4KB, 12 bits is enough to address any byte within that physical structure, so there is probably some
+    /// clever encoding that can address any path that it could contain, using 64 bits, with a reasonable time and
+    /// memory-fetch overhead.
     fn new_iter_token(&self) -> u128;
 
     /// Generates an iter token that can be passed to [Self::next_items] to continue iteration from the
@@ -205,6 +221,24 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// Returns the total number of leaves contained within the whole subtree defined by the node
     /// GOAT, this should be deprecated
     fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize;
+
+    /// Returns the number of values contained within the node itself, irrespective of the positions within
+    /// the node; does not include onward links
+    ///
+    /// GOAT, this should replace node_val_count
+    fn node_goat_val_count(&self) -> usize;
+
+    /// Returns the first downstream child of a node, and a token that can be used to access subsequent children
+    ///
+    /// This method avoids the overhead of tracking paths.  Returns `(_, None)` when there are no more children.
+    ///
+    /// WARNING: Physical iter tokens are not compatible with the general iteration tokens the provide access to paths.
+    fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>);
+
+    /// Returns the next downstream child of a node and a new token, based on the token provided
+    ///
+    /// See [TrieNode::node_child_iter_start]
+    fn node_child_iter_next(&self, token: u64) -> (u64, Option<&TrieNodeODRc<V, A>>);
 
     #[cfg(feature = "counters")]
     /// Returns the number of internal items (onward links and values) within the node.  In the case where
@@ -1187,6 +1221,7 @@ mod tagged_node_ref {
             }
         }
 
+        #[inline]
         pub fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
             match self {
                 Self::DenseByteNode(node) => node.node_val_count(cache),
@@ -1194,6 +1229,39 @@ mod tagged_node_ref {
                 Self::CellByteNode(node) => node.node_val_count(cache),
                 Self::TinyRefNode(node) => node.node_val_count(cache),
                 Self::EmptyNode => 0,
+            }
+        }
+
+        #[inline]
+        pub fn node_goat_val_count(&self) -> usize {
+            match self {
+                Self::DenseByteNode(node) => node.node_goat_val_count(),
+                Self::LineListNode(node) => node.node_goat_val_count(),
+                Self::CellByteNode(node) => node.node_goat_val_count(),
+                Self::TinyRefNode(node) => node.node_goat_val_count(),
+                Self::EmptyNode => 0,
+            }
+        }
+
+        #[inline]
+        pub fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+            match self {
+                Self::DenseByteNode(node) => node.node_child_iter_start(),
+                Self::LineListNode(node) => node.node_child_iter_start(),
+                Self::CellByteNode(node) => node.node_child_iter_start(),
+                Self::TinyRefNode(node) => node.node_child_iter_start(),
+                Self::EmptyNode => (0, None),
+            }
+        }
+
+        #[inline]
+        pub fn node_child_iter_next(&self, token: u64) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+            match self {
+                Self::DenseByteNode(node) => node.node_child_iter_next(token),
+                Self::LineListNode(node) => node.node_child_iter_next(token),
+                Self::CellByteNode(node) => node.node_child_iter_next(token),
+                Self::TinyRefNode(node) => node.node_child_iter_next(token),
+                Self::EmptyNode => (0, None),
             }
         }
 
@@ -1780,6 +1848,42 @@ mod tagged_node_ref {
             }
         }
 
+        pub fn node_goat_val_count(&self) -> usize {
+            let (ptr, tag) = self.ptr.get_raw_parts();
+            match tag {
+                EMPTY_NODE_TAG => 0,
+                DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.node_goat_val_count(),
+                LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.node_goat_val_count(),
+                CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.node_goat_val_count(),
+                TINY_REF_NODE_TAG => unsafe{ &*ptr.cast::<TinyRefNode<V, A>>() }.node_goat_val_count(),
+                _ => unsafe{ unreachable_unchecked() }
+            }
+        }
+
+        pub fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+            let (ptr, tag) = self.ptr.get_raw_parts();
+            match tag {
+                EMPTY_NODE_TAG => (0, None),
+                DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.node_child_iter_start(),
+                LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.node_child_iter_start(),
+                CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.node_child_iter_start(),
+                TINY_REF_NODE_TAG => unsafe{ &*ptr.cast::<TinyRefNode<V, A>>() }.node_child_iter_start(),
+                _ => unsafe{ unreachable_unchecked() }
+            }
+        }
+
+        pub fn node_child_iter_next(&self, token: u64) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+            let (ptr, tag) = self.ptr.get_raw_parts();
+            match tag {
+                EMPTY_NODE_TAG => (0, None),
+                DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.node_child_iter_next(token),
+                LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.node_child_iter_next(token),
+                CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.node_child_iter_next(token),
+                TINY_REF_NODE_TAG => unsafe{ &*ptr.cast::<TinyRefNode<V, A>>() }.node_child_iter_next(token),
+                _ => unsafe{ unreachable_unchecked() }
+            }
+        }
+
         // #[cfg(feature = "counters")]
         // fn item_count(&self) -> usize;
 
@@ -2266,6 +2370,66 @@ pub(crate) fn val_count_below_node<V: Clone + Send + Sync, A: Allocator>(node: &
     } else {
         node.as_tagged().node_val_count(cache)
     }
+}
+
+/// Recursively traverses a trie descending from `node`, visiting every physical non-empty node once
+pub(crate) fn traverse_physical<Ctx, NodeF, FoldF, V, A>(node: &TrieNodeODRc<V, A>, node_f: NodeF, fold_f: FoldF) -> Ctx
+    where
+    V: Clone + Send + Sync,
+    A: Allocator,
+    Ctx: Clone + Default,
+    NodeF: Fn(TaggedNodeRef<V, A>, Ctx) -> Ctx + Copy,
+    FoldF: Fn(Ctx, Ctx) -> Ctx + Copy
+{
+    let mut cache = std::collections::HashMap::new();
+    traverse_physical_internal(node, node_f, fold_f, &mut cache)
+}
+
+fn traverse_physical_internal<Ctx, NodeF, FoldF, V, A>(node: &TrieNodeODRc<V, A>, node_f: NodeF, fold_f: FoldF, cache: &mut HashMap<u64, Ctx>) -> Ctx
+    where
+    V: Clone + Send + Sync,
+    A: Allocator,
+    Ctx: Clone + Default,
+    NodeF: Fn(TaggedNodeRef<V, A>, Ctx) -> Ctx + Copy,
+    FoldF: Fn(Ctx, Ctx) -> Ctx + Copy
+{
+    if node.is_empty() {
+        return Ctx::default()
+    }
+
+    if node.refcount() > 1 {
+        let hash = node.shared_node_id();
+        match cache.get(&hash) {
+            Some(cached) => cached.clone(),
+            None => {
+                let ctx = traverse_physical_children_internal(node.as_tagged(), node_f, fold_f, cache);
+                cache.insert(hash, ctx.clone());
+                ctx
+            },
+        }
+    } else {
+        traverse_physical_children_internal(node.as_tagged(), node_f, fold_f, cache)
+    }
+}
+
+fn traverse_physical_children_internal<Ctx, NodeF, FoldF, V, A>(node: TaggedNodeRef<V, A>, node_f: NodeF, fold_f: FoldF, cache: &mut HashMap<u64, Ctx>) -> Ctx
+    where
+    V: Clone + Send + Sync,
+    A: Allocator,
+    Ctx: Clone + Default,
+    NodeF: Fn(TaggedNodeRef<V, A>, Ctx) -> Ctx + Copy,
+    FoldF: Fn(Ctx, Ctx) -> Ctx + Copy
+{
+    let mut ctx = Ctx::default();
+
+    let (mut tok, mut child) = node.node_child_iter_start();
+    while let Some(child_node) = child {
+        let child_ctx = traverse_physical_internal(child_node, node_f, fold_f, cache);
+        ctx = fold_f(ctx, child_ctx);
+        (tok, child) = node.node_child_iter_next(tok);
+    }
+
+    node_f(node, ctx)
 }
 
 /// Internal function to walk a mut TrieNodeODRc<V> ref along a path

@@ -70,6 +70,15 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for EmptyNode {
     fn node_val_count(&self, _cache: &mut HashMap<u64, usize>) -> usize {
         0
     }
+    fn node_goat_val_count(&self) -> usize {
+        0
+    }
+    fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        (0, None)
+    }
+    fn node_child_iter_next(&self, _token: u64) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        (0, None)
+    }
     #[cfg(feature = "counters")]
     fn item_count(&self) -> usize {
         0
