@@ -520,22 +520,6 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         }
     }
 
-    pub const INVIS_HASH: u128 = 0b00001110010011001111100111000110011110101111001101110110011100001011010011010011001000100111101000001100011111110100001000000111;
-
-    /// Hash the logical `PathMap` and all its values with the provided hash function (which can return [PathMap::INVIS_HASH] to ignore values).
-    //GOAT, do we need to do anything to make sure Merkleization and this hash method are in harmony?
-    pub fn hash<VHash : Fn(&V) -> u128>(&self, vhash: VHash) -> u128 {
-        unsafe {
-        self.read_zipper().into_cata_cached(|bm, hs, mv| {
-            let mut state = [0u8; 48];
-            state[0..16].clone_from_slice(gxhash128(slice_from_raw_parts(bm.0.as_ptr() as *const u8, 32).as_ref().unwrap(), 0b0100110001110010000010011111010011100011010000101101111001100110i64).to_le_bytes().as_slice());
-            state[16..32].clone_from_slice(gxhash128(slice_from_raw_parts(hs.as_ptr() as *const u8, 16*hs.len()).as_ref().unwrap(), 0b0111010001001011011011011111010110111011111101100110101100010000i64).to_le_bytes().as_slice());
-            state[32..].clone_from_slice(mv.map(|v| vhash(v)).unwrap_or(Self::INVIS_HASH).to_le_bytes().as_slice());
-            gxhash128(state.as_slice(), 0b0100001010101101111110010110100110000010011000100100100111110111i64)
-        })
-        }
-    }
-
     /// Returns a new `PathMap` containing the union of the paths in `self` and the paths in `other`
     pub fn join(&self, other: &Self) -> Self where V: Lattice {
         result_into_map(self.pjoin(other), self, other, self.alloc.clone())
