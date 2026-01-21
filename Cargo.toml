@@ -115,6 +115,10 @@ harness = false
 name = "sla"
 harness = false
 
+[[bench]]
+name = "multiplicities"
+harness = false
+
 [workspace]
 members = ["pathmap-derive"]
 resolver = "2"
