@@ -3,8 +3,7 @@ use pathmap::*;
 use pathmap::zipper::{ZipperMoving, ZipperWriting};
 
 fn main() {
-    // GOAT why does viz fail here?
-    const SILLY_LARGE_COUNTS: bool = true;
+    const SILLY_LARGE_COUNTS: bool = false;
     let mut pm0 = PathMap::new();
     pm0.insert(&[b'C', b'0', b'0'], ());
     pm0.insert(&[b'C', b'0', b'1'], ());
@@ -19,8 +18,8 @@ fn main() {
         wz.graft_map(m);
         drop(wz);
     } else { // add a few C atoms with the second map
-        pm0.insert(&[b'C', b'1', b'0'], ());
-        pm0.insert(&[b'C', b'1', b'1'], ());
+        pm1.insert(&[b'C', b'1', b'0'], ());
+        pm1.insert(&[b'C', b'1', b'1'], ());
     }
 
     let mut pm2 = pm0.join(&pm1);
