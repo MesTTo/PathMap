@@ -68,7 +68,6 @@
 use core::convert::Infallible;
 use std::hash::Hasher;
 use std::ptr::slice_from_raw_parts;
-use gxhash::gxhash128;
 use reusing_vec::ReusingQueue;
 
 use crate::utils::*;
@@ -233,13 +232,26 @@ pub trait Catamorphism<V> {
             W: Clone,
             AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>;
 
-    /// Hash the logical `PathMap` and all its values with the provided hash function (which can return [PathMap::INVIS_HASH] to ignore values).
-    fn hash(self) -> u128 where Self : Sized, V : std::hash::Hash {
+    /// Hash the logical `PathMap` and all its values
+    fn hash(self) -> u128
+    where
+        Self: Sized,
+        V: std::hash::Hash
+    {
+        self.hash_with(|v, hasher| v.hash(hasher))
+    }
+
+    /// Hash the logical `PathMap`, using the provided function to hash values
+    fn hash_with<F>(self, val_hash: F) -> u128
+    where
+        Self: Sized,
+        F: Fn(&V, &mut gxhash::GxHasher)
+    {
         self.into_cata_cached(|bm, hs, mv| {
             let mut hasher = gxhash::GxHasher::with_seed(0b0100001010101101111110010110100110000010011000100100100111110111i64);
             hasher.write(unsafe { slice_from_raw_parts(bm.0.as_ptr() as *const u8, 32).as_ref().unwrap_unchecked() });
             hasher.write(unsafe { slice_from_raw_parts(hs.as_ptr() as *const u8, 16*hs.len()).as_ref().unwrap_unchecked() });
-            if let Some(v) = mv { v.hash(&mut hasher) };
+            if let Some(v) = mv { val_hash(v, &mut hasher) };
             hasher.finish_u128()
         })
     }

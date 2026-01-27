@@ -1,13 +1,12 @@
 use core::cell::UnsafeCell;
-use std::ptr::slice_from_raw_parts;
 use crate::alloc::{Allocator, GlobalAlloc, global_alloc};
-use crate::morphisms::{new_map_from_ana_in, Catamorphism, TrieBuilder};
+use crate::morphisms::{new_map_from_ana_in, TrieBuilder};
 use crate::trie_node::*;
 use crate::zipper::*;
 use crate::merkleization::{MerkleizeResult, merkleize_impl};
 use crate::ring::{AlgebraicResult, AlgebraicStatus, COUNTER_IDENT, SELF_IDENT, Lattice, LatticeRef, DistributiveLattice, DistributiveLatticeRef, Quantale};
 
-use crate::gxhash::{self, gxhash128};
+use crate::gxhash;
 
 /// A map type that uses a trie based on byte slices (`&[u8]`) known as "paths"
 ///
