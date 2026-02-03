@@ -45,7 +45,7 @@ arena_compact = ["dep:memmap2"]
 
 bridge_nodes = [] # Enable the experimental BridgeNode type.  Incompatible with `all_dense_nodes` WILL BE REMOVED EVENTUALLY
 old_cursor = [] # Enables an old deprecated traversal object that predates the zippers, WILL BE REMOVED EVENTUALLY
-fuzzer = ["dep:rand", "dep:rand_distr", "dep:distr-combinators"]  # Used for creating random paths, tries, and zipper movements
+random = ["dep:rand", "dep:rand_distr", "dep:distr-combinators"]  # Used for creating random paths, tries, and zipper movements
 counters = [] # Enable features to inspect performance properties of tries.  Mainly useful when tuning performance of the PathMap internals.
 graft_root_vals = [] # Enables an experimental change in behavior that causes `graft`, `graft_map`, `make_map`, `take_map`, and `join_map` to treat the value at the focus as part of the operation
 slim_ptrs = [] # Enables use of a 64-bit inter-node pointer type (TrieNodeODRc)
@@ -124,5 +124,5 @@ name = "multiplicities"
 harness = false
 
 [workspace]
-members = ["pathmap-derive"]
+members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests"]
 resolver = "2"

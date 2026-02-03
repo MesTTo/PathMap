@@ -108,9 +108,9 @@ mod poly_zipper;
 /// Used to create multiple simultaneous zippers from the same parent
 mod zipper_head;
 
-/// Used for creating random paths, tries, and zipper movements
-#[cfg(feature = "fuzzer")]
-pub mod fuzzer;
+/// Used for creating random paths and tries, according to configurable distributions
+#[cfg(feature = "random")]
+pub mod random;
 
 /// Features to inspect performance properties of trees, for optimizing
 #[cfg(feature = "counters")]
