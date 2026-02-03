@@ -11,7 +11,7 @@ use crate::utils::{BitMask, ByteMask};
 use crate::zipper::{ReadZipperUntracked, Zipper, ZipperReadOnlyIteration, ZipperMoving, ZipperReadOnlyValues};
 
 // Re-export generic combinators
-pub use crate::distr_combinators::*;
+pub use distr_combinators::*;
 
 // ===================================================================================================
 // Generating Random PathMaps

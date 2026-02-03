@@ -112,10 +112,6 @@ mod zipper_head;
 #[cfg(feature = "fuzzer")]
 pub mod fuzzer;
 
-/// Used by fuzzer; likely to be moved into another crate soon
-#[cfg(feature = "fuzzer")]
-pub mod distr_combinators;
-
 /// Features to inspect performance properties of trees, for optimizing
 #[cfg(feature = "counters")]
 pub mod counters;
