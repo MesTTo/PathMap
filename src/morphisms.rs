@@ -77,7 +77,7 @@ use crate::trie_node::TrieNodeODRc;
 use crate::zipper;
 use crate::zipper::*;
 
-use crate::gxhash::{HashMap, HashMapExt};
+use crate::gxhash::{self, HashMap, HashMapExt};
 
 /// Provides methods to perform a catamorphism on types that can reference or contain a trie
 pub trait Catamorphism<V> {
@@ -238,20 +238,24 @@ pub trait Catamorphism<V> {
         Self: Sized,
         V: std::hash::Hash
     {
-        self.hash_with(|v, hasher| v.hash(hasher))
+        self.hash_with(|v| {
+            let mut hasher = gxhash::GxHasher::with_seed(0);
+            v.hash(&mut hasher);
+            hasher.finish_u128()
+        })
     }
 
     /// Hash the logical `PathMap`, using the provided function to hash values
     fn hash_with<F>(self, val_hash: F) -> u128
     where
         Self: Sized,
-        F: Fn(&V, &mut gxhash::GxHasher)
+        F: Fn(&V) -> u128
     {
         self.into_cata_cached(|bm, hs, mv| {
             let mut hasher = gxhash::GxHasher::with_seed(0b0100001010101101111110010110100110000010011000100100100111110111i64);
             hasher.write(unsafe { slice_from_raw_parts(bm.0.as_ptr() as *const u8, 32).as_ref().unwrap_unchecked() });
             hasher.write(unsafe { slice_from_raw_parts(hs.as_ptr() as *const u8, 16*hs.len()).as_ref().unwrap_unchecked() });
-            if let Some(v) = mv { val_hash(v, &mut hasher) };
+            if let Some(v) = mv { hasher.write_u128(val_hash(v)) };
             hasher.finish_u128()
         })
     }

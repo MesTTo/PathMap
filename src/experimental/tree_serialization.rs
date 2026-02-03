@@ -70,6 +70,6 @@ mod tests {
         let Ok(top_node) = serialize_fork(btm.read_zipper(), &mut v, |_1, _2, _3| {}) else { unreachable!() };
         let mut recovered = PathMap::new();
         deserialize_fork(top_node, &mut recovered.write_zipper(), &v[..], |_, _p| ()).unwrap();
-        assert_eq!(btm.hash_with(|_, _| {}), recovered.hash_with(|_, _| {}));
+        assert_eq!(btm.hash_with(|_| 0), recovered.hash_with(|_| 0));
     }
 }

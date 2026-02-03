@@ -337,8 +337,15 @@ fn tipover_attention_bob() {
     println!(" count {}", unsafe{ COUNT });
     unsafe{ COUNT = 0 };
 
-    assert_eq!(rtr.m.hash_with(|v, hasher| (*v as u32 as u128).hash(hasher)), rtr_.m.hash_with(|v, hasher| (*v as u32 as u128).hash(hasher)));
-
+                assert_eq!(rtr.m.hash_with(|v| {
+                    let mut h = gxhash::GxHasher::with_seed(0);
+                    (*v as u32 as u128).hash(&mut h);
+                    h.finish_u128()
+                }), rtr_.m.hash_with(|v| {
+                    let mut h = gxhash::GxHasher::with_seed(0);
+                    (*v as u32 as u128).hash(&mut h);
+                    h.finish_u128()
+                }));
     // use pathmap::viz::{viz_maps, DrawConfig};
     // let mut v = vec![];
     // let dc = DrawConfig{ mode: VizMode::Ascii, ascii_path: false, hide_value_paths: false, minimize_values: false, logical: true, color: false };
