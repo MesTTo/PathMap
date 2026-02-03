@@ -8,81 +8,47 @@ use rand::Rng;
 use rand_distr::Distribution;
 use rand::distr::{Iter, Uniform};
 use std::marker::PhantomData;
-use std::ptr::null;
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
-/// A statistical tool to analyze the distribution of generated values.
+/// A convenience to analyze the distribution of generated values
 #[derive(Debug)]
-pub struct Histogram<T : std::cmp::Eq + std::hash::Hash> {
-  pub counts: Vec<usize>,
-  pub lookup: HashMap<T, usize>
+pub struct Histogram<T: std::cmp::Eq + std::hash::Hash> {
+  pub lookup: IndexMap<T, usize>
 }
-impl <T: std::cmp::Eq + std::hash::Hash> Histogram<T> {
-  pub fn from(iter: impl IntoIterator<Item=T>) -> Self {
-    let iter = iter.into_iter();
-    let (lower, _) = iter.size_hint();
-    let mut counts = Vec::with_capacity(lower);
-    let mut lookup = HashMap::with_capacity(lower);
-
-    iter.for_each(|t| {
-      match lookup.entry(t) {
-        Entry::Occupied(i) => { counts[*i.get()] += 1; }
-        Entry::Vacant(i) => { i.insert(counts.len()); counts.push(1) }
-      }
-    });
-
-    const UNVISITED: usize = 1 << (usize::BITS - 1);
-    const MASK: usize = !UNVISITED;
-
-    let mut indices: Vec<usize> = (0..counts.len()).map(|i| i | UNVISITED).collect();
-    indices.sort_by_key(|&i| counts[i & MASK]);
-
-    // Invert the permutation in-place to create the rank map (OldIndex -> Rank).
-    // We start with the UNVISITED bit set and clear it as we process each cycle.
-    for i in 0..indices.len() {
-      if (indices[i] & UNVISITED) != 0 {
-        let mut curr = i;
-        let mut val = indices[i] & MASK;
-        while (indices[val] & UNVISITED) != 0 {
-          let next_val = indices[val] & MASK;
-          indices[val] = curr;
-          curr = val;
-          val = next_val;
-        }
-        indices[val] = curr;
-      }
+impl <T: std::cmp::Eq + std::hash::Hash> FromIterator<T> for Histogram<T> {
+  fn from_iter<I: IntoIterator<Item=T>>(iter: I) -> Self {
+    let mut lookup = IndexMap::new();
+    for t in iter {
+      *lookup.entry(t).or_insert(0) += 1;
     }
-
-    // Update lookup table to point to the new ranks
-    for (_, v) in lookup.iter_mut() {
-      *v = indices[*v];
-    }
-
-    // Permute counts in-place using the rank mapping.  Should be more efficient than re-sort
-    for i in 0..counts.len() {
-      while indices[i] != i {
-        let dest = indices[i];
-        counts.swap(i, dest);
-        indices.swap(i, dest);
-      }
-    }
-
-    Histogram { counts, lookup }
+    // Sort by count (ascending)
+    lookup.sort_by(|_, v1, _, v2| v1.cmp(v2));
+    Histogram { lookup }
   }
+}
 
-  /// Returns a summary table of the histogram as a vector of pairs, where each pair
-  /// contains a reference to a unique element and its total occurrence count.
-  ///
-  /// For newly-created Histograms, the table is sorted by frequency in ascending order (the least frequent
-  /// elements appear first). This is useful for statistical verification of random distributions.
-  pub fn table(&self) -> Vec<(&T, usize)> {
-    // this is wasteful, perhaps we should use a deconstructed hashmap so &[(T, usize)] coincides with our internal representation
-    let mut v = vec![(null(), 0usize); self.counts.len()];
-    for (t, i) in self.lookup.iter() {
-      v[*i] = (t, self.counts[*i])
-    }
-    unsafe { std::mem::transmute(v) }
+impl <T: std::cmp::Eq + std::hash::Hash> Histogram<T> {
+  /// Returns an iterator over the histogram entries, sorted by occurrence count in ascending order.
+  pub fn iter(&self) -> impl Iterator<Item = (&T, usize)> {
+    self.lookup.iter().map(|(k, v)| (k, *v))
+  }
+}
+
+impl<'a, T: std::cmp::Eq + std::hash::Hash> IntoIterator for &'a Histogram<T> {
+  type Item = (&'a T, usize);
+  type IntoIter = std::iter::Map<indexmap::map::Iter<'a, T, usize>, fn((&'a T, &'a usize)) -> (&'a T, usize)>;
+
+  fn into_iter(self) -> Self::IntoIter {
+    self.lookup.iter().map(|(k, v)| (k, *v))
+  }
+}
+
+impl<T: std::cmp::Eq + std::hash::Hash> IntoIterator for Histogram<T> {
+  type Item = (T, usize);
+  type IntoIter = indexmap::map::IntoIter<T, usize>;
+
+  fn into_iter(self) -> Self::IntoIter {
+    self.lookup.into_iter()
   }
 }
 
@@ -285,8 +251,8 @@ mod tests {
     let rng = StdRng::from_seed([0; 32]);
     let expected = [('b', 2usize), ('a', 10), ('c', 29), ('d', 100)];
     let cd = ratios(expected.into_iter());
-    let hist = Histogram::from(cd.sample_iter(rng).take(SAMPLES*(10+2+29+100)));
-    let achieved: Vec<(char, usize)> = hist.table().into_iter().map(|(k, c)|
+    let hist = Histogram::from_iter(cd.sample_iter(rng).take(SAMPLES*(10+2+29+100)));
+    let achieved: Vec<(char, usize)> = hist.iter().map(|(k, c)|
       (*k, ((c as f64)/(SAMPLES as f64)).round() as usize)).collect();
     assert_eq!(&expected[..], &achieved[..]);
   }

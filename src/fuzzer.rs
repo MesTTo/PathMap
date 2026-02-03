@@ -247,8 +247,8 @@ mod tests {
     let pairs = &[("abc", 0), ("abd", 1), ("ax", 2), ("ay", 3), ("A1", 4), ("A2", 5)];
     let btm = PathMap::from_iter(pairs.iter().map(|(s, i)| (s.as_bytes(), i)));
     let stv = FairTrieValue{ source: btm };
-    let hist = Histogram::from(stv.sample_iter(rng).map(|(_, v)| v).take(pairs.len()*SAMPLES));
-    let achieved: Vec<usize> = hist.table().into_iter().map(|(_k, c)|
+    let hist = Histogram::from_iter(stv.sample_iter(rng).map(|(_, v)| v).take(pairs.len()*SAMPLES));
+    let achieved: Vec<usize> = hist.iter().map(|(_k, c)|
       ((c as f64)/((SAMPLES/100) as f64)).round() as usize).collect();
 
     achieved.into_iter().for_each(|c| {
@@ -287,9 +287,9 @@ mod tests {
 
     let btm = PathMap::from_iter(pairs.iter().map(|(s, i)| (s.as_bytes(), i)));
     let stv = DescendFirstTrieValue{ source: btm, policy: unbiased_descend_first_policy };
-    let hist = Histogram::from(stv.sample_iter(rng).map(|(_, v)| *v).take(6*SAMPLES));
+    let hist = Histogram::from_iter(stv.sample_iter(rng).map(|(_, v)| *v).take(6*SAMPLES));
     // println!("{:?}", hist.table());
-    let achieved: Vec<(i32, i32)> = hist.table().into_iter().map(|(k, c)|
+    let achieved: Vec<(i32, i32)> = hist.iter().map(|(k, c)|
       (*k, ((c as f64)/((SAMPLES/10) as f64)).round() as i32)).collect();
 
     // The ultimate order is down the particular random number sequence, but we know that
@@ -323,9 +323,9 @@ mod tests {
     let rng = StdRng::from_seed([0; 32]);
     let btm = PathMap::from_iter([("abc", 0), ("abcd", 10), ("abd", 1), ("ax", 2), ("ay", 3), ("A1", 4), ("A2", 5)].iter().map(|(s, i)| (s.as_bytes(), i)));
     let stv = DescendTriePath{ source: btm, policy: unbiased_descend_last_policy, ph: Default::default() };
-    let hist = Histogram::from(stv.sample_iter(rng).map(|(_, v)| *v).take(6*SAMPLES));
+    let hist = Histogram::from_iter(stv.sample_iter(rng).map(|(_, v)| *v).take(6*SAMPLES));
     // println!("{:?}", hist.table());
-    let achieved: Vec<(i32, i32)> = hist.table().into_iter().map(|(k, c)|
+    let achieved: Vec<(i32, i32)> = hist.iter().map(|(k, c)|
         (*k, ((c as f64)/((SAMPLES/10) as f64)).round() as i32)).collect();
 
     // The ultimate order is down the particular random number sequence, but we know that
@@ -361,8 +361,8 @@ mod tests {
     let rng = StdRng::from_seed([0; 32]);
     let btm = PathMap::from_iter([("abc", 0), ("abd", 1), ("ax", 2), ("ay", 3), ("A1", 4), ("A2", 5)].iter().map(|(s, i)| (s.as_bytes(), i)));
     let stv = FairTriePath{ source: btm };
-    let hist = Histogram::from(stv.sample_iter(rng).map(|(p, _)| p).take(10*SAMPLES));
-    let achieved: Vec<usize> = hist.table().into_iter().map(|(_k, c)|
+    let hist = Histogram::from_iter(stv.sample_iter(rng).map(|(p, _)| p).take(10*SAMPLES));
+    let achieved: Vec<usize> = hist.into_iter().map(|(_k, c)|
       ((c as f64)/((SAMPLES/100) as f64)).round() as usize).collect();
 
     achieved.into_iter().for_each(|c| {
