@@ -13,9 +13,26 @@ use crate::zipper::{ReadZipperUntracked, Zipper, ZipperReadOnlyIteration, Zipper
 // Re-export generic combinators
 pub use crate::distr_combinators::*;
 
+// ===================================================================================================
+// Generating Random PathMaps
+// ===================================================================================================
+
+/// A [`Distribution`] that generates a `PathMap` by performing independent samples of paths and values.
+///
+/// This struct creates a `PathMap` populated with a fixed number of paths ending in values, sampled
+/// independently from the provided path (`pd`) and value (`vd`) distributions.
 #[derive(Clone)]
-pub struct UniformTrie<T : TrieValue, PathD : Distribution<Vec<u8>> + Clone, ValueD : Distribution<T> + Clone> { pub size: usize, pub pd: PathD, pub vd: ValueD, pub ph: PhantomData<T> }
-impl <T : TrieValue, PathD : Distribution<Vec<u8>> + Clone, ValueD : Distribution<T> + Clone> Distribution<PathMap<T>> for UniformTrie<T, PathD, ValueD> {
+pub struct RandomTrie<T: TrieValue, PathD: Distribution<Vec<u8>> + Clone, ValueD: Distribution<T> + Clone> {
+    /// The number of independent samples to attempt to insert into the generated `PathMap`.
+    pub size: usize,
+    /// Distribution for generating paths (keys).
+    pub pd: PathD,
+    /// Distribution for generating values.
+    pub vd: ValueD,
+    /// PhantomData to hold the type `T`.
+    pub ph: PhantomData<T>
+}
+impl <T : TrieValue, PathD : Distribution<Vec<u8>> + Clone, ValueD : Distribution<T> + Clone> Distribution<PathMap<T>> for RandomTrie<T, PathD, ValueD> {
   fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> PathMap<T> {
     let mut btm = PathMap::new();
     for _ in 0..self.size {
@@ -38,8 +55,22 @@ impl <T, SproutD : Fn(T) -> Distribution<&PathMap<T>>> Distribution<PathMap<T>> 
   }
 }*/
 
+// ===================================================================================================
+// Sampling from PathMaps
+// ===================================================================================================
+
+/// A [`Distribution`] that samples a value from a [`PathMap`], uniformly among all values.
+///
+/// Sampling returns a tuple containing the full path and the value.
+/// This distribution ensures that every value in the map has an equal probability of being selected.
+///
+/// Sampling is $O(N)$ where $N$ is the number of values in the map, as it must traverse the trie to
+/// find the $k$-th element.
 #[derive(Clone)]
-pub struct FairTrieValue<T : TrieValue> { pub source: PathMap<T> }
+pub struct FairTrieValue<T: TrieValue> {
+    /// The source `PathMap` to sample from.
+    pub source: PathMap<T>
+}
 impl <T : TrieValue> Distribution<(Vec<u8>, T)> for FairTrieValue<T> {
   fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> (Vec<u8>, T) {
     // it's much cheaper to draw many samples at once, but the current Distribution API is broken
@@ -55,8 +86,18 @@ impl <T : TrieValue> Distribution<(Vec<u8>, T)> for FairTrieValue<T> {
   }
 }
 
+/// A [`Distribution`] that samples a value from a [`PathMap`] by descending the trie from the root
+/// in an order dictated by `policy`, stopping at the first value encountered.
+///
+/// Sampling returns a tuple containing the full path and the value.  At each split, the `policy`
+/// is consulted to choose the distribution over the next downstream bytes.
 #[derive(Clone)]
-pub struct DescendFirstTrieValue<T : TrieValue, ByteD : Distribution<u8> + Clone, P : Fn(&ReadZipperUntracked<T>) -> ByteD> { pub source: PathMap<T>, pub policy: P }
+pub struct DescendFirstTrieValue<T: TrieValue, ByteD: Distribution<u8> + Clone, P: Fn(&ReadZipperUntracked<T>) -> ByteD> { 
+    /// The source `PathMap` to sample from.
+    pub source: PathMap<T>,
+    /// The policy function used to determine the next descent step.
+    pub policy: P
+}
 impl <T : TrieValue, ByteD : Distribution<u8> + Clone, P : Fn(&ReadZipperUntracked<T>) -> ByteD> Distribution<(Vec<u8>, T)> for DescendFirstTrieValue<T, ByteD, P> {
   fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> (Vec<u8>, T) {
     let mut rz = self.source.read_zipper();
@@ -72,8 +113,31 @@ pub fn unbiased_descend_first_policy<T : TrieValue>(rz: &ReadZipperUntracked<T>)
   Categorical{ elements: bm.iter().collect(), ed: Uniform::try_from(0..bm.count_bits()).unwrap() }
 }
 
+/// A [`Distribution`] that samples a path uniformly from all path bytes in the trie.
+///
+/// Sampling returns a tuple containing the full path and an optional value if one exists.
+/// Every path byte in the trie is sampled with equal probability, including those with 
+/// downward continuations and those that are terminal (leaves). The empty path (root) 
+/// is also a candidate.
+///
+/// Use this distribution when you need to pick a random location *within* the trie structure,
+/// regardless of whether that location holds a value or is a leaf.
+///
+/// # Probability Distribution
+///
+/// The sampling is uniform over all $N$ path bytes.
+/// - A path byte with 100 downstream continuation paths has the same probability ($\frac{1}{N}$) of being *returned* 
+///   as a terminal path byte.
+/// - However, the probability of *descending into* a branch is proportional to the size of that branch's subtree.
+///
+/// # Performance
+///
+/// Sampling is $O(N)$ where $N$ is the total number of path bytes in the trie.
 #[derive(Clone)]
-pub struct FairTriePath<T : TrieValue> { pub source: PathMap<T> }
+pub struct FairTriePath<T : TrieValue> { 
+    /// The source `PathMap` to sample from.
+    pub source: PathMap<T>
+}
 impl <T : TrieValue + 'static> Distribution<(Vec<u8>, Option<T>)> for FairTriePath<T> {
   fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> (Vec<u8>, Option<T>) {
     use crate::morphisms::Catamorphism;
@@ -89,8 +153,23 @@ impl <T : TrieValue + 'static> Distribution<(Vec<u8>, Option<T>)> for FairTriePa
   }
 }
 
+/// A [`Distribution`] that samples a value from a [`PathMap`] by descending the trie from the root.
+///
+/// Unlike [`DescendFirstTrieValue`], this distribution allows for more complex termination logic.
+/// At each step, the `policy` can decide to:
+/// 1. Return a success value `Ok(byte)`, causing the traversal to descend to that byte.
+/// 2. Return a failure/terminal value `Err(S)`, causing the traversal to stop and return the current path and the value `S`.
+///
+/// This allows for constructing random walks that depend on the local structure of the trie.
 #[derive(Clone)]
-pub struct DescendTriePath<T : TrieValue, S, SByteD : Distribution<Result<u8, S>> + Clone, P : Fn(&ReadZipperUntracked<T>) -> SByteD> { pub source: PathMap<T>, pub policy: P, pub ph: PhantomData<S> }
+pub struct DescendTriePath<T : TrieValue, S, SByteD : Distribution<Result<u8, S>> + Clone, P : Fn(&ReadZipperUntracked<T>) -> SByteD> {
+    /// The source `PathMap` to sample from.
+    pub source: PathMap<T>,
+    /// The policy function that determines the next step (descend or terminate).
+    pub policy: P,
+    /// PhantomData for the terminal value type `S`.
+    pub ph: PhantomData<S>
+}
 impl <T : TrieValue, S, SByteD : Distribution<Result<u8, S>> + Clone, P : Fn(&ReadZipperUntracked<T>) -> SByteD> Distribution<(Vec<u8>, S)> for DescendTriePath<T, S, SByteD, P> {
   fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> (Vec<u8>, S) {
     let mut rz = self.source.read_zipper();
@@ -102,6 +181,14 @@ impl <T : TrieValue, S, SByteD : Distribution<Result<u8, S>> + Clone, P : Fn(&Re
     }
   }
 }
+/// A policy for `DescendTriePath` that uniformly descends the trie until a leaf path byte (a path byte with
+/// no children) is reached
+///
+/// At each step, it checks if there are any child path bytes. If there are, it randomly selects one
+/// with uniform probability and continues the descent. If there are no children, it terminates
+/// and returns the value associated with that terminal path byte.
+///
+/// Panics if it reaches a terminal path byte that does not have an associated value.
 pub fn unbiased_descend_last_policy<T : TrieValue>(rz: &ReadZipperUntracked<T>) -> Choice2<u8, Categorical<u8, Uniform<usize>>, T, Mapped<Option<T>, T, Degenerate<Option<T>>, fn (Option<T>) -> T>, Degenerate<bool>> {
   let bm = rz.child_mask();
   let options: Vec<u8> = bm.iter().collect();
@@ -110,12 +197,11 @@ pub fn unbiased_descend_last_policy<T : TrieValue>(rz: &ReadZipperUntracked<T>) 
   Choice2 {
     db: Degenerate{ element: noptions > 0 },
     // safety: Uniform stores integers, and while you can't sample from lower=upper=0, the memory is valid
-    dx: Categorical{ elements: options, ed: Uniform::try_from(0..noptions).unwrap_or(unsafe { std::mem::MaybeUninit::zeroed().assume_init() }) },
+    dx: Categorical{ elements: options, ed: Uniform::try_from(0..noptions).unwrap_or(Uniform::try_from(0..=0).unwrap()) },
     dy: Mapped{ d: Degenerate{ element: rz.get_val().cloned() }, f: |v| v.unwrap(), pd: PhantomData::default() },
     pd: PhantomData::default()
   }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -132,7 +218,7 @@ mod tests {
     let mut rng = StdRng::from_seed([0; 32]);
     let path_fuzzer = Repeated { lengthd: Degenerate{ element: 3 }, itemd: Categorical { elements: "abcd".as_bytes().to_vec(),
       ed: Uniform::try_from(0..4).unwrap() }, pd: PhantomData::default() };
-    let trie_fuzzer = UniformTrie { size: 10, pd: path_fuzzer, vd: Degenerate{ element: () }, ph: PhantomData::default() };
+    let trie_fuzzer = RandomTrie { size: 10, pd: path_fuzzer, vd: Degenerate{ element: () }, ph: PhantomData::default() };
     let trie = trie_fuzzer.sample(&mut rng);
     let res = ["aaa", "aac", "bba", "bdd", "cbb", "cbd", "dab", "dac", "dca"];
     trie.iter().zip(res).for_each(|(x, y)| assert_eq!(x.0.as_slice(), y.as_bytes()));
@@ -143,7 +229,7 @@ mod tests {
     let mut rng = StdRng::from_seed([0; 32]);
     let path_fuzzer = Filtered{ d: Sentinel { mbd: Mapped{ d: Categorical { elements: "abcd\0".as_bytes().to_vec(),
       ed: Uniform::try_from(0..5).unwrap() }, f: |x| if x == b'\0' { None } else { Some(x) }, pd: PhantomData::default() } }, p: |x| !x.is_empty(), pd: PhantomData::default() };
-    let trie_fuzzer = UniformTrie { size: 10, pd: path_fuzzer, vd: Degenerate{ element: () }, ph: PhantomData::default() };
+    let trie_fuzzer = RandomTrie { size: 10, pd: path_fuzzer, vd: Degenerate{ element: () }, ph: PhantomData::default() };
     let trie = trie_fuzzer.sample(&mut rng);
     // println!("{:?}", trie.iter().map(|(p, _)| String::from_utf8(p).unwrap()).collect::<Vec<_>>());
     let res = ["aa", "acbdddacbcbdbad", "bbddad", "bd", "caccb", "cba", "cbcdbccb", "dadbcdbcaaadb", "dbabbdaabc", "dbb"];
@@ -343,7 +429,7 @@ mod tests {
     let rng = StdRng::from_seed([0; 32]);
     let path_fuzzer = Filtered{ d: Sentinel { mbd: Mapped{ d: Categorical { elements: "abcd\0".as_bytes().to_vec(),
       ed: Uniform::try_from(0..5).unwrap() }, f: |x| if x == b'\0' { None } else { Some(x) }, pd: PhantomData::default()} }, p: |x| !x.is_empty(), pd: PhantomData::default() };
-    let trie_fuzzer = UniformTrie { size: N_PATHS, pd: path_fuzzer.clone(), vd: Degenerate{ element: () }, ph: PhantomData::default() };
+    let trie_fuzzer = RandomTrie { size: N_PATHS, pd: path_fuzzer.clone(), vd: Degenerate{ element: () }, ph: PhantomData::default() };
 
     trie_fuzzer.sample_iter(rng.clone()).take(N_TRIES).for_each(|mut trie| {
       // println!("let mut btm = PathMap::from_iter({:?}.iter().map(|(p, v)| (p.as_bytes(), v)));", trie.iter().map(|(p, v)| (String::from_utf8(p).unwrap(), v)).collect::<Vec<_>>());
@@ -376,7 +462,7 @@ mod tests {
     let rng_ = StdRng::from_seed([!0; 32]);
     let path_fuzzer = Filtered{ d: Sentinel { mbd: Mapped{ d: Categorical { elements: "abcd\0".as_bytes().to_vec(),
       ed: Uniform::try_from(0..5).unwrap() }, f: |x| if x == b'\0' { None } else { Some(x) }, pd: PhantomData::default()} }, p: |x| !x.is_empty(), pd: PhantomData::default() };
-    let trie_fuzzer = UniformTrie { size: N_PATHS, pd: path_fuzzer.clone(), vd: Degenerate{ element: () }, ph: PhantomData::default() };
+    let trie_fuzzer = RandomTrie { size: N_PATHS, pd: path_fuzzer.clone(), vd: Degenerate{ element: () }, ph: PhantomData::default() };
 
     // ACTION := DESCEND_TO p | ASCEND i
     // { RZ.descend_to(p); RZ.ascend(p.len()) } =:= {}  
@@ -434,7 +520,7 @@ mod tests {
     // let rng_ = StdRng::from_seed([!0; 32]);
     let path_fuzzer = Filtered{ d: Sentinel { mbd: Mapped{ d: Categorical { elements: "abcd\0".as_bytes().to_vec(),
       ed: Uniform::try_from(0..5).unwrap() }, f: |x| if x == b'\0' { None } else { Some(x) }, pd: PhantomData::default()} }, p: |x| !x.is_empty(), pd: PhantomData::default() };
-    let trie_fuzzer = UniformTrie { size: N_PATHS, pd: path_fuzzer.clone(), vd: Degenerate{ element: () }, ph: PhantomData::default() };
+    let trie_fuzzer = RandomTrie { size: N_PATHS, pd: path_fuzzer.clone(), vd: Degenerate{ element: () }, ph: PhantomData::default() };
 
     trie_fuzzer.sample_iter(rng.clone()).take(N_TRIES).for_each(|mut trie| {
       path_fuzzer.clone().sample_iter(rng.clone()).take(N_DESCENDS).for_each(|path| {
