@@ -71,10 +71,10 @@ pub fn bob_to_indices<const NUM_SIZE: usize, R: PathInteger<NUM_SIZE>>(bob: &[u8
 }
 
 /// Encode multiple integers big-endian round-robin wise into a byte path.
-/// Does not pad to number bit length.
+/// Does not pad to number byte length.
 pub fn indices_to_weave<const NUM_SIZE: usize, R: PathInteger<NUM_SIZE>>(xs: &[usize], weave: &mut Vec<u8>) {
-    let steps = xs.into_iter().map(|x| (NUM_SIZE*8 - (x.leading_zeros() as usize)).div_ceil(8)).max().unwrap_or(0);
-    for c in (0..steps).rev() {
+    // let steps = xs.into_iter().map(|x| (NUM_SIZE*8 - (x.leading_zeros() as usize)).div_ceil(8).max(1)).max().unwrap_or(0);
+    for c in (0..NUM_SIZE).rev() {
         for i in 0..xs.len() {
             weave.push((xs[i] >> c*8) as u8)
         }
