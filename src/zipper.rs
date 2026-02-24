@@ -833,6 +833,7 @@ macro_rules! zipper_impl_lens {
         fn descend_indexed_byte(&mut $s, child_idx: usize) -> bool { $e.descend_indexed_byte(child_idx) }
         fn descend_first_byte(&mut $s) -> bool { $e.descend_first_byte() }
         fn descend_until(&mut $s) -> bool { $e.descend_until() }
+        fn descend_until_max_bytes(&mut $s, max_bytes: usize) -> bool { $e.descend_until_max_bytes(max_bytes) }
         fn to_next_sibling_byte(&mut $s) -> bool { $e.to_next_sibling_byte() }
         fn to_prev_sibling_byte(&mut $s) -> bool { $e.to_prev_sibling_byte() }
         fn ascend(&mut $s, steps: usize) -> bool { $e.ascend(steps) }
@@ -1669,6 +1670,53 @@ pub(crate) mod read_zipper_core {
             while self.child_count() == 1 {
                 moved = true;
                 self.descend_first();
+                if self.is_val_internal() {
+                    break;
+                }
+            }
+            moved
+        }
+
+        fn descend_until_max_bytes(&mut self, max_bytes: usize) -> bool {
+            if max_bytes == 0 {
+                return false;
+            }
+            debug_assert!(self.is_regularized());
+            let mut remaining = max_bytes;
+            let mut moved = false;
+            while self.child_count() == 1 && remaining > 0 {
+                self.prepare_buffers();
+                let (prefix_opt, child_node_opt) = self.focus_node.first_child_from_key(self.node_key());
+                let Some(prefix) = prefix_opt else { unreachable!() };
+
+                if prefix.len() == 0 {
+                    // Move to child node without consuming bytes.
+                    if let Some(child_node) = child_node_opt {
+                        moved = true;
+                        self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
+                        *self.focus_node = child_node;
+                        self.focus_iter_token = NODE_ITER_INVALID;
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+
+                let take = remaining.min(prefix.len());
+                moved = true;
+                self.prefix_buf.extend(&prefix[..take]);
+                remaining -= take;
+
+                if take < prefix.len() {
+                    break;
+                }
+
+                if let Some(child_node) = child_node_opt {
+                    self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
+                    *self.focus_node = child_node;
+                    self.focus_iter_token = NODE_ITER_INVALID;
+                }
+
                 if self.is_val_internal() {
                     break;
                 }
