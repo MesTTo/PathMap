@@ -309,6 +309,27 @@ pub trait ZipperMoving: Zipper {
         descended
     }
 
+    /// Descends the zipper's focus until a branch or a value is encountered, or until `max_bytes`
+    /// bytes have been descended. Returns `true` if the focus moved otherwise returns `false`
+    ///
+    /// If there is a value at the focus, the zipper will descend to the next value or branch, however the
+    /// zipper will not descend further if this method is called with the focus already on a branch.
+    ///
+    /// Does nothing and returns `false` if the zipper's focus is on a non-existent path or if `max_bytes`
+    /// is zero.
+    fn descend_until_max_bytes(&mut self, max_bytes: usize) -> bool {
+        if max_bytes == 0 {
+            return false;
+        }
+        let target_len = self.path().len() + max_bytes;
+        let descended = self.descend_until();
+        let cur_len = self.path().len();
+        if cur_len > target_len {
+            let _ = self.ascend(cur_len - target_len);
+        }
+        descended
+    }
+
     /// Ascends the zipper `steps` steps.  Returns `true` if the zipper sucessfully moved `steps`
     ///
     /// If the root is fewer than `n` steps from the zipper's position, then this method will stop at
@@ -2972,6 +2993,12 @@ pub(crate) mod zipper_moving_tests {
                 }
 
                 #[test]
+                fn [<$z_name _zipper_descend_until_max_bytes_test1>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_DESCEND_UNTIL_MAX_BYTES_TEST1_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::zipper_descend_until_max_bytes_test1)
+                }
+
+                #[test]
                 fn [<$z_name _zipper_ascend_until_test1>]() {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_ASCEND_UNTIL_TEST1_KEYS);
                     crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::zipper_ascend_until_test1)
@@ -3286,6 +3313,34 @@ pub(crate) mod zipper_moving_tests {
             assert!(zip.descend_until());
             assert_eq!(zip.path(), *key);
         }
+    }
+
+    // Tests how descend_until_max_bytes enforces a max descent length
+    pub const ZIPPER_DESCEND_UNTIL_MAX_BYTES_TEST1_KEYS: &[&[u8]] = &[b"a0abcdef", b"a0abcxy", b"a1mnopqr"];
+
+    pub fn zipper_descend_until_max_bytes_test1<Z: ZipperMoving>(mut zip: Z) {
+        zip.descend_to(b"a0");
+        assert_eq!(zip.path(), b"a0");
+        assert!(zip.descend_until_max_bytes(2));
+        assert_eq!(zip.path(), b"a0ab");
+
+        zip.reset();
+        zip.descend_to(b"a1");
+        assert_eq!(zip.path(), b"a1");
+        assert!(zip.descend_until_max_bytes(3));
+        assert_eq!(zip.path(), b"a1mno");
+
+        zip.reset();
+        zip.descend_to(b"a0");
+        assert_eq!(zip.path(), b"a0");
+        assert!(zip.descend_until_max_bytes(10));
+        assert_eq!(zip.path(), b"a0abc");
+
+        zip.reset();
+        zip.descend_to(b"a0");
+        assert_eq!(zip.path(), b"a0");
+        assert!(!zip.descend_until_max_bytes(0));
+        assert_eq!(zip.path(), b"a0");
     }
 
     // Test a 3-way branch, so we definitely don't have a pair node
