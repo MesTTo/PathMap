@@ -14,6 +14,11 @@ pub mod serialization;
 #[cfg(feature = "serialization")]
 pub mod tree_serialization;
 
+#[cfg(feature = "zipper_alg")]
+pub mod zipper_algebra;
+#[cfg(not(feature = "zipper_alg"))]
+mod zipper_algebra;
+
 struct FullZipper {
     path: Vec<u8>
 }
