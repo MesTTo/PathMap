@@ -1,7 +1,7 @@
 use crate::{
-    ring::{AlgebraicResult, COUNTER_IDENT, Lattice, LatticeRef, SELF_IDENT},
+    ring::{AlgebraicResult, Lattice, LatticeRef, COUNTER_IDENT, SELF_IDENT},
     utils::ByteMask,
-    zipper::{Zipper, ZipperInfallibleSubtries, ZipperMoving, ZipperWriting},
+    zipper::{Zipper, ZipperInfallibleSubtries, ZipperMoving, ZipperValues, ZipperWriting},
 };
 
 /// Performs an ordered join (least upper bound) of two radix-256 tries using zipper traversal.
@@ -48,6 +48,39 @@ where
     ZR: ZipperInfallibleSubtries<V> + ZipperMoving,
     Out: ZipperWriting<V>,
 {
+    fn join_values<V, ZL, ZR, Out>(lhs: &ZL, rhs: &ZR, out: &mut Out)
+    where
+        V: Lattice + Clone + Send + Sync,
+        ZL: ZipperValues<V>,
+        ZR: ZipperValues<V>,
+        Out: ZipperWriting<V>,
+    {
+        if let Some(lv) = lhs.val() {
+            if let Some(rv) = rhs.val() {
+                match lv.pjoin(rv) {
+                    AlgebraicResult::None => {}
+                    AlgebraicResult::Identity(mask) => {
+                        if mask | SELF_IDENT != 0 {
+                            out.set_val(lv.clone());
+                        } else if mask | COUNTER_IDENT != 0 {
+                            out.set_val(rv.clone());
+                        }
+                    }
+                    AlgebraicResult::Element(v) => {
+                        out.set_val(v);
+                    }
+                }
+            } else {
+                out.set_val(lv.clone());
+            }
+        } else if let Some(rv) = rhs.val() {
+            out.set_val(rv.clone());
+        }
+    }
+
+    // join root values before descending
+    join_values(lhs, rhs, out);
+
     let mut k = 0;
     let mut lhs_mask = lhs.child_mask();
     let mut rhs_mask = rhs.child_mask();
@@ -85,27 +118,7 @@ where
                         lhs.descend_to_byte(lhs_byte);
                         rhs.descend_to_byte(lhs_byte);
 
-                        if let Some(lv) = lhs.val() {
-                            if let Some(rv) = rhs.val() {
-                                match lv.pjoin(rv) {
-                                    AlgebraicResult::None => {}
-                                    AlgebraicResult::Identity(mask) => {
-                                        if mask == SELF_IDENT {
-                                            out.set_val(lv.clone());
-                                        } else if mask == COUNTER_IDENT {
-                                            out.set_val(rv.clone());
-                                        }
-                                    }
-                                    AlgebraicResult::Element(v) => {
-                                        out.set_val(v);
-                                    }
-                                }
-                            } else {
-                                out.set_val(lv.clone());
-                            }
-                        } else if let Some(rv) = rhs.val() {
-                            out.set_val(rv.clone());
-                        }
+                        join_values(lhs, rhs, out);
 
                         lhs_mask = lhs.child_mask();
                         rhs_mask = rhs.child_mask();
@@ -318,6 +331,9 @@ mod tests {
         ],
     );
 
+    const PATHS_WITH_ROOT_VALS_AND_CHILDREN: Test =
+        (&[(&[], 1), (&[1], 10)], &[(&[], 2), (&[1], 20)]);
+
     mod join {
         use super::*;
         use crate::{PathMap, experimental::zipper_algebra::zipper_join};
@@ -398,6 +414,15 @@ mod tests {
             check(
                 &ZIGZAG_PATHS,
                 [ZIGZAG_PATHS.0, ZIGZAG_PATHS.1].concat(),
+                |lhs, rhs, out| zipper_join(lhs, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_root_values() {
+            check(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN.0.iter().copied(),
                 |lhs, rhs, out| zipper_join(lhs, rhs, out),
             );
         }
