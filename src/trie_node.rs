@@ -3241,4 +3241,47 @@ mod tests {
         node_ref.make_unique();
         drop(cloned);
     }
+
+    /// Reproduces the crash using only public PathMap API.
+    ///
+    /// Build two maps with string keys at different steps, join them
+    /// (creating a synthetic node via pjoin_dyn internally), then
+    /// subtract the joined result from a third map.  At n=200 with
+    /// keys "k_0", "k_1", etc., the internal trie structure creates
+    /// LineListNodes whose compressed keys hit the buggy code path.
+    #[test]
+    fn psubtract_dyn_linelistnode_crash() {
+        let n = 200u64;
+
+        // Build 8 maps with keys "k_{j*step}" for step 1..8
+        let maps: Vec<PathMap<u64>> = (0..8).map(|i| {
+            let mut m = PathMap::<u64>::new();
+            let step = (i + 1) as u64;
+            for j in 0..n {
+                let k = j * step;
+                m.set_val_at(format!("k_{}", k).as_bytes(), k);
+            }
+            m
+        }).collect();
+
+        // Chain of operations using only public zipper API:
+        // ((((A|B) & C) | D) & E) | F) & G) \ H
+        let mut r = maps[0].clone();
+        r.write_zipper().join_into(&maps[1].read_zipper());       // A | B
+        r.write_zipper().meet_into(&maps[2].read_zipper(), true); // & C
+        r.write_zipper().join_into(&maps[3].read_zipper());       // | D
+        r.write_zipper().meet_into(&maps[4].read_zipper(), true); // & E
+        r.write_zipper().join_into(&maps[5].read_zipper());       // | F
+        r.write_zipper().meet_into(&maps[6].read_zipper(), true); // & G
+        r.write_zipper().subtract_into(&maps[7].read_zipper(), true); // \ H
+
+        // If we get here without panicking, the bug is fixed.
+        // Sanity check: result should be non-empty.
+        let mut rz = r.read_zipper();
+        let mut count = 0;
+        use crate::zipper::ZipperIteration;
+        while rz.to_next_val() { count += 1; }
+        assert!(count > 0);
+    }
+
 }
