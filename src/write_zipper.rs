@@ -3482,6 +3482,45 @@ mod tests {
         }
     }
 
+    /// Exercises a mixed sequence of joins, meets, and subtraction
+    ///
+    /// With `n=200` and keys `"k_0"`, `"k_1"`, etc., this operation
+    /// sequence builds internal trie shapes that route through
+    /// compressed `LineListNode` handling during subtraction.
+    #[test]
+    fn write_zipper_subtract_into_test4() {
+        let n = 200u64;
+
+        // Build 8 maps with keys "k_{j*step}" for step 1..8
+        let maps: Vec<PathMap<u64>> = (0..8).map(|i| {
+            let mut m = PathMap::<u64>::new();
+            let step = (i + 1) as u64;
+            for j in 0..n {
+                let k = j * step;
+                m.set_val_at(format!("k_{}", k).as_bytes(), k);
+            }
+            m
+        }).collect();
+
+        // Chain of operations using only public zipper API:
+        // ((((A|B) & C) | D) & E) | F) & G) \ H
+        let mut r = maps[0].clone();
+        r.write_zipper().join_into(&maps[1].read_zipper());       // A | B
+        r.write_zipper().meet_into(&maps[2].read_zipper(), true); // & C
+        r.write_zipper().join_into(&maps[3].read_zipper());       // | D
+        r.write_zipper().meet_into(&maps[4].read_zipper(), true); // & E
+        r.write_zipper().join_into(&maps[5].read_zipper());       // | F
+        r.write_zipper().meet_into(&maps[6].read_zipper(), true); // & G
+        r.write_zipper().subtract_into(&maps[7].read_zipper(), true); // \ H
+
+        // Sanity check: result should be non-empty.
+        let mut rz = r.read_zipper();
+        let mut count = 0;
+        use crate::zipper::ZipperIteration;
+        while rz.to_next_val() { count += 1; }
+        assert!(count > 0);
+    }
+
     /// Tests how `restrict` handles dangling path arguments (no values, just path structure)
     #[test]
     fn write_zipper_restrict_test2() {

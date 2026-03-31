@@ -1156,8 +1156,10 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             } else {
                 debug_assert!(onward_key.len() > 0);
                 let self_val = unsafe{ self.val_in_slot::<SLOT>() };
-                let other_val = onward_node.node_get_val(onward_key).unwrap();
-                self_val.psubtract(other_val).map(|val| ValOrChildUnion::from(val))
+                match onward_node.node_get_val(onward_key) {
+                    Some(other_val) => self_val.psubtract(other_val).map(|val| ValOrChildUnion::from(val)),
+                    None => AlgebraicResult::Identity(SELF_IDENT)
+                }
             }
         } else {
             //We subtracted nothing from the slot, so the source should be referenced, unmodified
