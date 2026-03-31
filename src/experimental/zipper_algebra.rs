@@ -1,5 +1,5 @@
 use crate::{
-    ring::{AlgebraicResult, Lattice, LatticeRef, COUNTER_IDENT, SELF_IDENT},
+    ring::{AlgebraicResult, COUNTER_IDENT, Lattice, LatticeRef, SELF_IDENT},
     utils::ByteMask,
     zipper::{Zipper, ZipperInfallibleSubtries, ZipperMoving, ZipperValues, ZipperWriting},
 };
@@ -145,6 +145,155 @@ where
         }
 
         // If we are at root and no deeper recursion pending, we're done
+        if k == 0 {
+            break 'ascend;
+        }
+
+        let byte_from = *lhs.path().last().expect("non-empty path when k > 0");
+
+        rhs.ascend_byte();
+        rhs_mask = rhs.child_mask();
+        rhs_idx = rhs_mask.index_of(byte_from) + 1;
+
+        lhs.ascend_byte();
+        lhs_mask = lhs.child_mask();
+        lhs_idx = lhs_mask.index_of(byte_from) + 1;
+
+        out.ascend_byte();
+        k -= 1;
+    }
+}
+
+/// Performs an ordered meet (greatest lower bound) of two radix-256 tries using zipper traversal.
+///
+/// This function intersects two tries by simultaneously traversing them in lexicographic order,
+/// exploiting the ordering of child edges (bytes `0..=255`) to avoid unnecessary descent.
+///
+/// # Value semantics
+///
+/// When both tries contain a value at the same key, they are merged using the [`Lattice`]
+/// operation [`Lattice::pmeet`]. The result is interpreted as follows:
+///
+/// - [`AlgebraicResult::None`] → no value is written,
+/// - [`AlgebraicResult::Identity`] → one of the inputs is reused (based on identity mask),
+/// - [`AlgebraicResult::Element`] → the computed value is written.
+///
+/// If a value is present on only one side, it is discarded.
+///
+/// # Complexity
+///
+/// Let:
+/// - `h` be the maximum key length,
+/// - `d` be the size of overlapping subtries,
+/// - `f` be the size of the shared frontier (common child edges).
+///
+/// Then:
+///
+/// - Best case (disjoint tries): **O(h)**
+/// - Typical case: **O(h + f)**
+/// - Worst case (identical structure): **O(n)**
+///
+/// The algorithm avoids visiting disjoint subtrees by skipping them entirely.
+///
+/// # Notes
+///
+/// This is a stackless depth-first traversal implemented via zippers.
+/// The outer loop manages ascent (unwinding), while the inner loop
+/// processes only shared child edges at each node.
+///
+/// Unlike [`zipper_join`], this operation descends exclusively into edges
+/// present in *both* tries, forming the intersection of their structures.
+///
+pub fn zipper_meet<V, ZL, ZR, Out>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
+where
+    V: Lattice + Clone + Send + Sync,
+    ZL: ZipperInfallibleSubtries<V> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V> + ZipperMoving,
+    Out: ZipperWriting<V>,
+{
+    fn meet_values<V, ZL, ZR, Out>(lhs: &ZL, rhs: &ZR, out: &mut Out)
+    where
+        V: Lattice + Clone + Send + Sync,
+        ZL: ZipperValues<V>,
+        ZR: ZipperValues<V>,
+        Out: ZipperWriting<V>,
+    {
+        if let Some(lv) = lhs.val() {
+            if let Some(rv) = rhs.val() {
+                match lv.pmeet(rv) {
+                    AlgebraicResult::None => {}
+                    AlgebraicResult::Identity(mask) => {
+                        if mask | SELF_IDENT != 0 {
+                            out.set_val(lv.clone());
+                        } else if mask | COUNTER_IDENT != 0 {
+                            out.set_val(rv.clone());
+                        }
+                    }
+                    AlgebraicResult::Element(v) => {
+                        out.set_val(v);
+                    }
+                }
+            }
+        }
+    }
+
+    // meet root values before descending
+    meet_values(lhs, rhs, out);
+
+    let mut k = 0;
+    let mut lhs_mask = lhs.child_mask();
+    let mut rhs_mask = rhs.child_mask();
+    let mut lhs_idx = 0;
+    let mut rhs_idx = 0;
+
+    // At each node, the algorithm treats the sets of child edges of `lhs` and `rhs` as two
+    // sorted sequences and performs a merge-like traversal:
+    //
+    // - If a range of edges exists only in one side, the corresponding subtries are skipped
+    //   without further traversal.
+    // - If both sides contain the same edge, the algorithm descends into that child,
+    //   recursively merging the corresponding subtries.
+    // - Descent is simulated iteratively using zipper movement (`descend_to_byte` /
+    //   `ascend_byte`) and an explicit depth counter (`k`).
+    'ascend: loop {
+        'merge_level: loop {
+            let lhs_next = lhs_mask.indexed_bit::<true>(lhs_idx as usize);
+            let rhs_next = rhs_mask.indexed_bit::<true>(rhs_idx as usize);
+
+            match lhs_next {
+                Some(lhs_byte) => match rhs_next {
+                    Some(rhs_byte) if lhs_byte < rhs_byte => {
+                        // skip lhs-only range
+                        lhs_idx = lhs_mask.index_of(rhs_byte);
+                    }
+                    Some(rhs_byte) if lhs_byte > rhs_byte => {
+                        // skip rhs-only range
+                        rhs_idx = rhs_mask.index_of(lhs_byte);
+                    }
+                    Some(rhs_byte) => {
+                        // equal → descend
+                        out.descend_to_byte(lhs_byte);
+
+                        lhs.descend_to_byte(lhs_byte);
+                        rhs.descend_to_byte(lhs_byte);
+
+                        meet_values(lhs, rhs, out);
+
+                        lhs_mask = lhs.child_mask();
+                        rhs_mask = rhs.child_mask();
+
+                        lhs_idx = 0;
+                        rhs_idx = 0;
+
+                        k += 1;
+                        continue 'merge_level;
+                    }
+                    None => break 'merge_level,
+                },
+                None => break 'merge_level,
+            }
+        }
+
         if k == 0 {
             break 'ascend;
         }
@@ -336,7 +485,7 @@ mod tests {
 
     mod join {
         use super::*;
-        use crate::{PathMap, experimental::zipper_algebra::zipper_join};
+        use crate::experimental::zipper_algebra::zipper_join;
 
         #[test]
         fn test_disjoint() {
@@ -424,6 +573,88 @@ mod tests {
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0.iter().copied(),
                 |lhs, rhs, out| zipper_join(lhs, rhs, out),
+            );
+        }
+    }
+
+    mod meet {
+        use super::*;
+        use crate::experimental::zipper_algebra::zipper_meet;
+
+        #[test]
+        fn test_disjoint() {
+            check(&DISJOINT_PATHS, [], |lhs, rhs, out| {
+                zipper_meet(lhs, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_deep_shared_prefix_then_split() {
+            check(&PATHS_WITH_SHARED_PREFIX, [], |lhs, rhs, out| {
+                zipper_meet(lhs, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_interleaving_paths() {
+            check(&INTERLEAVING_PATHS, [], |lhs, rhs, out| {
+                zipper_meet(lhs, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_one_side_empty_at_many_levels() {
+            let expected: Paths = &[
+                (&[0x00], 0),
+                (&[0x00, 0x01, 0x02, 0x03], 3),
+                (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
+            ];
+            check(
+                &ONE_SIDED_PATHS,
+                expected.iter().copied(),
+                |lhs, rhs, out| zipper_meet(lhs, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_almost_identical_paths() {
+            check(
+                &ALMOST_IDENTICAL_PATHS,
+                ALMOST_IDENTICAL_PATHS.1.iter().copied(),
+                |lhs, rhs, out| zipper_meet(lhs, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_one_side_empty() {
+            check(&LHS_EMPTY, [], |lhs, rhs, out| zipper_meet(lhs, rhs, out));
+            check(&RHS_EMPTY, [], |lhs, rhs, out| zipper_meet(lhs, rhs, out));
+        }
+
+        #[test]
+        fn test_exact_overlap_divergent_subtries() {
+            let expected: Paths = &[(&[1, 2, 3], 0)];
+            check(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
+                expected.iter().copied(),
+                |lhs, rhs, out| zipper_meet(lhs, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_zigzag() {
+            let expected: Paths = &[(&[2, 1], 2), (&[3], 3)];
+            check(&ZIGZAG_PATHS, expected.iter().copied(), |lhs, rhs, out| {
+                zipper_meet(lhs, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_root_values() {
+            check(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN.0.iter().copied(),
+                |lhs, rhs, out| zipper_meet(lhs, rhs, out),
             );
         }
     }
