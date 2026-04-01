@@ -339,6 +339,9 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                 const LEN_MASK: u16 = 0xfc0; //bits 11 to 6, inclusive
                 self.header &= !LEN_MASK;
                 self.header |= (new_len << 6) as u16;
+                if !self.is_used::<1>() && new_len < KEY_BYTES_CNT {
+                    self.header &= !(1u16 << 12);
+                }
                 if self.is_used::<1>() {
                     let key_len_1 = self.key_len_1();
                     unsafe {
@@ -2537,13 +2540,14 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             // See if we just shorten the key in this node, or if we need to discard the node entirely and recurse
             if byte_cnt < key_len {
                 let new_key_len = key_len-byte_cnt;
+                debug_assert!(new_key_len > 0);
                 unsafe{
                     let base_ptr = temp_node.key_bytes.as_mut_ptr().cast::<u8>();
                     let src_ptr = base_ptr.add(byte_cnt);
                     let dst_ptr = base_ptr;
                     core::ptr::copy(src_ptr, dst_ptr, new_key_len);
                 }
-                temp_node.header &= 0xf03f; //Zero out the old length, and reset it
+                temp_node.header &= 0xe03f; //Zero out the old length, and reset it (also clearing the saturated bit)
                 temp_node.header |= (new_key_len << 6) as u16;
                 debug_assert!(validate_node(&temp_node));
                 return Some(TrieNodeODRc::new_in(temp_node, self.alloc.clone()))
@@ -2770,7 +2774,19 @@ pub(crate) fn validate_node<V: Clone + Send + Sync, A: Allocator>(node: &LineLis
 
     //The keys may never have more than one prefix byte in common
     if key0.get(0) == key1.get(0) && key0.get(1) == key1.get(1) && key0.get(1).is_some() {
+        println!("Invalid node - duplicated prefix too long. {node:?}");
         panic!()
+    }
+
+    //Validate that the header bits are consistent with the key lengths, in the case of filled nodes
+    if key0.len() == KEY_BYTES_CNT {
+        assert!(node.is_used::<0>());
+        assert!(!node.is_used::<1>());
+        assert!(node.is_child_ptr::<1>());
+    }
+    if !node.is_used::<1>() && node.is_child_ptr::<1>() {
+        assert!(node.is_used::<0>());
+        assert!(key0.len() == KEY_BYTES_CNT);
     }
 
     //key0 must always be alphabetically before key1, if slot_1 is filled
@@ -2904,6 +2920,51 @@ mod tests {
         //Now make sure that adding a second key is still ok because of in-place splitting
         assert_eq!(new_node.node_set_val("hello".as_bytes(), 42).map_err(|_| 0), Ok((None, true)));
         assert_eq!(new_node.node_get_val("hello".as_bytes()), Some(&42));
+    }
+
+    /// Regression for a stale "slot_1 unavailable" bit after shortening a full-width slot_0 key.
+    #[test]
+    fn test_line_list_shorten_key_releases_slot_1_availability() {
+        let full_key = vec![b'a'; KEY_BYTES_CNT];
+        let prefix_len = (KEY_BYTES_CNT / 3).max(1);
+        debug_assert!(prefix_len < KEY_BYTES_CNT);
+        let prefix = vec![b'a'; prefix_len];
+        let suffix = &full_key[prefix.len()..];
+
+        let mut new_node = LineListNode::<usize, GlobalAlloc>::new_in(global_alloc());
+        assert_eq!(new_node.node_set_val(&full_key, 24).map_err(|_| 0), Ok((None, false)));
+
+        let detached = new_node.take_node_at_key(&prefix, false).unwrap();
+        assert_eq!(detached.as_tagged().node_get_val(suffix), Some(&24));
+
+        assert_eq!(new_node.key_len_0(), prefix.len());
+        assert!(!new_node.is_used::<1>());
+        assert!(
+            new_node.is_available_1(),
+            "slot_1 should become available after shortening slot_0 below KEY_BYTES_CNT"
+        );
+
+        assert_eq!(new_node.node_set_val(b"z", 42).map_err(|_| 0), Ok((None, false)));
+        assert_eq!(new_node.node_get_val(b"z"), Some(&42));
+    }
+
+    /// Regression for the single-slot drop_head_dyn path preserving a stale slot_1-unavailable bit.
+    #[test]
+    fn test_line_list_drop_head_releases_slot_1_availability() {
+        let full_key = vec![b'a'; KEY_BYTES_CNT];
+        let drop_bytes = (KEY_BYTES_CNT / 3).max(1);
+        let expected_key_len = KEY_BYTES_CNT - drop_bytes;
+
+        let mut new_node = LineListNode::<usize, GlobalAlloc>::new_in(global_alloc());
+        assert_eq!(new_node.node_set_val(&full_key, 24).map_err(|_| 0), Ok((None, false)));
+
+        let mut shortened = new_node.drop_head_dyn(drop_bytes).unwrap().as_tagged().as_list().unwrap().clone();
+        assert_eq!(shortened.key_len_0(), expected_key_len);
+        assert!(!shortened.is_used::<1>());
+        assert!(shortened.is_available_1());
+
+        assert_eq!(shortened.node_set_val(b"z", 42).map_err(|_| 0), Ok((None, false)));
+        assert_eq!(shortened.node_get_val(b"z"), Some(&42));
     }
 
     /// This tests that a common prefix is found with the entry in slot_0, when slot_1 is already full
