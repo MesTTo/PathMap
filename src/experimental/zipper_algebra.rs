@@ -1,5 +1,5 @@
 use crate::{
-    ring::{AlgebraicResult, COUNTER_IDENT, Lattice, LatticeRef, SELF_IDENT},
+    ring::{AlgebraicResult, COUNTER_IDENT, DistributiveLattice, Lattice, SELF_IDENT},
     utils::ByteMask,
     zipper::{Zipper, ZipperInfallibleSubtries, ZipperMoving, ZipperValues, ZipperWriting},
 };
@@ -313,6 +313,162 @@ where
     }
 }
 
+/// Performs an ordered subtraction (set difference, `lhs \ rhs`) of two radix-256 tries
+/// using zipper traversal.
+///
+/// This function subtracts the structure and values of `rhs` from `lhs` by simultaneously
+/// traversing both tries in lexicographic order. It exploits the ordering of child edges
+/// (bytes `0..=255`) to avoid unnecessary descent.
+///
+/// # Value semantics
+///
+/// Values are handled asymmetrically:
+///
+/// - If only `lhs` contains a value, it is preserved unchanged.
+/// - If only `rhs` contains a value, it is ignored.
+/// - If both tries contain a value at the same key, they are comined using the [`DistributiveLattice`]
+///   operation [`DistributiveLattice::psubtract`]. The result is interpreted as follows:
+///
+///   - [`AlgebraicResult::None`] → no value is written,
+///   - [`AlgebraicResult::Identity`] → only lhs is preserved (based on identity mask),
+///   - [`AlgebraicResult::Element`] → the computed value is written.
+///
+/// # Complexity
+///
+/// Let:
+/// - `h` be the maximum key length,
+/// - `d` be the size of overlapping subtries,
+/// - `f` be the size of the frontier (distinct child edges encountered).
+///
+/// Then:
+///
+/// - Best case (disjoint tries): **O(h)**
+/// - Typical case: **O(h + f)**
+/// - Worst case (identical structure): **O(n)**
+///
+/// The algorithm avoids visiting disjoint subtrees by grafting `lhs`-only regions
+/// and skipping `rhs`-only regions entirely.
+///
+/// # Notes
+///
+/// This is a stackless depth-first traversal implemented via zippers.
+/// The outer loop manages ascent (unwinding), while the inner loop
+/// exhausts the current node's children.
+///
+/// Unlike [`zipper_join`] and [`zipper_meet`], this operation is asymmetric:
+/// it preserves only the parts of `lhs` that are not overlapped by `rhs`,
+/// effectively removing any shared structure or values.
+///
+pub fn zipper_subtract<V, ZL, ZR, Out>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
+where
+    V: DistributiveLattice + Clone + Send + Sync,
+    ZL: ZipperInfallibleSubtries<V> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V> + ZipperMoving,
+    Out: ZipperWriting<V>,
+{
+    fn combine_values<V, ZL, ZR, Out>(lhs: &ZL, rhs: &ZR, out: &mut Out)
+    where
+        V: DistributiveLattice + Clone + Send + Sync,
+        ZL: ZipperValues<V>,
+        ZR: ZipperValues<V>,
+        Out: ZipperWriting<V>,
+    {
+        if let Some(lv) = lhs.val() {
+            if let Some(rv) = rhs.val() {
+                match lv.psubtract(rv) {
+                    AlgebraicResult::None => {}
+                    AlgebraicResult::Identity(mask) => {
+                        if mask | SELF_IDENT != 0 {
+                            out.set_val(lv.clone());
+                        }
+                    }
+                    AlgebraicResult::Element(v) => {
+                        out.set_val(v);
+                    }
+                }
+            } else {
+                // lhs-only → keep
+                out.set_val(lv.clone());
+            }
+        }
+    }
+
+    // combine root values before descending
+    combine_values(lhs, rhs, out);
+
+    let mut k = 0;
+    let mut lhs_mask = lhs.child_mask();
+    let mut rhs_mask = rhs.child_mask();
+    let mut lhs_idx = 0;
+    let mut rhs_idx = 0;
+
+    // The traversal follows a merge-like strategy over ordered child edges:
+    //
+    // - Subtries that exist only in `lhs` are *grafted* directly into the output.
+    // - Subtries that exist only in `rhs` are skipped.
+    // - When both sides contain the same edge, the algorithm descends into that child
+    //   and continues subtracting recursively.
+    'ascend: loop {
+        'merge_level: loop {
+            let lhs_next = lhs_mask.indexed_bit::<true>(lhs_idx as usize);
+            let rhs_next = rhs_mask.indexed_bit::<true>(rhs_idx as usize);
+
+            match lhs_next {
+                Some(lhs_byte) => match rhs_next {
+                    Some(rhs_byte) if lhs_byte < rhs_byte => {
+                        out.graft_children(lhs, ByteMask::from_range(lhs_byte..rhs_byte));
+                        lhs_idx = lhs_mask.index_of(rhs_byte);
+                    }
+                    Some(rhs_byte) if lhs_byte > rhs_byte => {
+                        // skip rhs-only range
+                        rhs_idx = rhs_mask.index_of(lhs_byte);
+                    }
+                    Some(rhs_byte) => {
+                        // equal → descend
+                        out.descend_to_byte(lhs_byte);
+
+                        lhs.descend_to_byte(lhs_byte);
+                        rhs.descend_to_byte(lhs_byte);
+
+                        combine_values(lhs, rhs, out);
+
+                        lhs_mask = lhs.child_mask();
+                        rhs_mask = rhs.child_mask();
+
+                        lhs_idx = 0;
+                        rhs_idx = 0;
+
+                        k += 1;
+                        continue 'merge_level;
+                    }
+                    None => {
+                        out.graft_children(lhs, ByteMask::from_range(lhs_byte..));
+                        break 'merge_level;
+                    }
+                },
+                None => break 'merge_level,
+            }
+        }
+
+        if k == 0 {
+            break 'ascend;
+        }
+
+        let byte_from = *lhs.path().last().expect("non-empty path when k > 0");
+
+        rhs.ascend_byte();
+        rhs_mask = rhs.child_mask();
+        rhs_idx = rhs_mask.index_of(byte_from) + 1;
+
+        lhs.ascend_byte();
+        lhs_mask = lhs.child_mask();
+        lhs_idx = lhs_mask.index_of(byte_from) + 1;
+
+        out.ascend_byte();
+        k -= 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -320,20 +476,20 @@ mod tests {
         zipper::{ReadZipperUntracked, WriteZipperUntracked},
     };
 
-    type Paths = &'static [(&'static [u8], u32)];
+    type Paths = &'static [(&'static [u8], u64)];
     type Test = (Paths, Paths);
 
-    fn mk_test(test: &Test) -> (PathMap<u32>, PathMap<u32>) {
+    fn mk_test(test: &Test) -> (PathMap<u64>, PathMap<u64>) {
         (PathMap::from_iter(test.0), PathMap::from_iter(test.1))
     }
 
     fn check<
         'x,
-        T: IntoIterator<Item = (&'x [u8], u32)>,
+        T: IntoIterator<Item = &'x (&'x [u8], u64)>,
         F: for<'a> FnOnce(
-            &mut ReadZipperUntracked<'a, 'x, u32>,
-            &mut ReadZipperUntracked<'a, 'x, u32>,
-            &mut WriteZipperUntracked<'a, 'x, u32>,
+            &mut ReadZipperUntracked<'a, 'x, u64>,
+            &mut ReadZipperUntracked<'a, 'x, u64>,
+            &mut WriteZipperUntracked<'a, 'x, u64>,
         ),
     >(
         test: &Test,
@@ -360,12 +516,11 @@ mod tests {
             let actual_val = result.get_val_at(expected_path);
             assert_eq!(
                 actual_val,
-                Some(&expected_val),
+                Some(expected_val),
                 "Value at {expected_path:#?}"
             );
 
-            result_copy.remove(expected_path);
-            result_copy.prune_path(expected_path);
+            result_copy.remove_val_at(expected_path, true);
         }
 
         assert!(
@@ -491,7 +646,7 @@ mod tests {
         fn test_disjoint() {
             check(
                 &DISJOINT_PATHS,
-                [DISJOINT_PATHS.0, DISJOINT_PATHS.1].concat(),
+                &[DISJOINT_PATHS.0, DISJOINT_PATHS.1].concat(),
                 |lhs, rhs, out| zipper_join(lhs, rhs, out),
             );
         }
@@ -500,7 +655,7 @@ mod tests {
         fn test_deep_shared_prefix_then_split() {
             check(
                 &PATHS_WITH_SHARED_PREFIX,
-                [PATHS_WITH_SHARED_PREFIX.0, PATHS_WITH_SHARED_PREFIX.1].concat(),
+                &[PATHS_WITH_SHARED_PREFIX.0, PATHS_WITH_SHARED_PREFIX.1].concat(),
                 |lhs, rhs, out| zipper_join(lhs, rhs, out),
             );
         }
@@ -509,35 +664,33 @@ mod tests {
         fn test_interleaving_paths() {
             check(
                 &INTERLEAVING_PATHS,
-                [INTERLEAVING_PATHS.0, INTERLEAVING_PATHS.1].concat(),
+                &[INTERLEAVING_PATHS.0, INTERLEAVING_PATHS.1].concat(),
                 |lhs, rhs, out| zipper_join(lhs, rhs, out),
             );
         }
 
         #[test]
         fn test_one_side_empty_at_many_levels() {
-            check(
-                &ONE_SIDED_PATHS,
-                ONE_SIDED_PATHS.0.iter().copied(),
-                |lhs, rhs, out| zipper_join(lhs, rhs, out),
-            );
+            check(&ONE_SIDED_PATHS, ONE_SIDED_PATHS.0, |lhs, rhs, out| {
+                zipper_join(lhs, rhs, out)
+            });
         }
 
         #[test]
         fn test_almost_identical_paths() {
             check(
                 &ALMOST_IDENTICAL_PATHS,
-                ALMOST_IDENTICAL_PATHS.0.iter().copied(),
+                ALMOST_IDENTICAL_PATHS.0,
                 |lhs, rhs, out| zipper_join(lhs, rhs, out),
             );
         }
 
         #[test]
         fn test_one_side_empty() {
-            check(&LHS_EMPTY, LHS_EMPTY.1.iter().copied(), |lhs, rhs, out| {
+            check(&LHS_EMPTY, LHS_EMPTY.1, |lhs, rhs, out| {
                 zipper_join(lhs, rhs, out)
             });
-            check(&RHS_EMPTY, RHS_EMPTY.0.iter().copied(), |lhs, rhs, out| {
+            check(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| {
                 zipper_join(lhs, rhs, out)
             });
         }
@@ -553,7 +706,7 @@ mod tests {
             ];
             check(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
-                expected.iter().copied(),
+                expected,
                 |lhs, rhs, out| zipper_join(lhs, rhs, out),
             );
         }
@@ -562,7 +715,7 @@ mod tests {
         fn test_zigzag() {
             check(
                 &ZIGZAG_PATHS,
-                [ZIGZAG_PATHS.0, ZIGZAG_PATHS.1].concat(),
+                &[ZIGZAG_PATHS.0, ZIGZAG_PATHS.1].concat(),
                 |lhs, rhs, out| zipper_join(lhs, rhs, out),
             );
         }
@@ -571,7 +724,7 @@ mod tests {
         fn test_root_values() {
             check(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
-                PATHS_WITH_ROOT_VALS_AND_CHILDREN.0.iter().copied(),
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
                 |lhs, rhs, out| zipper_join(lhs, rhs, out),
             );
         }
@@ -609,18 +762,16 @@ mod tests {
                 (&[0x00, 0x01, 0x02, 0x03], 3),
                 (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
             ];
-            check(
-                &ONE_SIDED_PATHS,
-                expected.iter().copied(),
-                |lhs, rhs, out| zipper_meet(lhs, rhs, out),
-            );
+            check(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
+                zipper_meet(lhs, rhs, out)
+            });
         }
 
         #[test]
         fn test_almost_identical_paths() {
             check(
                 &ALMOST_IDENTICAL_PATHS,
-                ALMOST_IDENTICAL_PATHS.1.iter().copied(),
+                ALMOST_IDENTICAL_PATHS.1,
                 |lhs, rhs, out| zipper_meet(lhs, rhs, out),
             );
         }
@@ -636,7 +787,7 @@ mod tests {
             let expected: Paths = &[(&[1, 2, 3], 0)];
             check(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
-                expected.iter().copied(),
+                expected,
                 |lhs, rhs, out| zipper_meet(lhs, rhs, out),
             );
         }
@@ -644,7 +795,7 @@ mod tests {
         #[test]
         fn test_zigzag() {
             let expected: Paths = &[(&[2, 1], 2), (&[3], 3)];
-            check(&ZIGZAG_PATHS, expected.iter().copied(), |lhs, rhs, out| {
+            check(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
                 zipper_meet(lhs, rhs, out)
             });
         }
@@ -653,8 +804,106 @@ mod tests {
         fn test_root_values() {
             check(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
-                PATHS_WITH_ROOT_VALS_AND_CHILDREN.0.iter().copied(),
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
                 |lhs, rhs, out| zipper_meet(lhs, rhs, out),
+            );
+        }
+    }
+
+    mod subtract {
+        use super::*;
+        use crate::experimental::zipper_algebra::zipper_subtract;
+
+        #[test]
+        fn test_disjoint() {
+            check(&DISJOINT_PATHS, DISJOINT_PATHS.0, |lhs, rhs, out| {
+                zipper_subtract(lhs, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_deep_shared_prefix_then_split() {
+            check(
+                &PATHS_WITH_SHARED_PREFIX,
+                PATHS_WITH_SHARED_PREFIX.0,
+                |lhs, rhs, out| zipper_subtract(lhs, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_interleaving_paths() {
+            check(
+                &INTERLEAVING_PATHS,
+                INTERLEAVING_PATHS.0,
+                |lhs, rhs, out| zipper_subtract(lhs, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_one_side_empty_at_many_levels() {
+            let expected: Paths = &[
+                (&[0x00, 0x01], 1),
+                (&[0x00, 0x01, 0x02], 2),
+                (&[0x00, 0x01, 0x02, 0x03], 3),
+                (&[0x01], 4),
+                (&[0x01, 0x02], 5),
+                (&[0x01, 0x02, 0x03], 6),
+                (&[0x01, 0x02, 0x03, 0x04], 7),
+                (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
+                (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
+            ];
+            check(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
+                zipper_subtract(lhs, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_almost_identical_paths() {
+            let expected: Paths = &[(b"hijklmnop", 1), (b"2", 5), (b"3", 6)];
+            check(&ALMOST_IDENTICAL_PATHS, expected, |lhs, rhs, out| {
+                zipper_subtract(lhs, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_one_side_empty() {
+            check(&LHS_EMPTY, [], |lhs, rhs, out| {
+                zipper_subtract(lhs, rhs, out)
+            });
+            check(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| {
+                zipper_subtract(lhs, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_exact_overlap_divergent_subtries() {
+            check(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
+                PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN.0,
+                |lhs, rhs, out| zipper_subtract(lhs, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_zigzag() {
+            let expected: Paths = &[
+                (&[1, 1], 0),
+                (&[2], 1),
+                (&[3, 2, 1], 4),
+                (&[4], 4),
+                (&[4, 3, 2, 1], 5),
+            ];
+            check(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
+                zipper_subtract(lhs, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_root_values() {
+            check(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
+                |lhs, rhs, out| zipper_subtract(lhs, rhs, out),
             );
         }
     }
