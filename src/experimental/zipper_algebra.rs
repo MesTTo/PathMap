@@ -1,8 +1,98 @@
 use crate::{
+    alloc::{Allocator, GlobalAlloc},
     ring::{AlgebraicResult, COUNTER_IDENT, DistributiveLattice, Lattice, SELF_IDENT},
     utils::ByteMask,
-    zipper::{Zipper, ZipperInfallibleSubtries, ZipperMoving, ZipperValues, ZipperWriting},
+    zipper::{
+        ReadZipperUntracked, Zipper, ZipperInfallibleSubtries, ZipperMoving, ZipperValues,
+        ZipperWriting,
+    },
 };
+
+/// Extension trait providing algebraic merge operations on radix-256 trie zippers.
+///
+/// This trait exposes high-level operations such as [`join`](Self::join),
+/// [`meet`](Self::meet), and [`subtract`](Self::subtract) directly on zipper
+/// instances, allowing them to be invoked in a method-oriented style:
+///
+/// ```ignore
+/// lhs.join(&mut rhs, &mut out);
+/// lhs.meet(&mut rhs, &mut out);
+/// lhs.subtract(&mut rhs, &mut out);
+/// ```
+///
+/// # Overview
+///
+/// All operations are implemented as *lockstep traversals* over two tries using
+/// zipper navigation. They exploit the lexicographic ordering of child edges
+/// (bytes `0..=255`) to efficiently merge, intersect, or subtract subtries
+/// without visiting unrelated regions.
+///
+/// Each method delegates to a corresponding free function ([`zipper_join`],
+/// [`zipper_meet`], [`zipper_subtract`]), preserving their performance
+/// characteristics and semantics.
+///
+/// # Semantics
+///
+/// The provided operations correspond to common lattice and set-like behaviors:
+///
+/// - [`join`](Self::join): least upper bound (union-like merge),
+/// - [`meet`](Self::meet): greatest lower bound (intersection),
+/// - [`subtract`](Self::subtract): asymmetric difference (`lhs \ rhs`).
+///
+/// All operations write their result into a separate output zipper implementing
+/// [`ZipperWriting`].
+///
+/// # Notes
+///
+/// - The operations are *asymmetric* with respect to the receiver (`self`) and
+///   the `rhs` argument, which is particularly relevant for
+///   [`subtract`](Self::subtract).
+/// - The output zipper is written incrementally during traversal and must be
+///   positioned consistently with the input zippers.
+///
+/// # See also
+///
+/// - [`zipper_join`]
+/// - [`zipper_meet`]
+/// - [`zipper_subtract`]
+pub trait ZipperAlgebraExt<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>:
+    ZipperInfallibleSubtries<V, A> + ZipperMoving + Sized
+{
+    #[inline]
+    fn join<ZR, Out>(&mut self, rhs: &mut ZR, out: &mut Out)
+    where
+        V: Lattice,
+        ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        zipper_join(self, rhs, out);
+    }
+
+    #[inline]
+    fn meet<ZR, Out>(&mut self, rhs: &mut ZR, out: &mut Out)
+    where
+        V: Lattice,
+        ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        zipper_meet(self, rhs, out);
+    }
+
+    #[inline]
+    fn subtract<ZR, Out>(&mut self, rhs: &mut ZR, out: &mut Out)
+    where
+        V: DistributiveLattice,
+        ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        zipper_subtract(self, rhs, out);
+    }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAlgebraExt<V, A>
+    for ReadZipperUntracked<'_, '_, V, A>
+{
+}
 
 /// Performs an ordered join (least upper bound) of two radix-256 tries using zipper traversal.
 ///
@@ -41,19 +131,21 @@ use crate::{
 /// The outer loop manages ascent (unwinding), while the inner loop
 /// exhausts the current node's children.
 ///
-pub fn zipper_join<V, ZL, ZR, Out>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
+pub fn zipper_join<V, ZL, ZR, Out, A>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
 where
     V: Lattice + Clone + Send + Sync,
-    ZL: ZipperInfallibleSubtries<V> + ZipperMoving,
-    ZR: ZipperInfallibleSubtries<V> + ZipperMoving,
-    Out: ZipperWriting<V>,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
 {
-    fn join_values<V, ZL, ZR, Out>(lhs: &ZL, rhs: &ZR, out: &mut Out)
+    fn join_values<V, ZL, ZR, Out, A>(lhs: &ZL, rhs: &ZR, out: &mut Out)
     where
         V: Lattice + Clone + Send + Sync,
+        A: Allocator,
         ZL: ZipperValues<V>,
         ZR: ZipperValues<V>,
-        Out: ZipperWriting<V>,
+        Out: ZipperWriting<V, A>,
     {
         if let Some(lv) = lhs.val() {
             if let Some(rv) = rhs.val() {
@@ -204,19 +296,21 @@ where
 /// Unlike [`zipper_join`], this operation descends exclusively into edges
 /// present in *both* tries, forming the intersection of their structures.
 ///
-pub fn zipper_meet<V, ZL, ZR, Out>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
+pub fn zipper_meet<V, ZL, ZR, Out, A>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
 where
     V: Lattice + Clone + Send + Sync,
-    ZL: ZipperInfallibleSubtries<V> + ZipperMoving,
-    ZR: ZipperInfallibleSubtries<V> + ZipperMoving,
-    Out: ZipperWriting<V>,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
 {
-    fn meet_values<V, ZL, ZR, Out>(lhs: &ZL, rhs: &ZR, out: &mut Out)
+    fn meet_values<V, ZL, ZR, Out, A>(lhs: &ZL, rhs: &ZR, out: &mut Out)
     where
         V: Lattice + Clone + Send + Sync,
+        A: Allocator,
         ZL: ZipperValues<V>,
         ZR: ZipperValues<V>,
-        Out: ZipperWriting<V>,
+        Out: ZipperWriting<V, A>,
     {
         if let Some(lv) = lhs.val() {
             if let Some(rv) = rhs.val() {
@@ -359,19 +453,21 @@ where
 /// it preserves only the parts of `lhs` that are not overlapped by `rhs`,
 /// effectively removing any shared structure or values.
 ///
-pub fn zipper_subtract<V, ZL, ZR, Out>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
+pub fn zipper_subtract<V, ZL, ZR, Out, A>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
 where
     V: DistributiveLattice + Clone + Send + Sync,
-    ZL: ZipperInfallibleSubtries<V> + ZipperMoving,
-    ZR: ZipperInfallibleSubtries<V> + ZipperMoving,
-    Out: ZipperWriting<V>,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
 {
-    fn combine_values<V, ZL, ZR, Out>(lhs: &ZL, rhs: &ZR, out: &mut Out)
+    fn combine_values<V, ZL, ZR, Out, A>(lhs: &ZL, rhs: &ZR, out: &mut Out)
     where
         V: DistributiveLattice + Clone + Send + Sync,
+        A: Allocator,
         ZL: ZipperValues<V>,
         ZR: ZipperValues<V>,
-        Out: ZipperWriting<V>,
+        Out: ZipperWriting<V, A>,
     {
         if let Some(lv) = lhs.val() {
             if let Some(rv) = rhs.val() {
@@ -640,14 +736,14 @@ mod tests {
 
     mod join {
         use super::*;
-        use crate::experimental::zipper_algebra::zipper_join;
+        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_join};
 
         #[test]
         fn test_disjoint() {
             check(
                 &DISJOINT_PATHS,
                 &[DISJOINT_PATHS.0, DISJOINT_PATHS.1].concat(),
-                |lhs, rhs, out| zipper_join(lhs, rhs, out),
+                |lhs, rhs, out| lhs.join(rhs, out),
             );
         }
 
@@ -656,7 +752,7 @@ mod tests {
             check(
                 &PATHS_WITH_SHARED_PREFIX,
                 &[PATHS_WITH_SHARED_PREFIX.0, PATHS_WITH_SHARED_PREFIX.1].concat(),
-                |lhs, rhs, out| zipper_join(lhs, rhs, out),
+                |lhs, rhs, out| lhs.join(rhs, out),
             );
         }
 
@@ -665,14 +761,14 @@ mod tests {
             check(
                 &INTERLEAVING_PATHS,
                 &[INTERLEAVING_PATHS.0, INTERLEAVING_PATHS.1].concat(),
-                |lhs, rhs, out| zipper_join(lhs, rhs, out),
+                |lhs, rhs, out| lhs.join(rhs, out),
             );
         }
 
         #[test]
         fn test_one_side_empty_at_many_levels() {
             check(&ONE_SIDED_PATHS, ONE_SIDED_PATHS.0, |lhs, rhs, out| {
-                zipper_join(lhs, rhs, out)
+                lhs.join(rhs, out)
             });
         }
 
@@ -681,18 +777,14 @@ mod tests {
             check(
                 &ALMOST_IDENTICAL_PATHS,
                 ALMOST_IDENTICAL_PATHS.0,
-                |lhs, rhs, out| zipper_join(lhs, rhs, out),
+                |lhs, rhs, out| lhs.join(rhs, out),
             );
         }
 
         #[test]
         fn test_one_side_empty() {
-            check(&LHS_EMPTY, LHS_EMPTY.1, |lhs, rhs, out| {
-                zipper_join(lhs, rhs, out)
-            });
-            check(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| {
-                zipper_join(lhs, rhs, out)
-            });
+            check(&LHS_EMPTY, LHS_EMPTY.1, |lhs, rhs, out| lhs.join(rhs, out));
+            check(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| lhs.join(rhs, out));
         }
 
         #[test]
@@ -707,7 +799,7 @@ mod tests {
             check(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 expected,
-                |lhs, rhs, out| zipper_join(lhs, rhs, out),
+                |lhs, rhs, out| lhs.join(rhs, out),
             );
         }
 
@@ -716,7 +808,7 @@ mod tests {
             check(
                 &ZIGZAG_PATHS,
                 &[ZIGZAG_PATHS.0, ZIGZAG_PATHS.1].concat(),
-                |lhs, rhs, out| zipper_join(lhs, rhs, out),
+                |lhs, rhs, out| lhs.join(rhs, out),
             );
         }
 
@@ -725,33 +817,33 @@ mod tests {
             check(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
-                |lhs, rhs, out| zipper_join(lhs, rhs, out),
+                |lhs, rhs, out| lhs.join(rhs, out),
             );
         }
     }
 
     mod meet {
         use super::*;
-        use crate::experimental::zipper_algebra::zipper_meet;
+        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_meet};
 
         #[test]
         fn test_disjoint() {
             check(&DISJOINT_PATHS, [], |lhs, rhs, out| {
-                zipper_meet(lhs, rhs, out)
+                lhs.meet(rhs, out);
             });
         }
 
         #[test]
         fn test_deep_shared_prefix_then_split() {
             check(&PATHS_WITH_SHARED_PREFIX, [], |lhs, rhs, out| {
-                zipper_meet(lhs, rhs, out)
+                lhs.meet(rhs, out);
             });
         }
 
         #[test]
         fn test_interleaving_paths() {
             check(&INTERLEAVING_PATHS, [], |lhs, rhs, out| {
-                zipper_meet(lhs, rhs, out)
+                lhs.meet(rhs, out);
             });
         }
 
@@ -763,7 +855,7 @@ mod tests {
                 (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
             ];
             check(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
-                zipper_meet(lhs, rhs, out)
+                lhs.meet(rhs, out);
             });
         }
 
@@ -772,14 +864,14 @@ mod tests {
             check(
                 &ALMOST_IDENTICAL_PATHS,
                 ALMOST_IDENTICAL_PATHS.1,
-                |lhs, rhs, out| zipper_meet(lhs, rhs, out),
+                |lhs, rhs, out| lhs.meet(rhs, out),
             );
         }
 
         #[test]
         fn test_one_side_empty() {
-            check(&LHS_EMPTY, [], |lhs, rhs, out| zipper_meet(lhs, rhs, out));
-            check(&RHS_EMPTY, [], |lhs, rhs, out| zipper_meet(lhs, rhs, out));
+            check(&LHS_EMPTY, [], |lhs, rhs, out| lhs.meet(rhs, out));
+            check(&RHS_EMPTY, [], |lhs, rhs, out| lhs.meet(rhs, out));
         }
 
         #[test]
@@ -788,7 +880,7 @@ mod tests {
             check(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 expected,
-                |lhs, rhs, out| zipper_meet(lhs, rhs, out),
+                |lhs, rhs, out| lhs.meet(rhs, out),
             );
         }
 
@@ -796,7 +888,7 @@ mod tests {
         fn test_zigzag() {
             let expected: Paths = &[(&[2, 1], 2), (&[3], 3)];
             check(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
-                zipper_meet(lhs, rhs, out)
+                lhs.meet(rhs, out);
             });
         }
 
@@ -805,19 +897,19 @@ mod tests {
             check(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
-                |lhs, rhs, out| zipper_meet(lhs, rhs, out),
+                |lhs, rhs, out| lhs.meet(rhs, out),
             );
         }
     }
 
     mod subtract {
         use super::*;
-        use crate::experimental::zipper_algebra::zipper_subtract;
+        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_subtract};
 
         #[test]
         fn test_disjoint() {
             check(&DISJOINT_PATHS, DISJOINT_PATHS.0, |lhs, rhs, out| {
-                zipper_subtract(lhs, rhs, out)
+                lhs.subtract(rhs, out);
             });
         }
 
@@ -826,7 +918,7 @@ mod tests {
             check(
                 &PATHS_WITH_SHARED_PREFIX,
                 PATHS_WITH_SHARED_PREFIX.0,
-                |lhs, rhs, out| zipper_subtract(lhs, rhs, out),
+                |lhs, rhs, out| lhs.subtract(rhs, out),
             );
         }
 
@@ -835,7 +927,7 @@ mod tests {
             check(
                 &INTERLEAVING_PATHS,
                 INTERLEAVING_PATHS.0,
-                |lhs, rhs, out| zipper_subtract(lhs, rhs, out),
+                |lhs, rhs, out| lhs.subtract(rhs, out),
             );
         }
 
@@ -853,7 +945,7 @@ mod tests {
                 (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
             ];
             check(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
-                zipper_subtract(lhs, rhs, out)
+                lhs.subtract(rhs, out)
             });
         }
 
@@ -861,17 +953,15 @@ mod tests {
         fn test_almost_identical_paths() {
             let expected: Paths = &[(b"hijklmnop", 1), (b"2", 5), (b"3", 6)];
             check(&ALMOST_IDENTICAL_PATHS, expected, |lhs, rhs, out| {
-                zipper_subtract(lhs, rhs, out)
+                lhs.subtract(rhs, out)
             });
         }
 
         #[test]
         fn test_one_side_empty() {
-            check(&LHS_EMPTY, [], |lhs, rhs, out| {
-                zipper_subtract(lhs, rhs, out)
-            });
+            check(&LHS_EMPTY, [], |lhs, rhs, out| lhs.subtract(rhs, out));
             check(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| {
-                zipper_subtract(lhs, rhs, out)
+                lhs.subtract(rhs, out)
             });
         }
 
@@ -880,7 +970,7 @@ mod tests {
             check(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN.0,
-                |lhs, rhs, out| zipper_subtract(lhs, rhs, out),
+                |lhs, rhs, out| lhs.subtract(rhs, out),
             );
         }
 
@@ -894,7 +984,7 @@ mod tests {
                 (&[4, 3, 2, 1], 5),
             ];
             check(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
-                zipper_subtract(lhs, rhs, out)
+                lhs.subtract(rhs, out)
             });
         }
 
@@ -903,7 +993,7 @@ mod tests {
             check(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
-                |lhs, rhs, out| zipper_subtract(lhs, rhs, out),
+                |lhs, rhs, out| lhs.subtract(rhs, out),
             );
         }
     }
