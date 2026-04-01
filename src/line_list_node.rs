@@ -2538,13 +2538,15 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             // See if we just shorten the key in this node, or if we need to discard the node entirely and recurse
             if byte_cnt < key_len {
                 let new_key_len = key_len-byte_cnt;
+                debug_assert!(new_key_len > 0);
                 unsafe{
                     let base_ptr = temp_node.key_bytes.as_mut_ptr().cast::<u8>();
                     let src_ptr = base_ptr.add(byte_cnt);
                     let dst_ptr = base_ptr;
                     core::ptr::copy(src_ptr, dst_ptr, new_key_len);
                 }
-                temp_node.shorten_key_len::<0>(new_key_len);
+                temp_node.header &= 0xe03f; //Zero out the old length, and reset it (also clearing the saturated bit)
+                temp_node.header |= (new_key_len << 6) as u16;
                 debug_assert!(validate_node(&temp_node));
                 return Some(TrieNodeODRc::new_in(temp_node, self.alloc.clone()))
             } else {
@@ -2770,16 +2772,19 @@ pub(crate) fn validate_node<V: Clone + Send + Sync, A: Allocator>(node: &LineLis
 
     //The keys may never have more than one prefix byte in common
     if key0.get(0) == key1.get(0) && key0.get(1) == key1.get(1) && key0.get(1).is_some() {
+        println!("Invalid node - duplicated prefix too long. {node:?}");
         panic!()
     }
 
-    if !node.is_used::<1>() {
-        let slot_1_unavailable = node.header & (1 << 12) > 0;
-        let expected_unavailable = node.is_used::<0>() && key0.len() == KEY_BYTES_CNT;
-        if slot_1_unavailable != expected_unavailable {
-            println!("Invalid node - stale slot_1 availability bit. {node:?}");
-            panic!()
-        }
+    //Validate that the header bits are consistent with the key lengths, in the case of filled nodes
+    if key0.len() == KEY_BYTES_CNT {
+        assert!(node.is_used::<0>());
+        assert!(!node.is_used::<1>());
+        assert!(node.is_child_ptr::<1>());
+    }
+    if !node.is_used::<1>() && node.is_child_ptr::<1>() {
+        assert!(node.is_used::<0>());
+        assert!(key0.len() == KEY_BYTES_CNT);
     }
 
     //key0 must always be alphabetically before key1, if slot_1 is filled
