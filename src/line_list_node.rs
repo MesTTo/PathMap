@@ -20,7 +20,7 @@ pub struct LineListNode<V: Clone + Send + Sync, A: Allocator> {
     /// bit 15 = slot_0_used
     /// bit 14 = slot_1_used
     /// bit 13 = slot_0_is_child (child ptr vs value)
-    /// bit 12 = slot_1_is_child (child ptr vs value).  If bit 14 is 0, but bit 12 is 1, it means slot_0 consumed all the key space, so nothing can go in slot_1
+    /// bit 12 = slot_1_is_child (child ptr vs value)
     /// bits 11 to bit 6 = slot_0_key_len
     /// bit 5 to bit 0 = slot_1_key_len
     key_bytes: [MaybeUninit<u8>; KEY_BYTES_CNT],
@@ -295,7 +295,8 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     /// consumed by slot_0's key
     #[inline]
     pub fn is_available_1(&self) -> bool {
-        self.header & ((1 << 14) | (1 << 12)) == 0
+        const SLOT_1_USED_AND_LEN_0_MASK: u16 = (1 << 14) | 0xfc0;
+        (self.header & SLOT_1_USED_AND_LEN_0_MASK) < ((KEY_BYTES_CNT as u16) << 6)
     }
     #[inline]
     pub fn is_child_ptr<const SLOT: usize>(&self) -> bool {
@@ -339,9 +340,6 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                 const LEN_MASK: u16 = 0xfc0; //bits 11 to 6, inclusive
                 self.header &= !LEN_MASK;
                 self.header |= (new_len << 6) as u16;
-                if !self.is_used::<1>() && new_len < KEY_BYTES_CNT {
-                    self.header &= !(1u16 << 12);
-                }
                 if self.is_used::<1>() {
                     let key_len_1 = self.key_len_1();
                     unsafe {
@@ -602,9 +600,6 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
 
         //Re-adjust the length and flags
         self.header = (0xa000 | (idx << 6) | slot_mask_1) as u16;
-        if idx == KEY_BYTES_CNT {
-            self.header |= 1 << 12; //Set the flag state so slot_1 is unavailable
-        }
     }
     /// Splits the key in slot_0 at `idx` (exclusive.  ie. the length of the key)
     fn split_1(&mut self, idx: usize) where V: Clone {
@@ -656,9 +651,6 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         unsafe{ core::ptr::copy_nonoverlapping(key.as_ptr(), self.key_bytes.as_mut_ptr().cast(), key.len()); }
         self.val_or_child0 = payload;
         self.header = Self::header0(is_child_ptr, key.len());
-        if key.len() == KEY_BYTES_CNT {
-            self.header |= 1 << 12; //Set the flag state so slot_1 is unavailable
-        }
     }
     #[inline]
     unsafe fn set_payload_1(&mut self, key: &[u8], is_child_ptr: bool, payload: ValOrChildUnion<V, A>) {
@@ -1994,8 +1986,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     #[inline]
     fn node_goat_val_count(&self) -> usize {
         //Here are 3 alternative implementations.  They're basically the same in perf, with a slight edge to the
-        // inline bitwise arithmetic version.  But if we get rid of the bit 12 madness to track a saturated key in slot0
-        // (which is probably unnecessary) then I think we can speed up all these impls
+        // inline bitwise arithmetic version.
 
         // ====================================
         // Simplest impl
@@ -2006,9 +1997,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         // Inline bitwise arithmetic
 
         let h = (self.header >> 12) as usize;
-        if (h & 0b1000) == 0 && h != 0 {
-            unsafe { core::hint::unreachable_unchecked() }
-        }
+        debug_assert!((h & 0b1000) != 0 || h == 0); //If the first slot is empty, no other header bits should be set
         let s0 = ((h & 0b1000) >> 3) & (((h & 0b0010) ^ 0b0010) >> 1);
         let s1 = ((h & 0b0100) >> 2) & ((h & 0b0001) ^ 0b0001);
         s0 + s1
@@ -2018,9 +2007,9 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
 
         // match (self.header >> 12) as usize {
         //     0b0000 => 0, //Empty node.  0b0xxx with any if the 'x' bits set is an invalid config
-        //     0b1010 | 0b1011 => 0, //Slot 0 filled with an onward link, slot 1 empty
+        //     0b1010 => 0, //Slot 0 filled with an onward link, slot 1 empty
         //     0b1111 => 0, //Both slots filled with onward links
-        //     0b1000 | 0b1001 => 1, //Slot 0 filled with a value, slot 1 empty
+        //     0b1000 => 1, //Slot 0 filled with a value, slot 1 empty
         //     0b1101 => 1, //Both slots are filled, but only slot 0 is a value
         //     0b1110 => 1, //Both slots are filled, but only slot 1 is a value
         //     0b1100 => 2, //Both slots contain values
@@ -2547,7 +2536,8 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                     let dst_ptr = base_ptr;
                     core::ptr::copy(src_ptr, dst_ptr, new_key_len);
                 }
-                temp_node.header &= 0xe03f; //Zero out the old length, and reset it (also clearing the saturated bit)
+                debug_assert!(temp_node.header & 0x503f == 0); //Confirm there are no stale header bits for slot1
+                temp_node.header &= 0xa000; //Zero out the old length, and reset it
                 temp_node.header |= (new_key_len << 6) as u16;
                 debug_assert!(validate_node(&temp_node));
                 return Some(TrieNodeODRc::new_in(temp_node, self.alloc.clone()))
@@ -2778,15 +2768,22 @@ pub(crate) fn validate_node<V: Clone + Send + Sync, A: Allocator>(node: &LineLis
         panic!()
     }
 
-    //Validate that the header bits are consistent with the key lengths, in the case of filled nodes
-    if key0.len() == KEY_BYTES_CNT {
-        assert!(node.is_used::<0>());
-        assert!(!node.is_used::<1>());
-        assert!(node.is_child_ptr::<1>());
-    }
+    //slot_1 child/value metadata must only be meaningful when slot_1 is occupied
     if !node.is_used::<1>() && node.is_child_ptr::<1>() {
-        assert!(node.is_used::<0>());
-        assert!(key0.len() == KEY_BYTES_CNT);
+        println!("Invalid node - slot_1 child bit set while slot_1 is empty. {node:?}");
+        panic!()
+    }
+
+    //keys must fit in available buffer
+    if key0.len() + key1.len() > KEY_BYTES_CNT {
+        println!("Invalid node - key lengths over-run storage. {node:?}");
+        panic!()
+    }
+
+    //If slot0 saturates the node, slot1 must be empty
+    if key0.len() == KEY_BYTES_CNT && node.is_used::<1>() {
+        println!("Invalid node - slot0 saturates key storage, but slot1 is filled. {node:?}");
+        panic!()
     }
 
     //key0 must always be alphabetically before key1, if slot_1 is filled
@@ -2922,7 +2919,7 @@ mod tests {
         assert_eq!(new_node.node_get_val("hello".as_bytes()), Some(&42));
     }
 
-    /// Regression for a stale "slot_1 unavailable" bit after shortening a full-width slot_0 key.
+    /// Regression for slot_1 availability after shortening a full-width slot_0 key.
     #[test]
     fn test_line_list_shorten_key_releases_slot_1_availability() {
         let full_key = vec![b'a'; KEY_BYTES_CNT];
@@ -2948,7 +2945,7 @@ mod tests {
         assert_eq!(new_node.node_get_val(b"z"), Some(&42));
     }
 
-    /// Regression for the single-slot drop_head_dyn path preserving a stale slot_1-unavailable bit.
+    /// Regression for the single-slot drop_head_dyn path preserving slot_1 availability.
     #[test]
     fn test_line_list_drop_head_releases_slot_1_availability() {
         let full_key = vec![b'a'; KEY_BYTES_CNT];
