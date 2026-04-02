@@ -135,6 +135,7 @@ impl ByteMask {
     }
 
     /// Returns how many set bits precede the requested bit
+    #[inline]
     pub fn index_of(&self, byte: u8) -> u8 {
         if byte == 0 {
             return 0;
