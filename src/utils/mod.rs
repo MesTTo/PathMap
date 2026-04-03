@@ -112,8 +112,8 @@ impl ByteMask {
             mask[start_word] = (!0u64) << start_bit;
 
             // fully covered words
-            for w in (start_word + 1)..end_word {
-                mask[w] = !0u64;
+            for w in mask.iter_mut().take(end_word).skip(start_word + 1) {
+                *w = !0u64;
             }
 
             // last partial word
