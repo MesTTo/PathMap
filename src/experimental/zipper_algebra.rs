@@ -152,9 +152,9 @@ where
                 match lv.pjoin(rv) {
                     AlgebraicResult::None => {}
                     AlgebraicResult::Identity(mask) => {
-                        if mask | SELF_IDENT != 0 {
+                        if mask & SELF_IDENT != 0 {
                             out.set_val(lv.clone());
-                        } else if mask | COUNTER_IDENT != 0 {
+                        } else if mask & COUNTER_IDENT != 0 {
                             out.set_val(rv.clone());
                         }
                     }
@@ -317,9 +317,9 @@ where
                 match lv.pmeet(rv) {
                     AlgebraicResult::None => {}
                     AlgebraicResult::Identity(mask) => {
-                        if mask | SELF_IDENT != 0 {
+                        if mask & SELF_IDENT != 0 {
                             out.set_val(lv.clone());
-                        } else if mask | COUNTER_IDENT != 0 {
+                        } else if mask & COUNTER_IDENT != 0 {
                             out.set_val(rv.clone());
                         }
                     }
@@ -474,7 +474,7 @@ where
                 match lv.psubtract(rv) {
                     AlgebraicResult::None => {}
                     AlgebraicResult::Identity(mask) => {
-                        if mask | SELF_IDENT != 0 {
+                        if mask & SELF_IDENT != 0 {
                             out.set_val(lv.clone());
                         }
                     }
