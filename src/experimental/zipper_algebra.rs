@@ -139,121 +139,7 @@ where
     ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
-    fn join_values<V, ZL, ZR, Out, A>(lhs: &ZL, rhs: &ZR, out: &mut Out)
-    where
-        V: Lattice + Clone + Send + Sync,
-        A: Allocator,
-        ZL: ZipperValues<V>,
-        ZR: ZipperValues<V>,
-        Out: ZipperWriting<V, A>,
-    {
-        if let Some(lv) = lhs.val() {
-            if let Some(rv) = rhs.val() {
-                match lv.pjoin(rv) {
-                    AlgebraicResult::None => {}
-                    AlgebraicResult::Identity(mask) => {
-                        if mask & SELF_IDENT != 0 {
-                            out.set_val(lv.clone());
-                        } else if mask & COUNTER_IDENT != 0 {
-                            out.set_val(rv.clone());
-                        }
-                    }
-                    AlgebraicResult::Element(v) => {
-                        out.set_val(v);
-                    }
-                }
-            } else {
-                out.set_val(lv.clone());
-            }
-        } else if let Some(rv) = rhs.val() {
-            out.set_val(rv.clone());
-        }
-    }
-
-    // join root values before descending
-    join_values(lhs, rhs, out);
-
-    let mut k = 0;
-    let mut lhs_mask = lhs.child_mask();
-    let mut rhs_mask = rhs.child_mask();
-    let mut lhs_idx = 0;
-    let mut rhs_idx = 0;
-
-    // At each node, the algorithm treats the sets of child edges of `lhs` and `rhs` as two
-    // sorted sequences and performs a merge-like traversal:
-    //
-    // - If a range of edges exists only in one side, the corresponding subtries are *grafted*
-    //   into the output without further traversal.
-    // - If both sides contain the same edge, the algorithm descends into that child,
-    //   recursively merging the corresponding subtries.
-    // - Descent is simulated iteratively using zipper movement (`descend_to_byte` /
-    //   `ascend_byte`) and an explicit depth counter (`k`).
-    'ascend: loop {
-        'merge_level: loop {
-            let lhs_next = lhs_mask.indexed_bit::<true>(lhs_idx as usize);
-            let rhs_next = rhs_mask.indexed_bit::<true>(rhs_idx as usize);
-
-            match lhs_next {
-                Some(lhs_byte) => match rhs_next {
-                    Some(rhs_byte) if lhs_byte < rhs_byte => {
-                        out.graft_children(lhs, ByteMask::from_range(lhs_byte..rhs_byte));
-                        lhs_idx = lhs_mask.index_of(rhs_byte);
-                    }
-                    Some(rhs_byte) if lhs_byte > rhs_byte => {
-                        out.graft_children(rhs, ByteMask::from_range(rhs_byte..lhs_byte));
-                        rhs_idx = rhs_mask.index_of(lhs_byte);
-                    }
-                    Some(rhs_byte) => {
-                        // equal → descend
-                        out.descend_to_byte(lhs_byte);
-
-                        lhs.descend_to_byte(lhs_byte);
-                        rhs.descend_to_byte(lhs_byte);
-
-                        join_values(lhs, rhs, out);
-
-                        lhs_mask = lhs.child_mask();
-                        rhs_mask = rhs.child_mask();
-
-                        lhs_idx = 0;
-                        rhs_idx = 0;
-
-                        k += 1;
-                        continue 'merge_level;
-                    }
-                    None => {
-                        out.graft_children(lhs, ByteMask::from_range(lhs_byte..));
-                        break 'merge_level;
-                    }
-                },
-                None => match rhs_next {
-                    Some(rhs_byte) => {
-                        out.graft_children(rhs, ByteMask::from_range(rhs_byte..));
-                        break 'merge_level;
-                    }
-                    None => break 'merge_level,
-                },
-            }
-        }
-
-        // If we are at root and no deeper recursion pending, we're done
-        if k == 0 {
-            break 'ascend;
-        }
-
-        let byte_from = *lhs.path().last().expect("non-empty path when k > 0");
-
-        rhs.ascend_byte();
-        rhs_mask = rhs.child_mask();
-        rhs_idx = rhs_mask.index_of(byte_from) + 1;
-
-        lhs.ascend_byte();
-        lhs_mask = lhs.child_mask();
-        lhs_idx = lhs_mask.index_of(byte_from) + 1;
-
-        out.ascend_byte();
-        k -= 1;
-    }
+    zipper_merge::<Join, V, ZL, ZR, Out, A>(lhs, rhs, out);
 }
 
 /// Performs an ordered meet (greatest lower bound) of two radix-256 tries using zipper traversal.
@@ -304,107 +190,7 @@ where
     ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
-    fn meet_values<V, ZL, ZR, Out, A>(lhs: &ZL, rhs: &ZR, out: &mut Out)
-    where
-        V: Lattice + Clone + Send + Sync,
-        A: Allocator,
-        ZL: ZipperValues<V>,
-        ZR: ZipperValues<V>,
-        Out: ZipperWriting<V, A>,
-    {
-        if let Some(lv) = lhs.val() {
-            if let Some(rv) = rhs.val() {
-                match lv.pmeet(rv) {
-                    AlgebraicResult::None => {}
-                    AlgebraicResult::Identity(mask) => {
-                        if mask & SELF_IDENT != 0 {
-                            out.set_val(lv.clone());
-                        } else if mask & COUNTER_IDENT != 0 {
-                            out.set_val(rv.clone());
-                        }
-                    }
-                    AlgebraicResult::Element(v) => {
-                        out.set_val(v);
-                    }
-                }
-            }
-        }
-    }
-
-    // meet root values before descending
-    meet_values(lhs, rhs, out);
-
-    let mut k = 0;
-    let mut lhs_mask = lhs.child_mask();
-    let mut rhs_mask = rhs.child_mask();
-    let mut lhs_idx = 0;
-    let mut rhs_idx = 0;
-
-    // At each node, the algorithm treats the sets of child edges of `lhs` and `rhs` as two
-    // sorted sequences and performs a merge-like traversal:
-    //
-    // - If a range of edges exists only in one side, the corresponding subtries are skipped
-    //   without further traversal.
-    // - If both sides contain the same edge, the algorithm descends into that child,
-    //   recursively merging the corresponding subtries.
-    // - Descent is simulated iteratively using zipper movement (`descend_to_byte` /
-    //   `ascend_byte`) and an explicit depth counter (`k`).
-    'ascend: loop {
-        'merge_level: loop {
-            let lhs_next = lhs_mask.indexed_bit::<true>(lhs_idx as usize);
-            let rhs_next = rhs_mask.indexed_bit::<true>(rhs_idx as usize);
-
-            match lhs_next {
-                Some(lhs_byte) => match rhs_next {
-                    Some(rhs_byte) if lhs_byte < rhs_byte => {
-                        // skip lhs-only range
-                        lhs_idx = lhs_mask.index_of(rhs_byte);
-                    }
-                    Some(rhs_byte) if lhs_byte > rhs_byte => {
-                        // skip rhs-only range
-                        rhs_idx = rhs_mask.index_of(lhs_byte);
-                    }
-                    Some(rhs_byte) => {
-                        // equal → descend
-                        out.descend_to_byte(lhs_byte);
-
-                        lhs.descend_to_byte(lhs_byte);
-                        rhs.descend_to_byte(lhs_byte);
-
-                        meet_values(lhs, rhs, out);
-
-                        lhs_mask = lhs.child_mask();
-                        rhs_mask = rhs.child_mask();
-
-                        lhs_idx = 0;
-                        rhs_idx = 0;
-
-                        k += 1;
-                        continue 'merge_level;
-                    }
-                    None => break 'merge_level,
-                },
-                None => break 'merge_level,
-            }
-        }
-
-        if k == 0 {
-            break 'ascend;
-        }
-
-        let byte_from = *lhs.path().last().expect("non-empty path when k > 0");
-
-        rhs.ascend_byte();
-        rhs_mask = rhs.child_mask();
-        rhs_idx = rhs_mask.index_of(byte_from) + 1;
-
-        lhs.ascend_byte();
-        lhs_mask = lhs.child_mask();
-        lhs_idx = lhs_mask.index_of(byte_from) + 1;
-
-        out.ascend_byte();
-        k -= 1;
-    }
+    zipper_merge::<Meet, V, ZL, ZR, Out, A>(lhs, rhs, out);
 }
 
 /// Performs an ordered subtraction (set difference, `lhs \ rhs`) of two radix-256 tries
@@ -461,36 +247,163 @@ where
     ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
-    fn combine_values<V, ZL, ZR, Out, A>(lhs: &ZL, rhs: &ZR, out: &mut Out)
+    zipper_merge::<Subtract, V, ZL, ZR, Out, A>(lhs, rhs, out);
+}
+
+trait MergePolicy<V: Clone + Send + Sync> {
+    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V>;
+
+    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
     where
-        V: DistributiveLattice + Clone + Send + Sync,
         A: Allocator,
-        ZL: ZipperValues<V>,
-        ZR: ZipperValues<V>,
-        Out: ZipperWriting<V, A>,
-    {
-        if let Some(lv) = lhs.val() {
-            if let Some(rv) = rhs.val() {
-                match lv.psubtract(rv) {
-                    AlgebraicResult::None => {}
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>;
+
+    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>;
+}
+
+struct Join;
+impl<V: Lattice + Clone + Send + Sync> MergePolicy<V> for Join {
+    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
+        if let Some(lv) = l {
+            if let Some(rv) = r {
+                match lv.pjoin(rv) {
+                    AlgebraicResult::None => None,
                     AlgebraicResult::Identity(mask) => {
                         if mask & SELF_IDENT != 0 {
-                            out.set_val(lv.clone());
+                            l.cloned()
+                        } else {
+                            r.cloned()
                         }
                     }
-                    AlgebraicResult::Element(v) => {
-                        out.set_val(v);
-                    }
+                    AlgebraicResult::Element(v) => Some(v),
                 }
             } else {
-                // lhs-only → keep
-                out.set_val(lv.clone());
+                l.cloned()
             }
+        } else {
+            r.cloned()
         }
     }
 
-    // combine root values before descending
-    combine_values(lhs, rhs, out);
+    #[inline]
+    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        out.graft_children(z, range);
+    }
+
+    #[inline]
+    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        out.graft_children(z, range);
+    }
+}
+
+struct Meet;
+impl<V: Lattice + Clone + Send + Sync> MergePolicy<V> for Meet {
+    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
+        l.and_then(|lv| {
+            r.and_then(|rv| match lv.pmeet(rv) {
+                AlgebraicResult::None => None,
+                AlgebraicResult::Identity(mask) => {
+                    if mask & SELF_IDENT != 0 {
+                        Some(lv.clone())
+                    } else {
+                        Some(rv.clone())
+                    }
+                }
+                AlgebraicResult::Element(v) => Some(v),
+            })
+        })
+    }
+
+    #[inline(always)]
+    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+    }
+
+    #[inline(always)]
+    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+    }
+}
+
+struct Subtract;
+impl<V: DistributiveLattice + Clone + Send + Sync> MergePolicy<V> for Subtract {
+    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
+        l.and_then(|lv| {
+            if let Some(rv) = r {
+                match lv.psubtract(rv) {
+                    AlgebraicResult::None => None,
+                    AlgebraicResult::Identity(mask) => {
+                        if mask & SELF_IDENT != 0 {
+                            Some(lv.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    AlgebraicResult::Element(v) => Some(v),
+                }
+            } else {
+                // lhs-only → keep
+                Some(lv.clone())
+            }
+        })
+    }
+
+    #[inline]
+    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        out.graft_children(z, range);
+    }
+
+    #[inline]
+    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+    }
+}
+
+fn zipper_merge<P, V, ZL, ZR, Out, A>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
+where
+    V: Clone + Send + Sync,
+    P: MergePolicy<V>,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    // merge root values before descending
+    if let Some(v) = P::combine(lhs.val(), rhs.val()) {
+        out.set_val(v);
+    }
 
     let mut k = 0;
     let mut lhs_mask = lhs.child_mask();
@@ -498,12 +411,15 @@ where
     let mut lhs_idx = 0;
     let mut rhs_idx = 0;
 
-    // The traversal follows a merge-like strategy over ordered child edges:
+    // At each node, the algorithm treats the sets of child edges of `lhs` and `rhs` as two sorted
+    // sequences and performs a merge-like traversal:
     //
-    // - Subtries that exist only in `lhs` are *grafted* directly into the output.
-    // - Subtries that exist only in `rhs` are skipped.
-    // - When both sides contain the same edge, the algorithm descends into that child
-    //   and continues subtracting recursively.
+    // - If a range of edges exists only in one side, the corresponding merge policy method is
+    //   called.
+    // - If both sides contain the same edge, the algorithm descends into that child, recursively
+    //   merging the corresponding subtries.
+    // - Descent is simulated iteratively using zipper movement (`descend_to_byte` / `ascend_byte`)
+    //   and an explicit depth counter (`k`).
     'ascend: loop {
         'merge_level: loop {
             let lhs_next = lhs_mask.indexed_bit::<true>(lhs_idx as usize);
@@ -512,11 +428,11 @@ where
             match lhs_next {
                 Some(lhs_byte) => match rhs_next {
                     Some(rhs_byte) if lhs_byte < rhs_byte => {
-                        out.graft_children(lhs, ByteMask::from_range(lhs_byte..rhs_byte));
+                        P::on_left_only(lhs, ByteMask::from_range(lhs_byte..rhs_byte), out);
                         lhs_idx = lhs_mask.index_of(rhs_byte);
                     }
                     Some(rhs_byte) if lhs_byte > rhs_byte => {
-                        // skip rhs-only range
+                        P::on_right_only(rhs, ByteMask::from_range(rhs_byte..lhs_byte), out);
                         rhs_idx = rhs_mask.index_of(lhs_byte);
                     }
                     Some(rhs_byte) => {
@@ -526,7 +442,9 @@ where
                         lhs.descend_to_byte(lhs_byte);
                         rhs.descend_to_byte(lhs_byte);
 
-                        combine_values(lhs, rhs, out);
+                        if let Some(v) = P::combine(lhs.val(), rhs.val()) {
+                            out.set_val(v);
+                        }
 
                         lhs_mask = lhs.child_mask();
                         rhs_mask = rhs.child_mask();
@@ -538,14 +456,21 @@ where
                         continue 'merge_level;
                     }
                     None => {
-                        out.graft_children(lhs, ByteMask::from_range(lhs_byte..));
+                        P::on_left_only(lhs, ByteMask::from_range(lhs_byte..), out);
                         break 'merge_level;
                     }
                 },
-                None => break 'merge_level,
+                None => match rhs_next {
+                    Some(rhs_byte) => {
+                        P::on_right_only(rhs, ByteMask::from_range(rhs_byte..), out);
+                        break 'merge_level;
+                    }
+                    None => break 'merge_level,
+                },
             }
         }
 
+        // If we are at root and no deeper recursion pending, we're done
         if k == 0 {
             break 'ascend;
         }
