@@ -251,150 +251,27 @@ where
 }
 
 trait MergePolicy<V: Clone + Send + Sync> {
+    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>;
+
+    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>;
+}
+
+trait ValuePolicy<V> {
     fn combine(l: Option<&V>, r: Option<&V>) -> Option<V>;
-
-    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>;
-
-    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>;
-}
-
-struct Join;
-impl<V: Lattice + Clone + Send + Sync> MergePolicy<V> for Join {
-    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
-        if let Some(lv) = l {
-            if let Some(rv) = r {
-                match lv.pjoin(rv) {
-                    AlgebraicResult::None => None,
-                    AlgebraicResult::Identity(mask) => {
-                        if mask & SELF_IDENT != 0 {
-                            l.cloned()
-                        } else {
-                            r.cloned()
-                        }
-                    }
-                    AlgebraicResult::Element(v) => Some(v),
-                }
-            } else {
-                l.cloned()
-            }
-        } else {
-            r.cloned()
-        }
-    }
-
-    #[inline]
-    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-        out.graft_children(z, range);
-    }
-
-    #[inline]
-    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-        out.graft_children(z, range);
-    }
-}
-
-struct Meet;
-impl<V: Lattice + Clone + Send + Sync> MergePolicy<V> for Meet {
-    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
-        l.and_then(|lv| {
-            r.and_then(|rv| match lv.pmeet(rv) {
-                AlgebraicResult::None => None,
-                AlgebraicResult::Identity(mask) => {
-                    if mask & SELF_IDENT != 0 {
-                        Some(lv.clone())
-                    } else {
-                        Some(rv.clone())
-                    }
-                }
-                AlgebraicResult::Element(v) => Some(v),
-            })
-        })
-    }
-
-    #[inline(always)]
-    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-    }
-
-    #[inline(always)]
-    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-    }
-}
-
-struct Subtract;
-impl<V: DistributiveLattice + Clone + Send + Sync> MergePolicy<V> for Subtract {
-    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
-        l.and_then(|lv| {
-            if let Some(rv) = r {
-                match lv.psubtract(rv) {
-                    AlgebraicResult::None => None,
-                    AlgebraicResult::Identity(mask) => {
-                        if mask & SELF_IDENT != 0 {
-                            Some(lv.clone())
-                        } else {
-                            None
-                        }
-                    }
-                    AlgebraicResult::Element(v) => Some(v),
-                }
-            } else {
-                // lhs-only → keep
-                Some(lv.clone())
-            }
-        })
-    }
-
-    #[inline]
-    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-        out.graft_children(z, range);
-    }
-
-    #[inline]
-    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-    }
 }
 
 fn zipper_merge<P, V, ZL, ZR, Out, A>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
 where
     V: Clone + Send + Sync,
-    P: MergePolicy<V>,
+    P: MergePolicy<V> + ValuePolicy<V>,
     A: Allocator,
     ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
     ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
@@ -490,6 +367,142 @@ where
     }
 }
 
+// ==================== JOIN ====================
+
+struct Join;
+impl<V: Clone + Send + Sync> MergePolicy<V> for Join {
+    #[inline]
+    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        out.graft_children(z, range);
+    }
+
+    #[inline]
+    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        out.graft_children(z, range);
+    }
+}
+
+impl<V: Lattice + Clone> ValuePolicy<V> for Join {
+    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
+        if let Some(lv) = l {
+            if let Some(rv) = r {
+                match lv.pjoin(rv) {
+                    AlgebraicResult::None => None,
+                    AlgebraicResult::Identity(mask) => {
+                        if mask & SELF_IDENT != 0 {
+                            l.cloned()
+                        } else {
+                            r.cloned()
+                        }
+                    }
+                    AlgebraicResult::Element(v) => Some(v),
+                }
+            } else {
+                l.cloned()
+            }
+        } else {
+            r.cloned()
+        }
+    }
+}
+
+// ==================== MEET ====================
+
+struct Meet;
+impl<V: Clone + Send + Sync> MergePolicy<V> for Meet {
+    #[inline(always)]
+    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+    }
+
+    #[inline(always)]
+    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+    }
+}
+
+impl<V: Lattice + Clone> ValuePolicy<V> for Meet {
+    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
+        l.and_then(|lv| {
+            r.and_then(|rv| match lv.pmeet(rv) {
+                AlgebraicResult::None => None,
+                AlgebraicResult::Identity(mask) => {
+                    if mask & SELF_IDENT != 0 {
+                        Some(lv.clone())
+                    } else {
+                        Some(rv.clone())
+                    }
+                }
+                AlgebraicResult::Element(v) => Some(v),
+            })
+        })
+    }
+}
+
+// ==================== SUBTRACT ====================
+
+struct Subtract;
+impl<V: Clone + Send + Sync> MergePolicy<V> for Subtract {
+    #[inline]
+    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        out.graft_children(z, range);
+    }
+
+    #[inline]
+    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+    }
+}
+
+impl<V: DistributiveLattice + Clone> ValuePolicy<V> for Subtract {
+    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
+        l.and_then(|lv| {
+            if let Some(rv) = r {
+                match lv.psubtract(rv) {
+                    AlgebraicResult::None => None,
+                    AlgebraicResult::Identity(mask) => {
+                        if mask & SELF_IDENT != 0 {
+                            Some(lv.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    AlgebraicResult::Element(v) => Some(v),
+                }
+            } else {
+                // lhs-only → keep
+                Some(lv.clone())
+            }
+        })
+    }
+}
 #[cfg(test)]
 mod tests {
     use crate::{
