@@ -251,21 +251,41 @@ where
 }
 
 trait MergePolicy<V: Clone + Send + Sync> {
+    #[inline]
     fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
     where
         A: Allocator,
         Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>;
+        Out: ZipperWriting<V, A>,
+    {
+        Self::on_single(z, 0b01, range, out);
+    }
 
+    #[inline]
     fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
     where
         A: Allocator,
         Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        Self::on_single(z, 0b10, range, out);
+    }
+
+    fn on_single<Z, Out, A>(z: &mut Z, mask: u64, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
         Out: ZipperWriting<V, A>;
+
+    fn descend_on_some_equal(mask: u64) -> bool;
 }
 
 trait ValuePolicy<V> {
     fn combine(l: Option<&V>, r: Option<&V>) -> Option<V>;
+    fn combine3(l: Option<&V>, m: Option<&V>, r: Option<&V>) -> Option<V> {
+        // (l op m) op r
+        Self::combine(Self::combine(l, m).as_ref(), r)
+    }
 }
 
 fn zipper_merge<P, V, ZL, ZR, Out, A>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
@@ -367,12 +387,198 @@ where
     }
 }
 
+fn zipper_merge3<P, V, ZL, ZM, ZR, Out, A>(lhs: &mut ZL, mid: &mut ZM, rhs: &mut ZR, out: &mut Out)
+where
+    V: Clone + Send + Sync,
+    P: MergePolicy<V> + ValuePolicy<V>,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZM: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    const L: u8 = 0b001;
+    const M: u8 = 0b010;
+    const R: u8 = 0b100;
+    const LM: u8 = L | M;
+    const LR: u8 = L | R;
+    const MR: u8 = M | R;
+    const LMR: u8 = L | M | R;
+
+    fn descend2<P, V, ZL, ZR, Out, A>(b: u8, lhs: &mut ZL, rhs: &mut ZR, mask: u8, out: &mut Out)
+    where
+        V: Clone + Send + Sync,
+        P: MergePolicy<V> + ValuePolicy<V>,
+        A: Allocator,
+        ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        if !P::descend_on_some_equal(mask as u64) {
+            return;
+        }
+        out.descend_to_byte(b);
+        lhs.descend_to_byte(b);
+        rhs.descend_to_byte(b);
+
+        zipper_merge::<P, V, ZL, ZR, Out, A>(lhs, rhs, out);
+
+        rhs.ascend_byte();
+        lhs.ascend_byte();
+        out.ascend_byte();
+    }
+
+    // merge root values before descending
+    if let Some(v) = P::combine3(lhs.val(), mid.val(), rhs.val()) {
+        out.set_val(v);
+    }
+
+    let mut k = 0;
+    let mut lhs_mask = lhs.child_mask();
+    let mut mid_mask = mid.child_mask();
+    let mut rhs_mask = rhs.child_mask();
+    let mut lhs_idx = 0;
+    let mut mid_idx = 0;
+    let mut rhs_idx = 0;
+
+    'ascend: loop {
+        'merge_level: loop {
+            let l = lhs_mask.indexed_bit::<true>(lhs_idx as usize);
+            let m = mid_mask.indexed_bit::<true>(mid_idx as usize);
+            let r = rhs_mask.indexed_bit::<true>(rhs_idx as usize);
+
+            let mut a = l;
+            let mut b = m;
+            let mut c = r;
+
+            fn cmp_swap(a: &mut Option<u8>, b: &mut Option<u8>) {
+                if let Some(x) = *a {
+                    if let Some(y) = *b {
+                        if y < x {
+                            std::mem::swap(a, b);
+                        }
+                    }
+                } else {
+                    std::mem::swap(a, b);
+                }
+            }
+            cmp_swap(&mut a, &mut b);
+            cmp_swap(&mut a, &mut c);
+
+            if let Some(min) = a {
+                let mut frontier = 0;
+                if a == l {
+                    frontier = L;
+                }
+                if a == m {
+                    frontier |= M;
+                }
+                if a == r {
+                    frontier |= R;
+                }
+
+                cmp_swap(&mut b, &mut c);
+                let range = if let Some(next) = b {
+                    ByteMask::from_range(min..next)
+                } else {
+                    ByteMask::from_range(min..)
+                };
+
+                match frontier {
+                    // single → graft
+                    L => {
+                        P::on_single(lhs, L as u64, range, out);
+                    }
+                    M => {
+                        P::on_single(mid, M as u64, range, out);
+                    }
+                    R => {
+                        P::on_single(rhs, R as u64, range, out);
+                    }
+                    // two-way → descend 2
+                    LM => {
+                        descend2::<P, V, ZL, ZM, Out, A>(min, lhs, mid, LM, out);
+                    }
+                    MR => {
+                        descend2::<P, V, ZM, ZR, Out, A>(min, mid, rhs, MR, out);
+                    }
+                    LR => {
+                        descend2::<P, V, ZL, ZR, Out, A>(min, lhs, rhs, LR, out);
+                    }
+                    // full 3-way
+                    LMR => {
+                        out.descend_to_byte(min);
+
+                        lhs.descend_to_byte(min);
+                        mid.descend_to_byte(min);
+                        rhs.descend_to_byte(min);
+
+                        if let Some(val) = P::combine3(lhs.val(), mid.val(), rhs.val()) {
+                            out.set_val(val);
+                        }
+
+                        lhs_mask = lhs.child_mask();
+                        mid_mask = mid.child_mask();
+                        rhs_mask = rhs.child_mask();
+
+                        lhs_idx = 0;
+                        mid_idx = 0;
+                        rhs_idx = 0;
+
+                        k += 1;
+                        continue 'merge_level;
+                    }
+                    _ => unreachable!(),
+                }
+
+                if let Some(next) = b {
+                    if (frontier & L != 0) {
+                        lhs_idx = lhs_mask.index_of(next);
+                    }
+                    if (frontier & M != 0) {
+                        mid_idx = mid_mask.index_of(next);
+                    }
+                    if (frontier & R != 0) {
+                        rhs_idx = rhs_mask.index_of(next);
+                    }
+                } else {
+                    break 'merge_level;
+                }
+            } else {
+                break 'merge_level;
+            }
+        }
+
+        // If we are at root and no deeper recursion pending, we're done
+        if k == 0 {
+            break 'ascend;
+        }
+
+        let byte_from = *lhs.path().last().expect("non-empty path when k > 0");
+
+        rhs.ascend_byte();
+        rhs_mask = rhs.child_mask();
+        rhs_idx = rhs_mask.index_of(byte_from) + 1;
+
+        mid.ascend_byte();
+        mid_mask = mid.child_mask();
+        mid_idx = mid_mask.index_of(byte_from) + 1;
+
+        lhs.ascend_byte();
+        lhs_mask = lhs.child_mask();
+        lhs_idx = lhs_mask.index_of(byte_from) + 1;
+
+        out.ascend_byte();
+        k -= 1;
+    }
+}
+
 // ==================== JOIN ====================
 
 struct Join;
 impl<V: Clone + Send + Sync> MergePolicy<V> for Join {
     #[inline]
-    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    fn on_single<Z, Out, A>(z: &mut Z, _mask: u64, range: ByteMask, out: &mut Out)
     where
         A: Allocator,
         Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
@@ -382,13 +588,8 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Join {
     }
 
     #[inline]
-    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-        out.graft_children(z, range);
+    fn descend_on_some_equal(_mask: u64) -> bool {
+        true
     }
 }
 
@@ -421,7 +622,7 @@ impl<V: Lattice + Clone> ValuePolicy<V> for Join {
 struct Meet;
 impl<V: Clone + Send + Sync> MergePolicy<V> for Meet {
     #[inline(always)]
-    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    fn on_single<Z, Out, A>(_z: &mut Z, _mask: u64, _range: ByteMask, _out: &mut Out)
     where
         A: Allocator,
         Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
@@ -430,12 +631,8 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Meet {
     }
 
     #[inline(always)]
-    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
+    fn descend_on_some_equal(_mask: u64) -> bool {
+        false
     }
 }
 
@@ -452,6 +649,38 @@ impl<V: Lattice + Clone> ValuePolicy<V> for Meet {
                     }
                 }
                 AlgebraicResult::Element(v) => Some(v),
+            })
+        })
+    }
+
+    fn combine3(l: Option<&V>, m: Option<&V>, r: Option<&V>) -> Option<V> {
+        l.and_then(|x| {
+            m.and_then(|y| {
+                r.and_then(|z| {
+                    let xy = match x.pmeet(y) {
+                        AlgebraicResult::None => return None,
+                        AlgebraicResult::Identity(mask) => {
+                            if mask & SELF_IDENT != 0 {
+                                x.clone()
+                            } else {
+                                y.clone()
+                            }
+                        }
+                        AlgebraicResult::Element(v) => v,
+                    };
+
+                    match xy.pmeet(z) {
+                        AlgebraicResult::None => None,
+                        AlgebraicResult::Identity(mask) => {
+                            if mask & SELF_IDENT != 0 {
+                                Some(xy)
+                            } else {
+                                Some(z.clone())
+                            }
+                        }
+                        AlgebraicResult::Element(v) => Some(v),
+                    }
+                })
             })
         })
     }
@@ -472,12 +701,29 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Subtract {
     }
 
     #[inline]
-    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    fn on_right_only<Z, Out, A>(_z: &mut Z, _range: ByteMask, _out: &mut Out)
     where
         A: Allocator,
         Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
+    }
+
+    #[inline]
+    fn on_single<Z, Out, A>(z: &mut Z, mask: u64, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        if mask == 1 {
+            out.graft_children(z, range);
+        }
+    }
+
+    #[inline]
+    fn descend_on_some_equal(mask: u64) -> bool {
+        mask & 1 != 0
     }
 }
 
@@ -503,6 +749,7 @@ impl<V: DistributiveLattice + Clone> ValuePolicy<V> for Subtract {
         })
     }
 }
+
 #[cfg(test)]
 mod tests {
     use crate::{
