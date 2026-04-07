@@ -142,6 +142,25 @@ where
     zipper_merge::<Join, V, ZL, ZR, Out, A>(lhs, rhs, out);
 }
 
+/// Performs an ordered join (least upper bound) of three radix-256 tries using zipper traversal.
+/// That is, it performs: (`lhs` ⊔ `mid`) ⊔ `rhs`, where `⊔` = [`zipper_join`]
+///
+/// # See also
+///
+/// [`zipper_join`]
+///
+pub fn zipper_join3<V, ZL, ZM, ZR, Out, A>(lhs: &mut ZL, mid: &mut ZM, rhs: &mut ZR, out: &mut Out)
+where
+    V: Lattice + Clone + Send + Sync,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZM: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    zipper_merge3::<Join, V, ZL, ZM, ZR, Out, A>(lhs, mid, rhs, out);
+}
+
 /// Performs an ordered meet (greatest lower bound) of two radix-256 tries using zipper traversal.
 ///
 /// This function intersects two tries by simultaneously traversing them in lexicographic order,
@@ -191,6 +210,25 @@ where
     Out: ZipperWriting<V, A>,
 {
     zipper_merge::<Meet, V, ZL, ZR, Out, A>(lhs, rhs, out);
+}
+
+/// Performs an ordered meet (greater lower bound) of three radix-256 tries using zipper traversal.
+/// That is, it performs: (`lhs` ⊓ `mid`) ⊓ `rhs`, where `⊓` = [`zipper_meet`]
+///
+/// # See also
+///
+/// [`zipper_meet`]
+///
+pub fn zipper_meet3<V, ZL, ZM, ZR, Out, A>(lhs: &mut ZL, mid: &mut ZM, rhs: &mut ZR, out: &mut Out)
+where
+    V: Lattice + Clone + Send + Sync,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZM: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    zipper_merge3::<Meet, V, ZL, ZM, ZR, Out, A>(lhs, mid, rhs, out);
 }
 
 /// Performs an ordered subtraction (set difference, `lhs \ rhs`) of two radix-256 tries
@@ -248,6 +286,29 @@ where
     Out: ZipperWriting<V, A>,
 {
     zipper_merge::<Subtract, V, ZL, ZR, Out, A>(lhs, rhs, out);
+}
+
+/// Performs an ordered subtraction (set difference of three radix-256 tries using zipper traversal.
+/// That is, it performs: (`lhs` \ `mid`) \ `rhs`, where `\` = [`zipper_subtract`]
+///
+/// # See also
+///
+/// [`zipper_subtract`]
+///
+pub fn zipper_subtract3<V, ZL, ZM, ZR, Out, A>(
+    lhs: &mut ZL,
+    mid: &mut ZM,
+    rhs: &mut ZR,
+    out: &mut Out,
+) where
+    V: DistributiveLattice + Clone + Send + Sync,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZM: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    zipper_merge3::<Subtract, V, ZL, ZM, ZR, Out, A>(lhs, mid, rhs, out);
 }
 
 trait MergePolicy<V: Clone + Send + Sync> {
@@ -405,7 +466,7 @@ where
     const MR: u8 = M | R;
     const LMR: u8 = L | M | R;
 
-    fn descend2<P, V, ZL, ZR, Out, A>(b: u8, lhs: &mut ZL, rhs: &mut ZR, mask: u8, out: &mut Out)
+    fn descend2<P, V, ZL, ZR, Out, A>(b: u8, lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
     where
         V: Clone + Send + Sync,
         P: MergePolicy<V> + ValuePolicy<V>,
@@ -414,9 +475,6 @@ where
         ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        if !P::descend_on_some_equal(mask as u64) {
-            return;
-        }
         out.descend_to_byte(b);
         lhs.descend_to_byte(b);
         rhs.descend_to_byte(b);
@@ -478,32 +536,57 @@ where
                 }
 
                 cmp_swap(&mut b, &mut c);
-                let range = if let Some(next) = b {
-                    ByteMask::from_range(min..next)
-                } else {
-                    ByteMask::from_range(min..)
-                };
 
                 match frontier {
                     // single → graft
+                    L if b.is_some() => {
+                        let next = b.unwrap();
+                        P::on_single(lhs, L as u64, ByteMask::from_range(min..next), out);
+                        lhs_idx = lhs_mask.index_of(next);
+                    }
                     L => {
-                        P::on_single(lhs, L as u64, range, out);
+                        P::on_single(lhs, L as u64, ByteMask::from_range(min..), out);
+                        break 'merge_level;
+                    }
+                    M if b.is_some() => {
+                        let next = b.unwrap();
+                        P::on_single(mid, M as u64, ByteMask::from_range(min..next), out);
+                        mid_idx = mid_mask.index_of(next);
                     }
                     M => {
-                        P::on_single(mid, M as u64, range, out);
+                        P::on_single(mid, M as u64, ByteMask::from_range(min..), out);
+                        break 'merge_level;
+                    }
+                    R if b.is_some() => {
+                        let next = b.unwrap();
+                        P::on_single(rhs, R as u64, ByteMask::from_range(min..next), out);
+                        rhs_idx = rhs_mask.index_of(next);
                     }
                     R => {
-                        P::on_single(rhs, R as u64, range, out);
+                        P::on_single(rhs, R as u64, ByteMask::from_range(min..), out);
+                        break 'merge_level;
                     }
                     // two-way → descend 2
                     LM => {
-                        descend2::<P, V, ZL, ZM, Out, A>(min, lhs, mid, LM, out);
+                        if P::descend_on_some_equal(LM as u64) {
+                            descend2::<P, V, ZL, ZM, Out, A>(min, lhs, mid, out);
+                        }
+                        lhs_idx += 1;
+                        mid_idx += 1;
                     }
                     MR => {
-                        descend2::<P, V, ZM, ZR, Out, A>(min, mid, rhs, MR, out);
+                        if P::descend_on_some_equal(MR as u64) {
+                            descend2::<P, V, ZM, ZR, Out, A>(min, mid, rhs, out);
+                        }
+                        mid_idx += 1;
+                        rhs_idx += 1;
                     }
                     LR => {
-                        descend2::<P, V, ZL, ZR, Out, A>(min, lhs, rhs, LR, out);
+                        if P::descend_on_some_equal(LR as u64) {
+                            descend2::<P, V, ZL, ZR, Out, A>(min, lhs, rhs, out);
+                        }
+                        lhs_idx += 1;
+                        rhs_idx += 1;
                     }
                     // full 3-way
                     LMR => {
@@ -529,20 +612,6 @@ where
                         continue 'merge_level;
                     }
                     _ => unreachable!(),
-                }
-
-                if let Some(next) = b {
-                    if (frontier & L != 0) {
-                        lhs_idx = lhs_mask.index_of(next);
-                    }
-                    if (frontier & M != 0) {
-                        mid_idx = mid_mask.index_of(next);
-                    }
-                    if (frontier & R != 0) {
-                        rhs_idx = rhs_mask.index_of(next);
-                    }
-                } else {
-                    break 'merge_level;
                 }
             } else {
                 break 'merge_level;
@@ -758,13 +827,22 @@ mod tests {
     };
 
     type Paths = &'static [(&'static [u8], u64)];
-    type Test = (Paths, Paths);
+    type BinaryTest = (Paths, Paths);
+    type TernaryTest = (Paths, Paths, Paths);
 
-    fn mk_test(test: &Test) -> (PathMap<u64>, PathMap<u64>) {
+    fn mk_binary_test(test: &BinaryTest) -> (PathMap<u64>, PathMap<u64>) {
         (PathMap::from_iter(test.0), PathMap::from_iter(test.1))
     }
 
-    fn check<
+    fn mk_ternary_test(test: &TernaryTest) -> (PathMap<u64>, PathMap<u64>, PathMap<u64>) {
+        (
+            PathMap::from_iter(test.0),
+            PathMap::from_iter(test.1),
+            PathMap::from_iter(test.2),
+        )
+    }
+
+    fn check2<
         'x,
         T: IntoIterator<Item = &'x (&'x [u8], u64)>,
         F: for<'a> FnOnce(
@@ -773,11 +851,11 @@ mod tests {
             &mut WriteZipperUntracked<'a, 'x, u64>,
         ),
     >(
-        test: &Test,
+        test: &BinaryTest,
         expected: T,
         op: F,
     ) {
-        let (left, right) = mk_test(test);
+        let (left, right) = mk_binary_test(test);
 
         let mut result = PathMap::new();
 
@@ -787,6 +865,41 @@ mod tests {
 
         op(&mut lhs, &mut rhs, &mut out);
 
+        assert_trie(expected, result);
+    }
+
+    fn check3<
+        'x,
+        T: IntoIterator<Item = &'x (&'x [u8], u64)>,
+        F: for<'a> FnOnce(
+            &mut ReadZipperUntracked<'a, 'x, u64>,
+            &mut ReadZipperUntracked<'a, 'x, u64>,
+            &mut ReadZipperUntracked<'a, 'x, u64>,
+            &mut WriteZipperUntracked<'a, 'x, u64>,
+        ),
+    >(
+        test: &TernaryTest,
+        expected: T,
+        op: F,
+    ) {
+        let (left, middle, right) = mk_ternary_test(test);
+
+        let mut result = PathMap::new();
+
+        let mut lhs = left.read_zipper();
+        let mut mid = middle.read_zipper();
+        let mut rhs = right.read_zipper();
+        let mut out = result.write_zipper();
+
+        op(&mut lhs, &mut mid, &mut rhs, &mut out);
+
+        assert_trie(expected, result);
+    }
+
+    fn assert_trie<'a, T: IntoIterator<Item = &'a (&'a [u8], u64)>>(
+        expected: T,
+        result: PathMap<u64>,
+    ) {
         let mut result_copy = result.clone();
 
         for (expected_path, expected_val) in expected {
@@ -810,7 +923,7 @@ mod tests {
         );
     }
 
-    const DISJOINT_PATHS: Test = (
+    const DISJOINT_PATHS: BinaryTest = (
         &[
             (&[0x00], 0),
             (&[0x00, 0x00], 1),
@@ -825,17 +938,50 @@ mod tests {
         ],
     );
 
-    const PATHS_WITH_SHARED_PREFIX: Test = (
+    const DISJOINT_PATHS_3: TernaryTest = (
+        &[
+            (&[0x00], 0),
+            (&[0x00, 0x00], 1),
+            (&[0x00, 0x00, 0x00], 2),
+            (&[0x00, 0x00, 0x00, 0x00], 3),
+        ],
+        &[
+            (&[0xF0], 0),
+            (&[0xF0, 0x00], 1),
+            (&[0xF0, 0x00, 0x00], 2),
+            (&[0xF0, 0x00, 0x00, 0x00], 3),
+        ],
+        &[
+            (&[0xFF], 0),
+            (&[0xFF, 0x00], 1),
+            (&[0xFF, 0x00, 0x00], 2),
+            (&[0xFF, 0x00, 0x00, 0x00], 3),
+        ],
+    );
+
+    const PATHS_WITH_SHARED_PREFIX: BinaryTest = (
         &[(b"aaaaa0", 0), (b"bbbbbbbb0", 1)],
         &[(b"aaaaa1", 0), (b"bbbbb1", 1), (b"bbbbbbbb1", 2)],
     );
 
-    const INTERLEAVING_PATHS: Test = (
+    const PATHS_WITH_SHARED_PREFIX_3: TernaryTest = (
+        &[(b"aaaaa0", 0), (b"bbbbbbbb0", 1)],
+        &[(b"aaaaa1", 0), (b"bbbbb1", 1), (b"bbbbbbbb1", 2)],
+        &[(b"aaaaa2", 0), (b"bbbbb2", 1), (b"bbbbbbbb2", 2)],
+    );
+
+    const INTERLEAVING_PATHS: BinaryTest = (
         &[(&[0], 0), (&[2], 1), (&[4], 2), (&[6], 3)],
         &[(&[1], 0), (&[3], 1), (&[5], 2), (&[7], 3)],
     );
 
-    const ONE_SIDED_PATHS: Test = (
+    const INTERLEAVING_PATHS_3: TernaryTest = (
+        &[(&[0], 0), (&[3], 1), (&[6], 2), (&[9], 3)],
+        &[(&[1], 0), (&[4], 1), (&[7], 2), (&[10], 3)],
+        &[(&[2], 0), (&[5], 1), (&[8], 2), (&[11], 3)],
+    );
+
+    const ONE_SIDED_PATHS: BinaryTest = (
         &[
             (&[0x00], 0),
             (&[0x00, 0x01], 1),
@@ -855,7 +1001,28 @@ mod tests {
         ],
     );
 
-    const ALMOST_IDENTICAL_PATHS: Test = (
+    const ONE_SIDED_PATHS_3: TernaryTest = (
+        &[
+            (&[0x00], 0),
+            (&[0x00, 0x01], 1),
+            (&[0x00, 0x01, 0x02], 2),
+            (&[0x00, 0x01, 0x02, 0x03], 3),
+            (&[0x01], 4),
+            (&[0x01, 0x02], 5),
+            (&[0x01, 0x02, 0x03], 6),
+            (&[0x01, 0x02, 0x03, 0x04], 7),
+            (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
+            (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
+        ],
+        &[
+            (&[0x00], 0),
+            (&[0x00, 0x01, 0x02, 0x03], 1),
+            (&[0x01, 0x02, 0x03, 0x04, 0x05], 2),
+        ],
+        &[(&[0x00], 0), (&[0x00, 0x01, 0x02], 1)],
+    );
+
+    const ALMOST_IDENTICAL_PATHS: BinaryTest = (
         &[
             (b"abcdefg", 0),
             (b"hijklmnop", 1),
@@ -879,11 +1046,48 @@ mod tests {
         ],
     );
 
-    const LHS_EMPTY: Test = (&[], &[(&[1], 0), (&[2], 1)]);
+    const ALMOST_IDENTICAL_PATHS_3: TernaryTest = (
+        &[
+            (b"abcdefg", 0),
+            (b"hijklmnop", 1),
+            (b"qrstuwvxyz", 2),
+            (b"0", 3),
+            (b"1", 4),
+            (b"2", 5),
+            (b"3", 6),
+            (b"4", 7),
+            (b"5", 8),
+            (b"6789", 9),
+        ],
+        &[
+            (b"abcdefg", 0),
+            (b"qrstuwvxyz", 2),
+            (b"0", 3),
+            (b"1", 4),
+            (b"4", 7),
+            (b"5", 8),
+            (b"6789", 9),
+        ],
+        &[
+            (b"abcdefg", 0),
+            (b"hijklmnop", 1),
+            (b"1", 4),
+            (b"2", 5),
+            (b"3", 6),
+            (b"4", 7),
+            (b"5", 8),
+        ],
+    );
 
-    const RHS_EMPTY: Test = (&[(&[1], 0), (&[2], 1)], &[]);
+    const LHS_EMPTY: BinaryTest = (&[], &[(&[1], 0), (&[2], 1)]);
+    const LHS_EMPTY_3: TernaryTest = (&[], &[(&[1], 0), (&[2], 1)], &[(&[3], 0), (&[4], 1)]);
 
-    const PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN: Test = (
+    const RHS_EMPTY: BinaryTest = (&[(&[1], 0), (&[2], 1)], &[]);
+    const RHS_EMPTY_3: TernaryTest = (&[(&[1], 0), (&[2], 1)], &[(&[3], 0), (&[4], 1)], &[]);
+
+    const MID_EMPTY: TernaryTest = (&[(&[1], 0), (&[2], 1)], &[], &[(&[3], 0), (&[4], 1)]);
+
+    const PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN: BinaryTest = (
         &[
             (&[1, 2, 3], 0),
             (&[1, 2, 3, 4], 1),
@@ -896,7 +1100,25 @@ mod tests {
         ],
     );
 
-    const ZIGZAG_PATHS: Test = (
+    const PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3: TernaryTest = (
+        &[
+            (&[1, 2, 3], 0),
+            (&[1, 2, 3, 4], 1),
+            (&[1, 2, 3, 10, 11, 12], 2),
+        ],
+        &[
+            (&[1, 2, 3], 10),
+            (&[1, 2, 3, 5], 11),
+            (&[1, 2, 3, 10, 11, 0], 12),
+        ],
+        &[
+            (&[1, 2, 3], 20),
+            (&[1, 2, 3, 6], 21),
+            (&[1, 2, 3, 10, 11, 1], 22),
+        ],
+    );
+
+    const ZIGZAG_PATHS: BinaryTest = (
         &[
             (&[1, 1], 0),
             (&[2], 1),
@@ -916,16 +1138,50 @@ mod tests {
         ],
     );
 
-    const PATHS_WITH_ROOT_VALS_AND_CHILDREN: Test =
+    const ZIGZAG_PATHS_3: TernaryTest = (
+        &[
+            (&[1, 1], 0),
+            (&[2], 1),
+            (&[2, 1], 2),
+            (&[3], 3),
+            (&[3, 2, 1], 4),
+            (&[4], 4),
+            (&[4, 3, 2, 1], 5),
+        ],
+        &[
+            (&[1], 0),
+            (&[1, 2], 1),
+            (&[2, 1], 2),
+            (&[3], 3),
+            (&[3, 4], 4),
+            (&[4, 3], 5),
+        ],
+        &[
+            (&[1], 0),
+            (&[2], 1),
+            (&[2, 1], 2),
+            (&[3, 2, 1, 0], 3),
+            (&[4, 3, 2, 1, 0], 4),
+            (&[4, 3, 2, 1], 5),
+        ],
+    );
+
+    const PATHS_WITH_ROOT_VALS_AND_CHILDREN: BinaryTest =
         (&[(&[], 1), (&[1], 10)], &[(&[], 2), (&[1], 20)]);
+
+    const PATHS_WITH_ROOT_VALS_AND_CHILDREN_3: TernaryTest = (
+        &[(&[], 1), (&[1], 10)],
+        &[(&[], 2), (&[1], 20)],
+        &[(&[], 3), (&[1], 30)],
+    );
 
     mod join {
         use super::*;
-        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_join};
+        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_join, zipper_join3};
 
         #[test]
         fn test_disjoint() {
-            check(
+            check2(
                 &DISJOINT_PATHS,
                 &[DISJOINT_PATHS.0, DISJOINT_PATHS.1].concat(),
                 |lhs, rhs, out| lhs.join(rhs, out),
@@ -933,8 +1189,17 @@ mod tests {
         }
 
         #[test]
+        fn test_disjoint3() {
+            check3(
+                &DISJOINT_PATHS_3,
+                &[DISJOINT_PATHS_3.0, DISJOINT_PATHS_3.1, DISJOINT_PATHS_3.2].concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_deep_shared_prefix_then_split() {
-            check(
+            check2(
                 &PATHS_WITH_SHARED_PREFIX,
                 &[PATHS_WITH_SHARED_PREFIX.0, PATHS_WITH_SHARED_PREFIX.1].concat(),
                 |lhs, rhs, out| lhs.join(rhs, out),
@@ -942,8 +1207,22 @@ mod tests {
         }
 
         #[test]
+        fn test_deep_shared_prefix_then_split3() {
+            check3(
+                &PATHS_WITH_SHARED_PREFIX_3,
+                &[
+                    PATHS_WITH_SHARED_PREFIX_3.0,
+                    PATHS_WITH_SHARED_PREFIX_3.1,
+                    PATHS_WITH_SHARED_PREFIX_3.2,
+                ]
+                .concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_interleaving_paths() {
-            check(
+            check2(
                 &INTERLEAVING_PATHS,
                 &[INTERLEAVING_PATHS.0, INTERLEAVING_PATHS.1].concat(),
                 |lhs, rhs, out| lhs.join(rhs, out),
@@ -951,15 +1230,38 @@ mod tests {
         }
 
         #[test]
+        fn test_interleaving_paths3() {
+            check3(
+                &INTERLEAVING_PATHS_3,
+                &[
+                    INTERLEAVING_PATHS_3.0,
+                    INTERLEAVING_PATHS_3.1,
+                    INTERLEAVING_PATHS_3.2,
+                ]
+                .concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_one_side_empty_at_many_levels() {
-            check(&ONE_SIDED_PATHS, ONE_SIDED_PATHS.0, |lhs, rhs, out| {
+            check2(&ONE_SIDED_PATHS, ONE_SIDED_PATHS.0, |lhs, rhs, out| {
                 lhs.join(rhs, out)
             });
         }
 
         #[test]
+        fn test_one_side_empty_at_many_levels3() {
+            check3(
+                &ONE_SIDED_PATHS_3,
+                ONE_SIDED_PATHS_3.0,
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_almost_identical_paths() {
-            check(
+            check2(
                 &ALMOST_IDENTICAL_PATHS,
                 ALMOST_IDENTICAL_PATHS.0,
                 |lhs, rhs, out| lhs.join(rhs, out),
@@ -967,9 +1269,37 @@ mod tests {
         }
 
         #[test]
+        fn test_almost_identical_paths3() {
+            check3(
+                &ALMOST_IDENTICAL_PATHS_3,
+                ALMOST_IDENTICAL_PATHS_3.0,
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_one_side_empty() {
-            check(&LHS_EMPTY, LHS_EMPTY.1, |lhs, rhs, out| lhs.join(rhs, out));
-            check(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| lhs.join(rhs, out));
+            check2(&LHS_EMPTY, LHS_EMPTY.1, |lhs, rhs, out| lhs.join(rhs, out));
+            check2(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| lhs.join(rhs, out));
+        }
+
+        #[test]
+        fn test_one_side_empty3() {
+            check3(
+                &LHS_EMPTY_3,
+                &[LHS_EMPTY_3.1, LHS_EMPTY_3.2].concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+            check3(
+                &MID_EMPTY,
+                &[MID_EMPTY.0, MID_EMPTY.2].concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+            check3(
+                &RHS_EMPTY_3,
+                &[RHS_EMPTY_3.0, RHS_EMPTY_3.1].concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
         }
 
         #[test]
@@ -981,7 +1311,7 @@ mod tests {
                 (&[1, 2, 3, 10, 11, 0], 12),
                 (&[1, 2, 3, 10, 11, 12], 2),
             ];
-            check(
+            check2(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 expected,
                 |lhs, rhs, out| lhs.join(rhs, out),
@@ -989,8 +1319,26 @@ mod tests {
         }
 
         #[test]
+        fn test_exact_overlap_divergent_subtries3() {
+            let expected: Paths = &[
+                (&[1, 2, 3], 0),
+                (&[1, 2, 3, 4], 1),
+                (&[1, 2, 3, 5], 11),
+                (&[1, 2, 3, 6], 21),
+                (&[1, 2, 3, 10, 11, 0], 12),
+                (&[1, 2, 3, 10, 11, 1], 22),
+                (&[1, 2, 3, 10, 11, 12], 2),
+            ];
+            check3(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
+                expected,
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_zigzag() {
-            check(
+            check2(
                 &ZIGZAG_PATHS,
                 &[ZIGZAG_PATHS.0, ZIGZAG_PATHS.1].concat(),
                 |lhs, rhs, out| lhs.join(rhs, out),
@@ -998,37 +1346,76 @@ mod tests {
         }
 
         #[test]
+        fn test_zigzag3() {
+            check3(
+                &ZIGZAG_PATHS_3,
+                &[ZIGZAG_PATHS.0, ZIGZAG_PATHS.1, ZIGZAG_PATHS_3.2].concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_root_values() {
-            check(
+            check2(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
                 |lhs, rhs, out| lhs.join(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_root_values3() {
+            check3(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN_3,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN_3.0,
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
             );
         }
     }
 
     mod meet {
         use super::*;
-        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_meet};
+        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_meet, zipper_meet3};
 
         #[test]
         fn test_disjoint() {
-            check(&DISJOINT_PATHS, [], |lhs, rhs, out| {
+            check2(&DISJOINT_PATHS, [], |lhs, rhs, out| {
                 lhs.meet(rhs, out);
+            });
+        }
+
+        #[test]
+        fn test_disjoint3() {
+            check3(&DISJOINT_PATHS_3, [], |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out);
             });
         }
 
         #[test]
         fn test_deep_shared_prefix_then_split() {
-            check(&PATHS_WITH_SHARED_PREFIX, [], |lhs, rhs, out| {
+            check2(&PATHS_WITH_SHARED_PREFIX, [], |lhs, rhs, out| {
                 lhs.meet(rhs, out);
             });
         }
 
         #[test]
+        fn test_deep_shared_prefix_then_split3() {
+            check3(&PATHS_WITH_SHARED_PREFIX_3, [], |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
         fn test_interleaving_paths() {
-            check(&INTERLEAVING_PATHS, [], |lhs, rhs, out| {
+            check2(&INTERLEAVING_PATHS, [], |lhs, rhs, out| {
                 lhs.meet(rhs, out);
+            });
+        }
+
+        #[test]
+        fn test_interleaving_paths3() {
+            check3(&INTERLEAVING_PATHS_3, [], |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out);
             });
         }
 
@@ -1039,14 +1426,22 @@ mod tests {
                 (&[0x00, 0x01, 0x02, 0x03], 3),
                 (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
             ];
-            check(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
+            check2(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
                 lhs.meet(rhs, out);
             });
         }
 
         #[test]
+        fn test_one_side_empty_at_many_levels3() {
+            let expected: Paths = &[(&[0x00], 0)];
+            check3(&ONE_SIDED_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
         fn test_almost_identical_paths() {
-            check(
+            check2(
                 &ALMOST_IDENTICAL_PATHS,
                 ALMOST_IDENTICAL_PATHS.1,
                 |lhs, rhs, out| lhs.meet(rhs, out),
@@ -1054,15 +1449,36 @@ mod tests {
         }
 
         #[test]
+        fn test_almost_identical_paths3() {
+            let expected: Paths = &[(b"abcdefg", 0), (b"1", 4), (b"4", 7), (b"5", 8)];
+            check3(&ALMOST_IDENTICAL_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
         fn test_one_side_empty() {
-            check(&LHS_EMPTY, [], |lhs, rhs, out| lhs.meet(rhs, out));
-            check(&RHS_EMPTY, [], |lhs, rhs, out| lhs.meet(rhs, out));
+            check2(&LHS_EMPTY, [], |lhs, rhs, out| lhs.meet(rhs, out));
+            check2(&RHS_EMPTY, [], |lhs, rhs, out| lhs.meet(rhs, out));
+        }
+
+        #[test]
+        fn test_one_side_empty3() {
+            check3(&LHS_EMPTY_3, [], |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out)
+            });
+            check3(&MID_EMPTY, [], |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out)
+            });
+            check3(&RHS_EMPTY_3, [], |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out)
+            });
         }
 
         #[test]
         fn test_exact_overlap_divergent_subtries() {
             let expected: Paths = &[(&[1, 2, 3], 0)];
-            check(
+            check2(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 expected,
                 |lhs, rhs, out| lhs.meet(rhs, out),
@@ -1070,37 +1486,77 @@ mod tests {
         }
 
         #[test]
+        fn test_exact_overlap_divergent_subtries3() {
+            let expected: Paths = &[(&[1, 2, 3], 0)];
+            check3(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
+                expected,
+                |lhs, mid, rhs, out| zipper_meet3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_zigzag() {
             let expected: Paths = &[(&[2, 1], 2), (&[3], 3)];
-            check(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
+            check2(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
                 lhs.meet(rhs, out);
             });
         }
 
         #[test]
+        fn test_zigzag3() {
+            let expected: Paths = &[(&[2, 1], 2)];
+            check3(&ZIGZAG_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out)
+            });
+        }
+
+        #[test]
         fn test_root_values() {
-            check(
+            check2(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
                 |lhs, rhs, out| lhs.meet(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_root_values3() {
+            check3(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN_3,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
+                |lhs, mid, rhs, out| zipper_meet3(lhs, mid, rhs, out),
             );
         }
     }
 
     mod subtract {
         use super::*;
-        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_subtract};
+        use crate::experimental::zipper_algebra::{
+            ZipperAlgebraExt, zipper_subtract, zipper_subtract3,
+        };
 
         #[test]
         fn test_disjoint() {
-            check(&DISJOINT_PATHS, DISJOINT_PATHS.0, |lhs, rhs, out| {
+            check2(&DISJOINT_PATHS, DISJOINT_PATHS.0, |lhs, rhs, out| {
                 lhs.subtract(rhs, out);
             });
         }
 
         #[test]
+        fn test_disjoint3() {
+            check3(
+                &DISJOINT_PATHS_3,
+                DISJOINT_PATHS_3.0,
+                |lhs, mid, rhs, out| {
+                    zipper_subtract3(lhs, mid, rhs, out);
+                },
+            );
+        }
+
+        #[test]
         fn test_deep_shared_prefix_then_split() {
-            check(
+            check2(
                 &PATHS_WITH_SHARED_PREFIX,
                 PATHS_WITH_SHARED_PREFIX.0,
                 |lhs, rhs, out| lhs.subtract(rhs, out),
@@ -1108,11 +1564,33 @@ mod tests {
         }
 
         #[test]
+        fn test_deep_shared_prefix_then_split3() {
+            check3(
+                &PATHS_WITH_SHARED_PREFIX_3,
+                PATHS_WITH_SHARED_PREFIX_3.0,
+                |lhs, mid, rhs, out| {
+                    zipper_subtract3(lhs, mid, rhs, out);
+                },
+            );
+        }
+
+        #[test]
         fn test_interleaving_paths() {
-            check(
+            check2(
                 &INTERLEAVING_PATHS,
                 INTERLEAVING_PATHS.0,
                 |lhs, rhs, out| lhs.subtract(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_interleaving_paths3() {
+            check3(
+                &INTERLEAVING_PATHS_3,
+                INTERLEAVING_PATHS_3.0,
+                |lhs, mid, rhs, out| {
+                    zipper_subtract3(lhs, mid, rhs, out);
+                },
             );
         }
 
@@ -1129,33 +1607,82 @@ mod tests {
                 (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
                 (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
             ];
-            check(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
+            check2(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
                 lhs.subtract(rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_one_side_empty_at_many_levels3() {
+            let expected: Paths = &[
+                (&[0x00, 0x01], 1),
+                (&[0x00, 0x01, 0x02], 2),
+                (&[0x00, 0x01, 0x02, 0x03], 3),
+                (&[0x01], 4),
+                (&[0x01, 0x02], 5),
+                (&[0x01, 0x02, 0x03], 6),
+                (&[0x01, 0x02, 0x03, 0x04], 7),
+                (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
+                (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
+            ];
+            check3(&ONE_SIDED_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_subtract3(lhs, mid, rhs, out);
             });
         }
 
         #[test]
         fn test_almost_identical_paths() {
             let expected: Paths = &[(b"hijklmnop", 1), (b"2", 5), (b"3", 6)];
-            check(&ALMOST_IDENTICAL_PATHS, expected, |lhs, rhs, out| {
+            check2(&ALMOST_IDENTICAL_PATHS, expected, |lhs, rhs, out| {
                 lhs.subtract(rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_almost_identical_paths3() {
+            check3(&ALMOST_IDENTICAL_PATHS_3, [], |lhs, mid, rhs, out| {
+                zipper_subtract3(lhs, mid, rhs, out);
             });
         }
 
         #[test]
         fn test_one_side_empty() {
-            check(&LHS_EMPTY, [], |lhs, rhs, out| lhs.subtract(rhs, out));
-            check(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| {
+            check2(&LHS_EMPTY, [], |lhs, rhs, out| lhs.subtract(rhs, out));
+            check2(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| {
                 lhs.subtract(rhs, out)
             });
         }
 
         #[test]
+        fn test_one_side_empty3() {
+            check3(&LHS_EMPTY_3, [], |lhs, mid, rhs, out| {
+                zipper_subtract3(lhs, mid, rhs, out);
+            });
+            check3(&MID_EMPTY, MID_EMPTY.0, |lhs, mid, rhs, out| {
+                zipper_subtract3(lhs, mid, rhs, out);
+            });
+            check3(&RHS_EMPTY_3, RHS_EMPTY_3.0, |lhs, mid, rhs, out| {
+                zipper_subtract3(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
         fn test_exact_overlap_divergent_subtries() {
-            check(
+            check2(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN.0,
                 |lhs, rhs, out| lhs.subtract(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_exact_overlap_divergent_subtries3() {
+            check3(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
+                PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3.0,
+                |lhs, mid, rhs, out| {
+                    zipper_subtract3(lhs, mid, rhs, out);
+                },
             );
         }
 
@@ -1168,17 +1695,36 @@ mod tests {
                 (&[4], 4),
                 (&[4, 3, 2, 1], 5),
             ];
-            check(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
+            check2(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
                 lhs.subtract(rhs, out)
             });
         }
 
         #[test]
+        fn test_zigzag3() {
+            let expected: Paths = &[(&[1, 1], 0), (&[3, 2, 1], 4), (&[4], 4)];
+            check3(&ZIGZAG_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_subtract3(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
         fn test_root_values() {
-            check(
+            check2(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
                 |lhs, rhs, out| lhs.subtract(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_root_values3() {
+            check3(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN_3,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN_3.0,
+                |lhs, mid, rhs, out| {
+                    zipper_subtract3(lhs, mid, rhs, out);
+                },
             );
         }
     }
