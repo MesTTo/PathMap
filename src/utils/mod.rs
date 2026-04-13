@@ -1,4 +1,6 @@
 
+use std::ops::{RangeBounds, Bound};
+
 use crate::ring::*;
 
 pub mod ints;
@@ -43,6 +45,84 @@ impl ByteMask {
     pub const fn new() -> Self {
         Self::EMPTY
     }
+
+    /// Constructs a `ByteMask` with all bits in the given range set.
+    ///
+    /// The range is interpreted over the interval `[0, 256)` and supports all
+    /// standard Rust range syntaxes via [`RangeBounds<u8>`], including:
+    ///
+    /// - `a..b` (half-open)
+    /// - `a..=b` (inclusive)
+    /// - `..b`, `a..`, and `..` (unbounded)
+    ///
+    /// # Semantics
+    ///
+    /// The resulting mask has all bits set for indices within the specified range,
+    /// and all other bits cleared. Internally, the 256-bit mask is represented as
+    /// four `u64` words in little-endian order (i.e., lower indices correspond to
+    /// lower words and lower bit positions).
+    ///
+    /// If the normalized range is empty (i.e., `start >= end`), the empty mask
+    /// (`ByteMask::EMPTY`) is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let m = ByteMask::from_range(10..70);
+    /// // sets bits 10 through 69
+    ///
+    /// let full = ByteMask::from_range(..);
+    /// // sets all 256 bits
+    ///
+    /// let single = ByteMask::from_range(42..=42);
+    /// // sets only bit 42
+    /// ```
+    #[inline]
+    pub fn from_range<R: RangeBounds<u8>>(range: R) -> Self {
+        let start = match range.start_bound() {
+            Bound::Included(&s) => s as usize,
+            Bound::Excluded(&s) => s as usize + 1,
+            Bound::Unbounded => 0,
+        };
+
+        let end = match range.end_bound() {
+            Bound::Included(&e) => e as usize + 1,
+            Bound::Excluded(&e) => e as usize,
+            Bound::Unbounded => 256,
+        };
+
+        if start >= end {
+            return ByteMask::EMPTY
+        }
+
+        let mut mask = [0u64; 4];
+        let end_idx = end - 1;
+
+        let start_word = start >> 6;
+        let end_word = end_idx >> 6;
+
+        let start_bit = start & 0x3F;
+        let end_bit = end_idx & 0x3F;
+
+        if start_word == end_word {
+            let len = end_bit - start_bit + 1;
+            mask[start_word] = (u64::MAX >> (64 - len)) << start_bit;
+        } else {
+            // first partial word
+            mask[start_word] = (!0u64) << start_bit;
+
+            // fully covered words
+            for w in mask.iter_mut().take(end_word).skip(start_word + 1) {
+                *w = !0u64;
+            }
+
+            // last partial word
+            mask[end_word] = u64::MAX >> (63 - end_bit);
+        }
+        
+        ByteMask(mask)
+    }
+
     /// Unwraps the `ByteMask` type to yield the inner array
     #[inline]
     pub fn into_inner(self) -> [u64; 4] {
@@ -55,6 +135,7 @@ impl ByteMask {
     }
 
     /// Returns how many set bits precede the requested bit
+    #[inline]
     pub fn index_of(&self, byte: u8) -> u8 {
         if byte == 0 {
             return 0;
@@ -670,3 +751,29 @@ fn next_bit_test2() {
     assert_eq!(None, test_mask.next_bit(117));
 }
 
+#[test]
+fn from_range_test() {
+    assert_eq!(ByteMask::from_range(10..70), ByteMask::from([
+        0b1111111111111111111111111111111111111111111111111111110000000000u64,
+        0b0000000000000000000000000000000000000000000000000000000000111111u64,
+        0b0000000000000000000000000000000000000000000000000000000000000000u64,
+        0b0000000000000000000000000000000000000000000000000000000000000000u64,
+    ]));
+   assert_eq!(ByteMask::from_range(..), ByteMask::FULL);
+   assert_eq!(ByteMask::from_range(..=127), ByteMask::from([
+        0b1111111111111111111111111111111111111111111111111111111111111111u64,
+        0b1111111111111111111111111111111111111111111111111111111111111111u64,
+        0b0000000000000000000000000000000000000000000000000000000000000000u64,
+        0b0000000000000000000000000000000000000000000000000000000000000000u64,
+    ]));
+    assert_eq!(ByteMask::from_range(10..), ByteMask::from([
+        0b1111111111111111111111111111111111111111111111111111110000000000u64,
+        0b1111111111111111111111111111111111111111111111111111111111111111u64,
+        0b1111111111111111111111111111111111111111111111111111111111111111u64,
+        0b1111111111111111111111111111111111111111111111111111111111111111u64,
+    ]));
+    assert_eq!(ByteMask::from_range(0..0), ByteMask::EMPTY);
+    assert_eq!(ByteMask::from_range(0..=0), ByteMask::from(0));
+    assert_eq!(ByteMask::from_range(255..255), ByteMask::EMPTY);
+    assert_eq!(ByteMask::from_range(255..=255), ByteMask::from(255));
+}

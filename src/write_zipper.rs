@@ -113,6 +113,21 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
         }
     }
 
+    /// Grafts each child of `read_zipper` masked by `child_mask`
+    fn graft_children<Z: ZipperInfallibleSubtries<V, A> + ZipperMoving>(&mut self, read_zipper: &mut Z, child_mask: ByteMask) {
+        let rz_mask = read_zipper.child_mask();
+        let actual_mask = child_mask & rz_mask;
+        for child_byte in actual_mask.iter() {
+            self.descend_to_byte(child_byte);
+            read_zipper.descend_to_byte(child_byte);
+
+            self.graft(read_zipper);
+
+            read_zipper.ascend_byte();
+            self.ascend_byte();
+        }
+    }
+
     /// Joins (union of) the subtrie below the focus of `read_zipper` into the subtrie downstream from the
     /// focus of `self`
     ///

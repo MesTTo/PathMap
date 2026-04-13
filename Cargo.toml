@@ -53,6 +53,7 @@ slim_dispatch = [] # Experiment. Enables the 64-bit pointers to back the TaggedN
 act_counters = ["arena_compact"] # LP: Question: Why isn't this code enabled by just counters + arena_compact???
 viz = []
 serialization = ["dep:libz-ng-sys"]
+zipper_alg = [] # Enables experimental implementations of Zipper-based algebraic operations
 
 [target.'cfg(miri)'.dependencies]
 fast-slice-utils = { version = "0.1.2", features = ["miri_safe"] }
