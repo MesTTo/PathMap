@@ -448,6 +448,19 @@ where
     }
 }
 
+#[inline(always)]
+fn cmp_swap(a: &mut Option<u8>, b: &mut Option<u8>) {
+    if let Some(x) = *a {
+        if let Some(y) = *b {
+            if y < x {
+                std::mem::swap(a, b);
+            }
+        }
+    } else {
+        std::mem::swap(a, b);
+    }
+}
+
 fn zipper_merge3<P, V, ZL, ZM, ZR, Out, A>(lhs: &mut ZL, mid: &mut ZM, rhs: &mut ZR, out: &mut Out)
 where
     V: Clone + Send + Sync,
@@ -509,17 +522,6 @@ where
             let mut b = m;
             let mut c = r;
 
-            fn cmp_swap(a: &mut Option<u8>, b: &mut Option<u8>) {
-                if let Some(x) = *a {
-                    if let Some(y) = *b {
-                        if y < x {
-                            std::mem::swap(a, b);
-                        }
-                    }
-                } else {
-                    std::mem::swap(a, b);
-                }
-            }
             cmp_swap(&mut a, &mut b);
             cmp_swap(&mut a, &mut c);
 
@@ -535,36 +537,37 @@ where
                     frontier |= R;
                 }
 
-                cmp_swap(&mut b, &mut c);
-
                 match frontier {
                     // single → graft
-                    L if b.is_some() => {
-                        let next = b.unwrap();
-                        P::on_single(lhs, L as u64, ByteMask::from_range(min..next), out);
-                        lhs_idx = lhs_mask.index_of(next);
-                    }
                     L => {
-                        P::on_single(lhs, L as u64, ByteMask::from_range(min..), out);
-                        break 'merge_level;
-                    }
-                    M if b.is_some() => {
-                        let next = b.unwrap();
-                        P::on_single(mid, M as u64, ByteMask::from_range(min..next), out);
-                        mid_idx = mid_mask.index_of(next);
+                        cmp_swap(&mut b, &mut c);
+                        if let Some(next) = b {
+                            P::on_single(lhs, L as u64, ByteMask::from_range(min..next), out);
+                            lhs_idx = lhs_mask.index_of(next)
+                        } else {
+                            P::on_single(lhs, L as u64, ByteMask::from_range(min..), out);
+                            break 'merge_level;
+                        }
                     }
                     M => {
-                        P::on_single(mid, M as u64, ByteMask::from_range(min..), out);
-                        break 'merge_level;
-                    }
-                    R if b.is_some() => {
-                        let next = b.unwrap();
-                        P::on_single(rhs, R as u64, ByteMask::from_range(min..next), out);
-                        rhs_idx = rhs_mask.index_of(next);
+                        cmp_swap(&mut b, &mut c);
+                        if let Some(next) = b {
+                            P::on_single(mid, M as u64, ByteMask::from_range(min..next), out);
+                            mid_idx = mid_mask.index_of(next);
+                        } else {
+                            P::on_single(mid, M as u64, ByteMask::from_range(min..), out);
+                            break 'merge_level;
+                        }
                     }
                     R => {
-                        P::on_single(rhs, R as u64, ByteMask::from_range(min..), out);
-                        break 'merge_level;
+                        cmp_swap(&mut b, &mut c);
+                        if let Some(next) = b {
+                            P::on_single(rhs, R as u64, ByteMask::from_range(min..next), out);
+                            rhs_idx = rhs_mask.index_of(next);
+                        } else {
+                            P::on_single(rhs, R as u64, ByteMask::from_range(min..), out);
+                            break 'merge_level;
+                        }
                     }
                     // two-way → descend 2
                     LM => {
