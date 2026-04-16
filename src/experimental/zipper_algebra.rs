@@ -347,6 +347,17 @@ trait ValuePolicy<V> {
         // (l op m) op r
         Self::combine(Self::combine(l, m).as_ref(), r)
     }
+    fn combine4(a: Option<&V>, b: Option<&V>, c: Option<&V>, d: Option<&V>) -> Option<V> {
+        // ((a op b) op c) op d
+        Self::combine(Self::combine(Self::combine(a, b).as_ref(), c).as_ref(), d)
+    }
+    fn combine_n<'a, I>(vals: I) -> Option<V>
+    where
+        I: Iterator<Item = Option<&'a V>>,
+        V: 'a,
+    {
+        vals.fold(None, |acc, v| Self::combine(acc.as_ref(), v))
+    }
 }
 
 fn zipper_merge<P, V, ZL, ZR, Out, A>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
@@ -645,6 +656,279 @@ where
     }
 }
 
+// semi-unrolled (bitmask-driven)
+// Beyond 4, the combinatorics start to creak, but k = 4 is a sweet spot:
+// - still manageable (16 frontier cases)
+// - still branch-predictable
+// - still worth it for hot paths
+fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
+    z0: &mut Z0,
+    z1: &mut Z1,
+    z2: &mut Z2,
+    z3: &mut Z3,
+    out: &mut Out,
+) where
+    V: Clone + Send + Sync,
+    P: MergePolicy<V> + ValuePolicy<V>,
+    A: Allocator,
+    Z0: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Z1: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Z2: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Z3: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    // merge root values before descending
+    if let Some(v) = P::combine4(z0.val(), z1.val(), z2.val(), z3.val()) {
+        out.set_val(v);
+    }
+
+    let mut k = 0;
+    // state (fully unrolled)
+    let mut m0 = z0.child_mask();
+    let mut m1 = z1.child_mask();
+    let mut m2 = z2.child_mask();
+    let mut m3 = z3.child_mask();
+
+    let mut i0 = 0;
+    let mut i1 = 0;
+    let mut i2 = 0;
+    let mut i3 = 0;
+
+    'ascend: loop {
+        'merge_level: loop {
+            // min selection
+            let mut b0 = m0.indexed_bit::<true>(i0 as usize);
+            let mut b1 = m1.indexed_bit::<true>(i1 as usize);
+            let mut b2 = m2.indexed_bit::<true>(i2 as usize);
+            let mut b3 = m3.indexed_bit::<true>(i3 as usize);
+
+            let mut a = b0;
+            let mut b = b1;
+            let mut c = b2;
+            let mut d = b3;
+
+            cmp_swap(&mut a, &mut b);
+            cmp_swap(&mut a, &mut c);
+            cmp_swap(&mut a, &mut d);
+
+            if let Some(min) = a {
+                let mut frontier = 0u8;
+                if b0 == a {
+                    frontier |= 0b0001;
+                }
+                if b1 == a {
+                    frontier |= 0b0010;
+                }
+                if b2 == a {
+                    frontier |= 0b0100;
+                }
+                if b3 == a {
+                    frontier |= 0b1000;
+                }
+
+                // full match
+                if frontier == 0b1111 {
+                    out.descend_to_byte(min);
+
+                    z0.descend_to_byte(min);
+                    z1.descend_to_byte(min);
+                    z2.descend_to_byte(min);
+                    z3.descend_to_byte(min);
+
+                    if let Some(v) = P::combine4(z0.val(), z1.val(), z2.val(), z3.val()) {
+                        out.set_val(v);
+                    }
+
+                    m0 = z0.child_mask();
+                    i0 = 0;
+                    m1 = z1.child_mask();
+                    i1 = 0;
+                    m2 = z2.child_mask();
+                    i2 = 0;
+                    m3 = z3.child_mask();
+                    i3 = 0;
+
+                    k += 1;
+                    continue 'merge_level;
+                }
+
+                let cnt = frontier.count_ones();
+                // singleton
+                if cnt == 1 {
+                    cmp_swap(&mut b, &mut c);
+                    cmp_swap(&mut b, &mut d);
+
+                    match frontier {
+                        0b0001 => {
+                            if let Some(next) = b {
+                                P::on_single(z0, 0b0001, ByteMask::from_range(min..next), out);
+                                i0 = m0.index_of(next);
+                            } else {
+                                P::on_single(z0, 0b0001, ByteMask::from_range(min..), out);
+                                break 'merge_level;
+                            }
+                        }
+                        0b0010 => {
+                            if let Some(next) = b {
+                                P::on_single(z1, 0b0010, ByteMask::from_range(min..next), out);
+                                i1 = m1.index_of(next);
+                            } else {
+                                P::on_single(z1, 0b0010, ByteMask::from_range(min..), out);
+                                break 'merge_level;
+                            }
+                        }
+                        0b0100 => {
+                            if let Some(next) = b {
+                                P::on_single(z2, 0b0100, ByteMask::from_range(min..next), out);
+                                i2 = m2.index_of(next);
+                            } else {
+                                P::on_single(z2, 0b0100, ByteMask::from_range(min..), out);
+                                break 'merge_level;
+                            }
+                        }
+                        0b1000 => {
+                            if let Some(next) = b {
+                                P::on_single(z3, 0b1000, ByteMask::from_range(min..next), out);
+                                i3 = m3.index_of(next);
+                            } else {
+                                P::on_single(z3, 0b1000, ByteMask::from_range(min..), out);
+                                break 'merge_level;
+                            }
+                        }
+                        _ => unreachable!(),
+                    };
+                } else {
+                    // partial overlap (2 or 3)
+
+                    // avoid 16 match arms and duplicated logic
+                    if P::descend_on_some_equal(frontier as u64) {
+                        out.descend_to_byte(min);
+
+                        if frontier & 0b0001 != 0 {
+                            z0.descend_to_byte(min);
+                        }
+                        if frontier & 0b0010 != 0 {
+                            z1.descend_to_byte(min);
+                        }
+                        if frontier & 0b0100 != 0 {
+                            z2.descend_to_byte(min);
+                        }
+                        if frontier & 0b1000 != 0 {
+                            z3.descend_to_byte(min);
+                        }
+
+                        // recurse on subset (still using 4-way function, but inactive ones won't match)
+                        if (cnt == 2) {
+                            let i = frontier.trailing_zeros();
+                            let j = (frontier & !(1 << i)).trailing_zeros();
+                            match (i, j) {
+                                (0, 1) => {
+                                    zipper_merge::<P, V, Z0, Z1, Out, A>(z0, z1, out);
+                                }
+                                (0, 2) => {
+                                    zipper_merge::<P, V, Z0, Z2, Out, A>(z0, z2, out);
+                                }
+                                (0, 3) => {
+                                    zipper_merge::<P, V, Z0, Z3, Out, A>(z0, z3, out);
+                                }
+                                (1, 2) => {
+                                    zipper_merge::<P, V, Z1, Z2, Out, A>(z1, z2, out);
+                                }
+                                (1, 3) => {
+                                    zipper_merge::<P, V, Z1, Z3, Out, A>(z1, z3, out);
+                                }
+                                (2, 3) => {
+                                    zipper_merge::<P, V, Z2, Z3, Out, A>(z2, z3, out);
+                                }
+                                _ => unreachable!(),
+                            }
+                        } else {
+                            // cnt == 3
+                            let mut bits = frontier;
+                            let i = bits.trailing_zeros();
+                            bits &= bits - 1; // trick: it removes the lowest bit set from a bitmask
+                            let j = bits.trailing_zeros();
+                            bits &= bits - 1;
+                            let k = bits.trailing_zeros();
+                            match (i, j, k) {
+                                (0, 1, 2) => {
+                                    zipper_merge3::<P, V, Z0, Z1, Z2, Out, A>(z0, z1, z2, out);
+                                }
+                                (0, 1, 3) => {
+                                    zipper_merge3::<P, V, Z0, Z1, Z3, Out, A>(z0, z1, z3, out);
+                                }
+                                (0, 2, 3) => {
+                                    zipper_merge3::<P, V, Z0, Z2, Z3, Out, A>(z0, z2, z3, out);
+                                }
+                                (1, 2, 3) => {
+                                    zipper_merge3::<P, V, Z1, Z2, Z3, Out, A>(z1, z2, z3, out);
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+
+                        if frontier & 0b0001 != 0 {
+                            z0.ascend_byte();
+                        }
+                        if frontier & 0b0010 != 0 {
+                            z1.ascend_byte();
+                        }
+                        if frontier & 0b0100 != 0 {
+                            z2.ascend_byte();
+                        }
+                        if frontier & 0b1000 != 0 {
+                            z3.ascend_byte();
+                        }
+
+                        out.ascend_byte();
+                    }
+                    // then advance
+                    if frontier & 0b0001 != 0 {
+                        i0 += 1;
+                    }
+                    if frontier & 0b0010 != 0 {
+                        i1 += 1;
+                    }
+                    if frontier & 0b0100 != 0 {
+                        i2 += 1;
+                    }
+                    if frontier & 0b1000 != 0 {
+                        i3 += 1;
+                    }
+                }
+            } else {
+                break 'merge_level;
+            }
+        }
+
+        // If we are at root and no deeper recursion pending, we're done
+        if k == 0 {
+            break 'ascend;
+        }
+
+        let byte_from = *z0.path().last().expect("non-empty path when k > 0");
+
+        z0.ascend_byte();
+        m0 = z0.child_mask();
+        i0 = m0.index_of(byte_from) + 1;
+
+        z1.ascend_byte();
+        m1 = z1.child_mask();
+        i1 = m1.index_of(byte_from) + 1;
+
+        z2.ascend_byte();
+        m2 = z2.child_mask();
+        i2 = m2.index_of(byte_from) + 1;
+
+        z3.ascend_byte();
+        m3 = z3.child_mask();
+        i3 = m3.index_of(byte_from) + 1;
+
+        out.ascend_byte();
+        k -= 1;
+    }
+}
+
 // ==================== JOIN ====================
 
 struct Join;
@@ -715,6 +999,27 @@ impl<V: Lattice + Clone> ValuePolicy<V> for Meet {
 
     fn combine3(l: Option<&V>, m: Option<&V>, r: Option<&V>) -> Option<V> {
         l.and_then(|x| m.and_then(|y| r.and_then(|z| meet_acc(meet_refs(x, y)?, z))))
+    }
+
+    fn combine4(a: Option<&V>, b: Option<&V>, c: Option<&V>, d: Option<&V>) -> Option<V> {
+        a.and_then(|w| {
+            b.and_then(|x| {
+                c.and_then(|y| d.and_then(|z| meet_acc(meet_acc(meet_refs(w, x)?, y)?, z)))
+            })
+        })
+    }
+
+    fn combine_n<'a, I>(vals: I) -> Option<V>
+    where
+        I: Iterator<Item = Option<&'a V>>,
+        V: 'a,
+    {
+        let mut it = vals;
+        let z = it.next()?.cloned()?;
+        it.try_fold(z, |acc, v| {
+            let rv = v?;
+            meet_acc(acc, rv)
+        })
     }
 }
 
@@ -807,6 +1112,29 @@ impl<V: DistributiveLattice + Clone> ValuePolicy<V> for Subtract {
                 // lhs-only → keep
                 Some(lv.clone())
             }
+        })
+    }
+
+    fn combine_n<'a, I>(vals: I) -> Option<V>
+    where
+        I: Iterator<Item = Option<&'a V>>,
+        V: 'a,
+    {
+        let mut it = vals;
+        let z = it.next()?.cloned()?;
+        it.try_fold(z, |acc, v| match v {
+            Some(rv) => match acc.psubtract(rv) {
+                AlgebraicResult::None => None,
+                AlgebraicResult::Identity(mask) => {
+                    if mask & SELF_IDENT != 0 {
+                        Some(acc)
+                    } else {
+                        None
+                    }
+                }
+                AlgebraicResult::Element(x) => Some(x),
+            },
+            None => Some(acc),
         })
     }
 }
