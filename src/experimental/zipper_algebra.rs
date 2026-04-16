@@ -710,51 +710,40 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Meet {
 
 impl<V: Lattice + Clone> ValuePolicy<V> for Meet {
     fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
-        l.and_then(|lv| {
-            r.and_then(|rv| match lv.pmeet(rv) {
-                AlgebraicResult::None => None,
-                AlgebraicResult::Identity(mask) => {
-                    if mask & SELF_IDENT != 0 {
-                        Some(lv.clone())
-                    } else {
-                        Some(rv.clone())
-                    }
-                }
-                AlgebraicResult::Element(v) => Some(v),
-            })
-        })
+        l.and_then(|lv| r.and_then(|rv| meet_refs(lv, rv)))
     }
 
     fn combine3(l: Option<&V>, m: Option<&V>, r: Option<&V>) -> Option<V> {
-        l.and_then(|x| {
-            m.and_then(|y| {
-                r.and_then(|z| {
-                    let xy = match x.pmeet(y) {
-                        AlgebraicResult::None => return None,
-                        AlgebraicResult::Identity(mask) => {
-                            if mask & SELF_IDENT != 0 {
-                                x.clone()
-                            } else {
-                                y.clone()
-                            }
-                        }
-                        AlgebraicResult::Element(v) => v,
-                    };
+        l.and_then(|x| m.and_then(|y| r.and_then(|z| meet_acc(meet_refs(x, y)?, z))))
+    }
+}
 
-                    match xy.pmeet(z) {
-                        AlgebraicResult::None => None,
-                        AlgebraicResult::Identity(mask) => {
-                            if mask & SELF_IDENT != 0 {
-                                Some(xy)
-                            } else {
-                                Some(z.clone())
-                            }
-                        }
-                        AlgebraicResult::Element(v) => Some(v),
-                    }
-                })
-            })
-        })
+#[inline]
+fn meet_refs<V: Lattice + Clone>(a: &V, b: &V) -> Option<V> {
+    match a.pmeet(b) {
+        AlgebraicResult::None => None,
+        AlgebraicResult::Identity(mask) => {
+            if mask & SELF_IDENT != 0 {
+                Some(a.clone())
+            } else {
+                Some(b.clone())
+            }
+        }
+        AlgebraicResult::Element(v) => Some(v),
+    }
+}
+#[inline]
+fn meet_acc<V: Lattice + Clone>(a: V, b: &V) -> Option<V> {
+    match a.pmeet(b) {
+        AlgebraicResult::None => None,
+        AlgebraicResult::Identity(mask) => {
+            if mask & SELF_IDENT != 0 {
+                Some(a)
+            } else {
+                Some(b.clone())
+            }
+        }
+        AlgebraicResult::Element(v) => Some(v),
     }
 }
 
