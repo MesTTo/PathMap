@@ -18,6 +18,7 @@ enum PolyZipperTrait {
     ZipperAbsolutePath,
     ZipperPathBuffer,
     ZipperSubtries,
+    ZipperInfallibleSubtries,
 }
 
 impl PolyZipperTrait {
@@ -35,6 +36,7 @@ impl PolyZipperTrait {
             "ZipperAbsolutePath" => Some(Self::ZipperAbsolutePath),
             "ZipperPathBuffer" => Some(Self::ZipperPathBuffer),
             "ZipperSubtries" => Some(Self::ZipperSubtries),
+            "ZipperInfallibleSubtries" => Some(Self::ZipperInfallibleSubtries),
             _ => None,
         }
     }
@@ -55,6 +57,7 @@ fn all_poly_zipper_traits() -> BTreeSet<PolyZipperTrait> {
         ZipperAbsolutePath,
         ZipperPathBuffer,
         ZipperSubtries,
+        ZipperInfallibleSubtries,
     ])
 }
 
@@ -110,6 +113,11 @@ fn add_trait_dependencies(traits: &mut BTreeSet<PolyZipperTrait>) {
             }
         }
         if traits.contains(&ZipperSubtries) {
+            if traits.insert(ZipperValues) {
+                changed = true;
+            }
+        }
+        if traits.contains(&ZipperInfallibleSubtries) {
             if traits.insert(ZipperValues) {
                 changed = true;
             }
@@ -750,6 +758,51 @@ fn derive_poly_zipper_with_traits(
         None
     };
 
+    //GOAT, TODO: Same as above, we ought to use the generic allocator A, if the enum has one, but use the GlobalAlloc if not,
+    // this requires parsing the impl_generics to see if there is an `A: Allocator` that is defined
+    let zipper_infallible_subtries_impl = if traits.contains(&PolyZipperTrait::ZipperInfallibleSubtries) {
+        let zipper_infallible_subtries_where = if include_where_clause {
+            quote! {
+                where
+                    #(#inner_types: pathmap::zipper::ZipperInfallibleSubtries<V>,)*
+                    #where_clause
+            }
+        } else {
+            quote! {}
+        };
+        Some(quote! {
+            impl #impl_generics pathmap::zipper::ZipperInfallibleSubtries<V> for #enum_name #ty_generics
+            #zipper_infallible_subtries_where
+            {
+                fn make_map(&self) -> pathmap::PathMap<V> {
+                    match self {
+                        #(#variant_arms => inner.make_map(),)*
+                    }
+                }
+
+                fn get_trie_ref(&self) -> pathmap::zipper::TrieRef<'_, V> {
+                    match self {
+                        #(#variant_arms => inner.get_trie_ref(),)*
+                    }
+                }
+
+                fn get_focus(&self) -> pathmap::zipper::OpaqueAbstractNodeRef<'_, V, pathmap::alloc::GlobalAlloc> {
+                    match self {
+                        #(#variant_arms => inner.get_focus(),)*
+                    }
+                }
+
+                fn try_borrow_focus(&self) -> Option<pathmap::zipper::OpaqueTrieNodeRef<'_, V, pathmap::alloc::GlobalAlloc>> {
+                    match self {
+                        #(#variant_arms => inner.try_borrow_focus(),)*
+                    }
+                }
+            }
+        })
+    } else {
+        None
+    };
+
     let expanded = quote! {
         #(#from_impls)*
         #zipper_impl
@@ -765,6 +818,7 @@ fn derive_poly_zipper_with_traits(
         #zipper_read_only_iteration_impl
         #zipper_read_only_conditional_iteration_impl
         #zipper_subtries_impl
+        #zipper_infallible_subtries_impl
     };
 
     TokenStream::from(expanded)

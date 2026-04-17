@@ -250,7 +250,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for Trie
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for TrieRefBorrowed<'_, V, A> {
-    fn make_map(&self) -> PathMap<Self::V, A> {
+    fn make_map(&self) -> PathMap<V, A> {
         #[cfg(not(feature = "graft_root_vals"))]
         let root_val = None;
         #[cfg(feature = "graft_root_vals")]
@@ -262,33 +262,28 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A
     fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
         self.clone().into()
     }
-}
-
-impl<V: Clone + Send + Sync, A: Allocator> zipper_priv::ZipperPriv for TrieRefBorrowed<'_, V, A> {
-    type V = V;
-    type A = A;
-    fn get_focus(&self) -> AbstractNodeRef<'_, Self::V, Self::A> {
+    fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> {
         if self.is_valid() {
             let node_key = self.node_key();
             if node_key.len() > 0 {
-                self.focus_node.unwrap().as_tagged().get_node_at_key(self.node_key())
+                OpaqueAbstractNodeRef(self.focus_node.unwrap().as_tagged().get_node_at_key(self.node_key()))
             } else {
-                AbstractNodeRef::BorrowedRc(&self.focus_node.as_ref().unwrap())
+                OpaqueAbstractNodeRef(AbstractNodeRef::BorrowedRc(&self.focus_node.as_ref().unwrap()))
             }
         } else {
-            AbstractNodeRef::None
+            OpaqueAbstractNodeRef(AbstractNodeRef::None)
         }
     }
-    fn try_borrow_focus(&self) -> Option<&TrieNodeODRc<Self::V, Self::A>> {
+    fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
         if self.is_valid() {
             let node_key = self.node_key();
             if node_key.len() == 0 {
-                self.focus_node
+                self.focus_node.map(|node| OpaqueTrieNodeRef(node))
             } else {
                 match self.focus_node.unwrap().as_tagged().node_get_child(node_key) {
                     Some((consumed_bytes, child_node)) => {
                         debug_assert_eq!(consumed_bytes, node_key.len());
-                        Some(child_node)
+                        Some(OpaqueTrieNodeRef(child_node))
                     },
                     None => None
                 }
@@ -600,7 +595,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for Trie
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for TrieRefOwned<V, A> {
-    fn make_map(&self) -> PathMap<Self::V, A> {
+    fn make_map(&self) -> PathMap<V, A> {
         #[cfg(not(feature = "graft_root_vals"))]
         let root_val = None;
         #[cfg(feature = "graft_root_vals")]
@@ -612,33 +607,28 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A
     fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
         self.clone().into()
     }
-}
-
-impl<V: Clone + Send + Sync, A: Allocator> zipper_priv::ZipperPriv for TrieRefOwned<V, A> {
-    type V = V;
-    type A = A;
-    fn get_focus(&self) -> AbstractNodeRef<'_, Self::V, Self::A> {
+    fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> {
         if self.is_valid() {
             let node_key = self.node_key();
             if node_key.len() > 0 {
-                self.focus_node.as_ref().unwrap().as_tagged().get_node_at_key(self.node_key())
+                OpaqueAbstractNodeRef(self.focus_node.as_ref().unwrap().as_tagged().get_node_at_key(self.node_key()))
             } else {
-                AbstractNodeRef::BorrowedRc(&self.focus_node.as_ref().unwrap())
+                OpaqueAbstractNodeRef(AbstractNodeRef::BorrowedRc(&self.focus_node.as_ref().unwrap()))
             }
         } else {
-            AbstractNodeRef::None
+            OpaqueAbstractNodeRef(AbstractNodeRef::None)
         }
     }
-    fn try_borrow_focus(&self) -> Option<&TrieNodeODRc<Self::V, Self::A>> {
+    fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
         if self.is_valid() {
             let node_key = self.node_key();
             if node_key.len() == 0 {
-                self.focus_node.as_ref()
+                self.focus_node.as_ref().map(|node| OpaqueTrieNodeRef(node))
             } else {
                 match self.focus_node.as_ref().unwrap().as_tagged().node_get_child(node_key) {
                     Some((consumed_bytes, child_node)) => {
                         debug_assert_eq!(consumed_bytes, node_key.len());
-                        Some(child_node)
+                        Some(OpaqueTrieNodeRef(child_node))
                     },
                     None => None
                 }
@@ -784,7 +774,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for Trie
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for TrieRef<'_, V, A> {
-    fn make_map(&self) -> PathMap<Self::V, A> {
+    fn make_map(&self) -> PathMap<V, A> {
         match self {
             TrieRef::Borrowed(trie_ref) => trie_ref.make_map(),
             TrieRef::Owned(trie_ref) => trie_ref.make_map(),
@@ -793,18 +783,13 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A
     fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
         self.clone()
     }
-}
-
-impl<V: Clone + Send + Sync, A: Allocator> zipper_priv::ZipperPriv for TrieRef<'_, V, A> {
-    type V = V;
-    type A = A;
-    fn get_focus(&self) -> AbstractNodeRef<'_, Self::V, Self::A> {
+    fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> {
         match self {
             TrieRef::Borrowed(trie_ref) => trie_ref.get_focus(),
             TrieRef::Owned(trie_ref) => trie_ref.get_focus(),
         }
     }
-    fn try_borrow_focus(&self) -> Option<&TrieNodeODRc<Self::V, Self::A>> {
+    fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
         match self {
             TrieRef::Borrowed(trie_ref) => trie_ref.try_borrow_focus(),
             TrieRef::Owned(trie_ref) => trie_ref.try_borrow_focus(),
@@ -895,7 +880,7 @@ impl_trie_ref_debug!(
 
 #[cfg(test)]
 mod tests {
-    use crate::{trie_node::AbstractNodeRef, utils::ByteMask, zipper::{zipper_priv::ZipperPriv, *}, PathMap};
+    use crate::{trie_node::AbstractNodeRef, utils::ByteMask, zipper::*, PathMap};
 
     #[test]
     fn trie_ref_test1() {
@@ -913,7 +898,7 @@ mod tests {
         // "Hel" on the other hand was likely split into its own node
         let trie_ref = map.trie_ref_at_path(b"Hel");
         let node = trie_ref.get_focus();
-        assert!(matches!(node, AbstractNodeRef::BorrowedRc(_)));
+        assert!(matches!(node.0, AbstractNodeRef::BorrowedRc(_)));
         assert_eq!(trie_ref.val(), None);
         assert_eq!(trie_ref.path_exists(), true);
 

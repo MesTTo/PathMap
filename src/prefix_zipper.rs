@@ -3,7 +3,7 @@ use fast_slice_utils::{find_prefix_overlap, starts_with};
 use crate::alloc::Allocator;
 use crate::utils::ByteMask;
 use crate::PathMap;
-use crate::trie_node::{AbstractNodeRef, TrieNodeODRc, TaggedNodeRef};
+use crate::trie_node::TaggedNodeRef;
 use crate::zipper::*;
 
 #[derive(Clone)]
@@ -603,7 +603,7 @@ impl<'prefix, V: Clone + Send + Sync + Unpin, Z, A: Allocator> ZipperInfallibleS
     where
         Z: ZipperInfallibleSubtries<V, A> + ZipperSubtries<V, A>
 {
-    fn make_map(&self) -> PathMap<Self::V, A> {
+    fn make_map(&self) -> PathMap<V, A> {
         let leaf_map = self.source.make_map();
         match self.prefix_path_below_focus() {
             Some(prefix_path) => {
@@ -633,18 +633,13 @@ impl<'prefix, V: Clone + Send + Sync + Unpin, Z, A: Allocator> ZipperInfallibleS
             TrieRefOwned::new_invalid_in(self.source.alloc()).into()
         }
     }
+    fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> { self.source.get_focus() }
+    fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> { self.source.try_borrow_focus() }
 }
 
 impl<'prefix, 'a, V: Clone + Send + Sync + 'a, Z, A: Allocator + 'a> ZipperReadOnlySubtries<'a, V, A> for PrefixZipper<'prefix, Z> where Z: ZipperReadOnlySubtries<'a, V, A>, Self: zipper_priv::ZipperReadOnlyPriv<'a, V, A> + ZipperSubtries<V, A> {
     type TrieRefT = <Z as ZipperReadOnlySubtries<'a, V, A>>::TrieRefT;
     fn trie_ref_at_path<K: AsRef<[u8]>>(&self, path: K) -> Self::TrieRefT { self.source.trie_ref_at_path(path) }
-}
-
-impl<'prefix, V: Clone + Send + Sync, Z, A: Allocator> zipper_priv::ZipperPriv for PrefixZipper<'prefix, Z> where Z: zipper_priv::ZipperPriv<V=V, A=A> {
-    type V = V;
-    type A = A;
-    fn get_focus(&self) -> AbstractNodeRef<'_, Self::V, Self::A> { self.source.get_focus() }
-    fn try_borrow_focus(&self) -> Option<&TrieNodeODRc<Self::V, Self::A>> { self.source.try_borrow_focus() }
 }
 
 crate::zipper::impl_zipper_debug!(

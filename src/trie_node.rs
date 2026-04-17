@@ -711,6 +711,27 @@ fn pmeet_generic_recursive_reset<'trie, const MAX_PAYLOAD_CNT: usize, V, A: Allo
     }
 }
 
+/// An abstracted reference to the node at the zipper's focus, returned by [`crate::zipper::ZipperInfallibleSubtries::get_focus`]
+///
+/// The meaning of each returned value:
+/// - `AbstractNodeRef::None`
+/// The focus is on a non-existant path
+///
+/// - `BorrowedDyn(&'a dyn TrieNode<V>)`
+/// The focus is on an existing node, but the node's `TrieNodeODRc` is not available so
+/// a "shallow copy" i.e. refcount bump, is not possible
+///
+/// - `BorrowedRc(&'a TrieNodeODRc<V>)`
+/// The focus is on an existing node, and we can access the `TrieNodeODRc`.  This is the
+/// ideal situation. (fastest path)
+///
+/// - `BorrowedTiny(TinyRefNode<'a, V>)`
+/// The focus is on a position inside a node, and the TinyRefNode is effectively a pointer
+/// to that position
+///
+/// - `OwnedRc(TrieNodeODRc<V>)`
+/// We needed to make a brand new node to represent this position.  This is the worst case
+/// scenario for performance because allocation was necessary
 pub enum AbstractNodeRef<'a, V: Clone + Send + Sync, A: Allocator> {
     None,
     BorrowedDyn(TaggedNodeRef<'a, V, A>), //GOAT eliminate this variant!

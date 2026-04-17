@@ -5,7 +5,6 @@ use crate::alloc::{Allocator, GlobalAlloc};
 use crate::PathMap;
 use crate::trie_node::*;
 use crate::zipper::*;
-use crate::zipper::zipper_priv::ZipperPriv;
 use crate::zipper_tracking::*;
 use crate::dense_byte_node::CellByteNode;
 
@@ -308,7 +307,7 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             // has already been dismantled... So we are checking here in order to handle that situation gracefully
             if inner_z.focus_stack.top().is_some() {
                 inner_z.move_to_path(origin_path);
-                if inner_z.try_borrow_focus().unwrap().as_tagged().node_is_empty() {
+                if inner_z.try_borrow_focus().unwrap().0.as_tagged().node_is_empty() {
                     inner_z.prune_path();
                 }
                 inner_z.reset();

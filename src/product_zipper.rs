@@ -352,13 +352,6 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ProductZip
     fn is_shared(&self) -> bool { self.z.is_shared() }
 }
 
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> zipper_priv::ZipperPriv for ProductZipper<'_, '_, V, A> {
-    type V = V;
-    type A = A;
-    fn get_focus(&self) -> AbstractNodeRef<'_, Self::V, Self::A> { self.z.get_focus() }
-    fn try_borrow_focus(&self) -> Option<&TrieNodeODRc<Self::V, Self::A>> { self.z.try_borrow_focus() }
-}
-
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperPathBuffer for ProductZipper<'_, 'trie, V, A> {
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.origin_path_assert_len(len) } }
     fn prepare_buffers(&mut self) { self.z.prepare_buffers() }
@@ -886,7 +879,6 @@ impl<'a, V, Z> ZipperReadOnlyIteration<'a, V> for OneFactor<Z> where Z: ZipperRe
 impl<'a, V, Z> ZipperReadOnlyConditionalIteration<'a, V> for OneFactor<Z> where Z: ZipperReadOnlyConditionalIteration<'a, V>, Self: ZipperReadOnlyConditionalValues<'a, V, WitnessT = Z::WitnessT> + ZipperIteration { zipper_impl_lens!(ZipperReadOnlyConditionalIteration self => self.z); }
 impl<'a, V: Clone + Send + Sync + 'a, Z, A: Allocator + 'a> ZipperReadOnlySubtries<'a, V, A> for OneFactor<Z> where Z: ZipperReadOnlySubtries<'a, V, A>, Self: ZipperReadOnlyPriv<'a, V, A> + ZipperSubtries<V, A> { zipper_impl_lens!(ZipperReadOnlySubtries self => self.z); }
 impl<Z> ZipperConcrete for OneFactor<Z> where Z: ZipperConcrete { zipper_impl_lens!(ZipperConcrete self => self.z); }
-impl<V: Clone + Send + Sync, Z, A: Allocator> ZipperPriv for OneFactor<Z> where Z: ZipperPriv<V=V, A=A> { zipper_impl_lens!(ZipperPriv self => self.z); }
 impl<Z> ZipperPathBuffer for OneFactor<Z> where Z: ZipperPathBuffer { zipper_impl_lens!(ZipperPathBuffer self => self.z); }
 
 

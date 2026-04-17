@@ -7,7 +7,6 @@ use crate::utils::{ByteMask, BitMask};
 use crate::trie_node::*;
 use crate::PathMap;
 use crate::zipper::*;
-use crate::zipper::zipper_priv::*;
 use crate::zipper_tracking::*;
 use crate::ring::{AlgebraicResult, AlgebraicStatus, DistributiveLattice, Lattice, COUNTER_IDENT, SELF_IDENT};
 
@@ -397,6 +396,8 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperSubtries<V, A>
 impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperInfallibleSubtries<V, A> for WriteZipperTracked<'a, '_, V, A>{
     fn make_map(&self) -> PathMap<V, A> { self.z.make_map() }
     fn get_trie_ref(&self) -> TrieRef<'_, V, A> { self.z.get_trie_ref() }
+    fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> { self.z.get_focus() }
+    fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> { self.z.try_borrow_focus() }
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving for WriteZipperTracked<'a, 'path, V, A> {
@@ -415,13 +416,6 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving 
     fn ascend_byte(&mut self) -> bool { self.z.ascend_byte() }
     fn ascend_until(&mut self) -> bool { self.z.ascend_until() }
     fn ascend_until_branch(&mut self) -> bool { self.z.ascend_until_branch() }
-}
-
-impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> zipper_priv::ZipperPriv for WriteZipperTracked<'a, 'path, V, A> {
-    type V = V;
-    type A = A;
-    fn get_focus(&self) -> AbstractNodeRef<'_, Self::V, Self::A> { self.z.get_focus() }
-    fn try_borrow_focus(&self) -> Option<&TrieNodeODRc<Self::V, Self::A>> { self.z.try_borrow_focus() }
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPathBuffer for WriteZipperTracked<'a, 'path, V, A> {
@@ -558,6 +552,8 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperSubtries<V, A>
 impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperInfallibleSubtries<V, A> for WriteZipperUntracked<'a, '_, V, A> {
     fn make_map(&self) -> PathMap<V, A> { self.z.make_map() }
     fn get_trie_ref(&self) -> TrieRef<'_, V, A> { self.z.get_trie_ref() }
+    fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> { self.z.get_focus() }
+    fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> { self.z.try_borrow_focus() }
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving for WriteZipperUntracked<'a, 'path, V, A> {
@@ -576,13 +572,6 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving 
     fn ascend_byte(&mut self) -> bool { self.z.ascend_byte() }
     fn ascend_until(&mut self) -> bool { self.z.ascend_until() }
     fn ascend_until_branch(&mut self) -> bool { self.z.ascend_until_branch() }
-}
-
-impl<'a, 'k, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> zipper_priv::ZipperPriv for WriteZipperUntracked<'a, 'k, V, A> {
-    type V = V;
-    type A = A;
-    fn get_focus(&self) -> AbstractNodeRef<'_, Self::V, Self::A> { self.z.get_focus() }
-    fn try_borrow_focus(&self) -> Option<&TrieNodeODRc<Self::V, Self::A>> { self.z.try_borrow_focus() }
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPathBuffer for WriteZipperUntracked<'a, 'path, V, A> {
@@ -708,7 +697,6 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> Zipper for WriteZipperOwned<V
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperValues self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperInfallibleSubtries self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperMoving for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperMoving self => self.z); }
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperPriv for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperPriv self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperPathBuffer for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperPathBuffer self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAbsolutePath for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperAbsolutePath self => self.z); }
 
@@ -1080,36 +1068,6 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving 
     }
 }
 
-impl<'a, 'k, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> zipper_priv::ZipperPriv for WriteZipperCore<'a, 'k, V, A> {
-    type V = V;
-    type A = A;
-    fn get_focus(&self) -> AbstractNodeRef<'_, Self::V, Self::A> {
-        let node_key = self.key.node_key();
-        if node_key.len() > 0 {
-            self.focus_stack.top().unwrap().get_node_at_key(node_key)
-        } else {
-            debug_assert!(self.at_root());
-            unsafe{ AbstractNodeRef::BorrowedRc(self.focus_stack.root_unchecked()) }
-        }
-    }
-    fn try_borrow_focus(&self) -> Option<&TrieNodeODRc<Self::V, Self::A>> {
-        let node_key = self.key.node_key();
-        if node_key.len() == 0 {
-            debug_assert!(self.at_root());
-            debug_assert_eq!(self.focus_stack.depth(), 1);
-            Some(unsafe{ self.focus_stack.root_unchecked() })
-        } else {
-            match self.focus_stack.top().unwrap().node_get_child(node_key) {
-                Some((consumed_bytes, child_node)) => {
-                    debug_assert_eq!(consumed_bytes, node_key.len());
-                    Some(child_node)
-                },
-                None => None
-            }
-        }
-    }
-}
-
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperAbsolutePath for WriteZipperCore<'a, 'path, V, A> {
     fn origin_path(&self) -> &[u8] {
         self.key.origin_path()
@@ -1214,10 +1172,10 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     /// to isolate the part of the trie that is below the ZipperHead from the part of the trie above it.
     pub(crate) fn splitting_borrow_focus(&mut self) -> (*const TrieNodeODRc<V, A>, Option<NonNull<V>>) {
         let node = match self.try_borrow_focus() {
-            Some(root) => root,
+            Some(root) => root.0,
             None => {
                 self.split_at_focus();
-                self.try_borrow_focus().unwrap()
+                self.try_borrow_focus().unwrap().0
             },
         };
         let val = self.val();
@@ -1264,6 +1222,32 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 Some((consumed_bytes, child_node)) => {
                     debug_assert_eq!(consumed_bytes, node_key.len());
                     Some(child_node)
+                },
+                None => None
+            }
+        }
+    }
+
+    pub(crate) fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> {
+        let node_key = self.key.node_key();
+        if node_key.len() > 0 {
+            OpaqueAbstractNodeRef(self.focus_stack.top().unwrap().get_node_at_key(node_key))
+        } else {
+            debug_assert!(self.at_root());
+            OpaqueAbstractNodeRef( unsafe{ AbstractNodeRef::BorrowedRc(self.focus_stack.root_unchecked()) } )
+        }
+    }
+    pub(crate) fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
+        let node_key = self.key.node_key();
+        if node_key.len() == 0 {
+            debug_assert!(self.at_root());
+            debug_assert_eq!(self.focus_stack.depth(), 1);
+            Some(OpaqueTrieNodeRef( unsafe{ self.focus_stack.root_unchecked() } ))
+        } else {
+            match self.focus_stack.top().unwrap().node_get_child(node_key) {
+                Some((consumed_bytes, child_node)) => {
+                    debug_assert_eq!(consumed_bytes, node_key.len());
+                    Some(OpaqueTrieNodeRef(child_node))
                 },
                 None => None
             }
@@ -2693,7 +2677,7 @@ mod tests {
     use crate::ring::AlgebraicStatus;
     use crate::trie_map::*;
     use crate::utils::ByteMask;
-    use crate::zipper::{*, zipper_priv::*};
+    use crate::zipper::*;
     use crate::trie_node::*;
     use crate::alloc::GlobalAlloc;
 
@@ -4920,7 +4904,7 @@ mod tests {
         assert_eq!(wz.child_mask(), ByteMask::EMPTY);
     }
 
-    /// Tests [`ZipperPriv::get_focus`] and [`ZipperPriv::try_borrow_focus`] internal APIs on [`WriteZipperCore`]
+    /// Tests [`ZipperInfallibleSubtries::get_focus`] and [`ZipperInfallibleSubtries::try_borrow_focus`] internal APIs on [`WriteZipperCore`]
     #[test]
     fn write_zipper_focus_nodes() {
         let mut map = PathMap::<()>::new();
@@ -4935,10 +4919,10 @@ mod tests {
 
         //We should be at a node boundary, as long as this part of the path got encoded as a PairNode (or a ByteNode)
         let node = wz.try_borrow_focus().unwrap();
-        assert_eq!(node.as_tagged().count_branches(&[]), 2);
+        assert_eq!(node.0.as_tagged().count_branches(&[]), 2);
         let expected_mask: ByteMask = [b't', b'v'].into_iter().collect();
-        assert_eq!(node.as_tagged().node_branches_mask(&[]), expected_mask);
-        assert!(matches!(wz.get_focus(), AbstractNodeRef::BorrowedRc(_))); //Make sure we get the ODRc
+        assert_eq!(node.0.as_tagged().node_branches_mask(&[]), expected_mask);
+        assert!(matches!(wz.get_focus().0, AbstractNodeRef::BorrowedRc(_))); //Make sure we get the ODRc
         drop(wz);
 
         //Test creating a read zipper at the location, using `read_zipper_at_path`
@@ -4946,10 +4930,10 @@ mod tests {
 
         //We should be at a node boundary, as long as this part of the path got encoded as a PairNode (or a ByteNode)
         let node = wz.try_borrow_focus().unwrap();
-        assert_eq!(node.as_tagged().count_branches(&[]), 2);
+        assert_eq!(node.0.as_tagged().count_branches(&[]), 2);
         let expected_mask: ByteMask = [b't', b'v'].into_iter().collect();
-        assert_eq!(node.as_tagged().node_branches_mask(&[]), expected_mask);
-        assert!(matches!(wz.get_focus(), AbstractNodeRef::BorrowedRc(_))); //Make sure we get the ODRc
+        assert_eq!(node.0.as_tagged().node_branches_mask(&[]), expected_mask);
+        assert!(matches!(wz.get_focus().0, AbstractNodeRef::BorrowedRc(_))); //Make sure we get the ODRc
         drop(wz);
 
         //Test creating a read zipper from a ZipperHead
@@ -4958,10 +4942,10 @@ mod tests {
 
         // We should be at a node boundary, as long as this part of the path got encoded as a PairNode (or a ByteNode)
         let node = wz.try_borrow_focus().unwrap();
-        assert_eq!(node.as_tagged().count_branches(&[]), 2);
+        assert_eq!(node.0.as_tagged().count_branches(&[]), 2);
         let expected_mask: ByteMask = [b'f', b'v'].into_iter().collect();
-        assert_eq!(node.as_tagged().node_branches_mask(&[]), expected_mask);
-        assert!(matches!(wz.get_focus(), AbstractNodeRef::BorrowedRc(_))); //Make sure we get the ODRc
+        assert_eq!(node.0.as_tagged().node_branches_mask(&[]), expected_mask);
+        assert!(matches!(wz.get_focus().0, AbstractNodeRef::BorrowedRc(_))); //Make sure we get the ODRc
     }
 
     /// Tests the zipper `val_count` method, including with root values
