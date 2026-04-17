@@ -68,6 +68,7 @@ impl ByteMask {
     /// # Examples
     ///
     /// ```
+    /// # use pathmap::utils::ByteMask;
     /// let m = ByteMask::from_range(10..70);
     /// // sets bits 10 through 69
     ///
