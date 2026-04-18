@@ -1,10 +1,12 @@
+use pathmap_derive::PolyZipperExplicit;
+
 use crate::{
     alloc::{Allocator, GlobalAlloc},
     ring::{AlgebraicResult, COUNTER_IDENT, DistributiveLattice, Lattice, SELF_IDENT},
     utils::ByteMask,
     zipper::{
-        ReadZipperUntracked, Zipper, ZipperInfallibleSubtries, ZipperMoving, ZipperValues,
-        ZipperWriting,
+        ReadZipperTracked, ReadZipperUntracked, Zipper, ZipperInfallibleSubtries, ZipperMoving,
+        ZipperValues, ZipperWriting,
     },
 };
 
@@ -91,6 +93,11 @@ pub trait ZipperAlgebraExt<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>:
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAlgebraExt<V, A>
     for ReadZipperUntracked<'_, '_, V, A>
+{
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAlgebraExt<V, A>
+    for ReadZipperTracked<'_, '_, V, A>
 {
 }
 
@@ -929,6 +936,213 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
     }
 }
 
+use zipper_algebra_poly::SomeZ as Z;
+
+fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
+    zs: &mut [Z<'_, '_, V, A>; N],
+    active: u64,
+    out: &mut Out,
+) where
+    V: Clone + Send + Sync + Unpin,
+    P: MergePolicy<V> + ValuePolicy<V>,
+    A: Allocator,
+    Out: ZipperWriting<V, A>,
+{
+    debug_assert!(N <= 64);
+
+    #[inline]
+    fn active_bits<const N: usize>(active: u64) -> impl Iterator<Item = usize> {
+        (0..N).filter(move |i| (active >> i) & 1 != 0)
+    }
+
+    fn zippers<'a, 'trie, 'path, V, A, const N: usize>(
+        zs: &'a [Z<'trie, 'path, V, A>; N],
+        active: u64,
+    ) -> impl Iterator<Item = (usize, &'a Z<'trie, 'path, V, A>)>
+    where
+        V: Clone + Send + Sync + Unpin,
+        A: Allocator,
+    {
+        active_bits::<N>(active).map(|i| (i, &zs[i]))
+    }
+
+    fn values<'a, 'trie, 'path, V, A, const N: usize>(
+        zs: &'a [Z<'trie, 'path, V, A>; N],
+        active: u64,
+    ) -> impl Iterator<Item = Option<&'a V>>
+    where
+        V: Clone + Send + Sync + Unpin,
+        A: Allocator,
+    {
+        zippers(zs, active).map(|(_, z)| z.val())
+    }
+
+    // small micro-helpers
+    #[inline(always)]
+    fn for_each_bit(mut bits: u64, mut f: impl FnMut(usize)) {
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            f(i);
+        }
+    }
+
+    #[inline(always)]
+    fn with_k<const K: usize, T, R>(
+        xs: &mut [T],
+        mut bits: u64,
+        f: impl FnOnce([&mut T; K]) -> R,
+    ) -> R {
+        debug_assert!(bits.count_ones() as usize >= K);
+
+        // collect raw pointers first (safe)
+        let mut ptrs: [*mut T; K] = [std::ptr::null_mut(); K];
+
+        let mut i = 0;
+        while i < K {
+            let idx = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            ptrs[i] = unsafe { xs.as_mut_ptr().add(idx) };
+            i += 1;
+        }
+
+        // SAFETY:
+        // - indices are distinct (bitmask)
+        // - derived from same slice
+
+        // should be zero-cost after inlining
+        let refs = unsafe { ptrs.map(|p| &mut *p) };
+
+        f(refs)
+    }
+
+    // combine root values
+    if let Some(v) = P::combine_n(values(zs, active)) {
+        out.set_val(v);
+    }
+
+    let mut idxs = [0; N];
+    let mut masks = [ByteMask::EMPTY; N];
+    for (i, z) in zippers(zs, active) {
+        masks[i] = z.child_mask();
+    }
+
+    'merge_level: loop {
+        let mut min = None;
+        let mut frontier = 0u64;
+        let mut next = None;
+
+        for i in active_bits::<N>(active) {
+            if let Some(b) = masks[i].indexed_bit::<true>(idxs[i] as usize) {
+                match min {
+                    None => {
+                        min = Some(b);
+                        frontier = 1 << i;
+                    }
+                    Some(m) if b < m => {
+                        next = Some(m);
+                        min = Some(b);
+                        frontier = 1 << i;
+                    }
+                    Some(m) if b == m => {
+                        frontier |= 1 << i;
+                    }
+                    Some(m) => {
+                        next = match next {
+                            Some(n) if n <= b => Some(n),
+                            _ => Some(b),
+                        };
+                    }
+                }
+            }
+        }
+
+        match min {
+            None => {
+                break 'merge_level;
+            }
+            Some(a) => {
+                let cnt = frontier.count_ones();
+
+                // Dispatch
+                if (cnt == 1) {
+                    let i = frontier.trailing_zeros() as usize;
+                    // singleton (|frontier| = 1)
+                    match next {
+                        None => {
+                            P::on_single(&mut zs[i], frontier, ByteMask::from_range(a..), out);
+                            break 'merge_level;
+                        }
+                        Some(b) => {
+                            P::on_single(&mut zs[i], frontier, ByteMask::from_range(a..b), out);
+                            // advance
+                            idxs[i] = masks[i].index_of(b);
+                        }
+                    }
+                } else {
+                    if P::descend_on_some_equal(frontier) {
+                        out.descend_to_byte(a);
+                        match cnt {
+                            2 => with_k::<2, _, _>(zs, frontier, |[lhs, rhs]| {
+                                lhs.descend_to_byte(a);
+                                rhs.descend_to_byte(a);
+
+                                zipper_merge::<P, _, _, _, _, _>(lhs, rhs, out);
+
+                                rhs.ascend_byte();
+                                lhs.ascend_byte();
+                            }),
+                            3 => with_k::<3, _, _>(zs, frontier, |[lhs, mid, rhs]| {
+                                lhs.descend_to_byte(a);
+                                mid.descend_to_byte(a);
+                                rhs.descend_to_byte(a);
+
+                                zipper_merge3::<P, _, _, _, _, _, _>(lhs, mid, rhs, out);
+
+                                rhs.ascend_byte();
+                                mid.ascend_byte();
+                                lhs.ascend_byte();
+                            }),
+                            4 => with_k::<4, _, _>(zs, frontier, |[z0, z1, z2, z3]| {
+                                z0.descend_to_byte(a);
+                                z1.descend_to_byte(a);
+                                z2.descend_to_byte(a);
+                                z3.descend_to_byte(a);
+
+                                zipper_merge4::<P, _, _, _, _, _, _, _>(z0, z1, z2, z3, out);
+
+                                z3.ascend_byte();
+                                z2.ascend_byte();
+                                z1.ascend_byte();
+                                z0.ascend_byte();
+                            }),
+                            _ => {
+                                // descend all active in the frontier
+                                for_each_bit(frontier, |i| zs[i].descend_to_byte(a));
+
+                                // recursive call with SAME array, smaller mask
+                                zipper_merge_n_mono::<P, V, Out, A, N>(zs, frontier, out);
+
+                                //ascend
+                                for_each_bit(frontier, |i| {
+                                    zs[i].ascend_byte();
+                                });
+                            }
+                        }
+
+                        out.ascend_byte();
+                    }
+
+                    // advance indices
+                    for_each_bit(frontier, |i| {
+                        idxs[i] += 1;
+                    });
+                }
+            }
+        }
+    }
+}
+
 // ==================== JOIN ====================
 
 struct Join;
@@ -1136,6 +1350,62 @@ impl<V: DistributiveLattice + Clone> ValuePolicy<V> for Subtract {
             },
             None => Some(acc),
         })
+    }
+}
+
+mod zipper_algebra_poly {
+    // ==================== Machinery for zipper_merge_n ====================
+    use crate as pathmap;
+    use crate::PathMap;
+    use crate::alloc::Allocator;
+    use crate::trie_node::*;
+    use crate::zipper::*;
+
+    #[derive(PolyZipperExplicit)]
+    #[poly_zipper_explicit(traits(ZipperMoving, ZipperValues))]
+    pub(super) enum SomeZ<'trie, 'path, V: Clone + Send + Sync + Unpin, A: Allocator> {
+        RZ(ReadZipperUntracked<'trie, 'path, V, A>),
+        RZT(ReadZipperTracked<'trie, 'path, V, A>),
+    }
+
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> zipper_priv::ZipperPriv for SomeZ<'_, '_, V, A> {
+        type V = V;
+
+        type A = A;
+
+        #[inline]
+        fn get_focus(&self) -> AbstractNodeRef<'_, Self::V, Self::A> {
+            match self {
+                SomeZ::RZ(inner) => inner.get_focus(),
+                SomeZ::RZT(inner) => inner.get_focus(),
+            }
+        }
+
+        #[inline]
+        fn try_borrow_focus(&self) -> Option<&TrieNodeODRc<Self::V, Self::A>> {
+            match self {
+                SomeZ::RZ(inner) => inner.try_borrow_focus(),
+                SomeZ::RZT(inner) => inner.try_borrow_focus(),
+            }
+        }
+    }
+
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A>
+        for SomeZ<'_, '_, V, A>
+    {
+        fn make_map(&self) -> PathMap<V, A> {
+            match self {
+                SomeZ::RZ(inner) => inner.make_map(),
+                SomeZ::RZT(inner) => inner.make_map(),
+            }
+        }
+
+        fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
+            match self {
+                SomeZ::RZ(inner) => inner.get_trie_ref(),
+                SomeZ::RZT(inner) => inner.get_trie_ref(),
+            }
+        }
     }
 }
 
