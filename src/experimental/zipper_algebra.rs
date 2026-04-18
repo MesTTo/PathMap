@@ -938,6 +938,11 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
 
 use zipper_algebra_poly::SomeZ as Z;
 
+// - The function is fully monomorphized over `N` and uses a bitmask (`active`)
+//   to track participating zippers.
+// - Small frontiers (`k ≤ 4`) are dispatched to specialized implementations
+//   for improved performance.
+// - Requires `N ≤ 64`.
 fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
     zs: &mut [Z<'_, '_, V, A>; N],
     active: u64,
@@ -948,7 +953,7 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
     A: Allocator,
     Out: ZipperWriting<V, A>,
 {
-    debug_assert!(N <= 64);
+    debug_assert!(N > 0 && N <= 64);
 
     #[inline]
     fn active_bits<const N: usize>(active: u64) -> impl Iterator<Item = usize> {
@@ -1027,119 +1032,183 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
         masks[i] = z.child_mask();
     }
 
-    'merge_level: loop {
-        let mut min = None;
-        let mut frontier = 0u64;
-        let mut next = None;
+    // At each node, the algorithm:
+    //
+    // - Treats the child edges of all active zippers as sorted byte sequences,
+    // - Computes the minimal byte `a` across all inputs,
+    // - Forms the *frontier* — the subset of zippers containing `a`,
+    // - Dispatches based on frontier size:
+    //
+    //   - **Full match (`frontier == active`)**
+    //     Descends into all zippers without recursion (fast path).
+    //
+    //   - **Singleton (`|frontier| = 1`)**
+    //     Grafts the corresponding subtrie directly into the output.
+    //
+    //   - **Partial overlap (`1 < |frontier| < N`)**
+    //     Optionally descends into the subset, dispatching to specialized
+    //     implementations for small arities (`k ≤ 4`) or recursively invoking
+    //     this function on the subset.
+    //
+    // The traversal is performed iteratively using zipper movements
+    // (`descend_to_byte` / `ascend_byte`) and an explicit depth counter,
+    // avoiding recursion in the common case.
+    let mut k = 0;
+    debug_assert!(active.count_ones() > 0);
+    'ascend: loop {
+        'merge_level: loop {
+            let mut min = None;
+            let mut frontier = 0u64;
+            let mut next = None;
 
-        for i in active_bits::<N>(active) {
-            if let Some(b) = masks[i].indexed_bit::<true>(idxs[i] as usize) {
-                match min {
-                    None => {
-                        min = Some(b);
-                        frontier = 1 << i;
-                    }
-                    Some(m) if b < m => {
-                        next = Some(m);
-                        min = Some(b);
-                        frontier = 1 << i;
-                    }
-                    Some(m) if b == m => {
-                        frontier |= 1 << i;
-                    }
-                    Some(m) => {
-                        next = match next {
-                            Some(n) if n <= b => Some(n),
-                            _ => Some(b),
-                        };
+            for i in active_bits::<N>(active) {
+                if let Some(b) = masks[i].indexed_bit::<true>(idxs[i] as usize) {
+                    match min {
+                        None => {
+                            min = Some(b);
+                            frontier = 1 << i;
+                        }
+                        Some(m) if b < m => {
+                            next = Some(m);
+                            min = Some(b);
+                            frontier = 1 << i;
+                        }
+                        Some(m) if b == m => {
+                            frontier |= 1 << i;
+                        }
+                        Some(m) => {
+                            next = match next {
+                                Some(n) if n <= b => Some(n),
+                                _ => Some(b),
+                            };
+                        }
                     }
                 }
             }
-        }
 
-        match min {
-            None => {
-                break 'merge_level;
-            }
-            Some(a) => {
-                let cnt = frontier.count_ones();
+            match min {
+                None => {
+                    break 'merge_level;
+                }
+                Some(a) => {
+                    // Dispatch
 
-                // Dispatch
-                if (cnt == 1) {
-                    let i = frontier.trailing_zeros() as usize;
-                    // singleton (|frontier| = 1)
-                    match next {
-                        None => {
-                            P::on_single(&mut zs[i], frontier, ByteMask::from_range(a..), out);
-                            break 'merge_level;
-                        }
-                        Some(b) => {
-                            P::on_single(&mut zs[i], frontier, ByteMask::from_range(a..b), out);
-                            // advance
-                            idxs[i] = masks[i].index_of(b);
-                        }
-                    }
-                } else {
-                    if P::descend_on_some_equal(frontier) {
+                    // - Case A: full match (frontier == all bits)
+                    if frontier == active {
                         out.descend_to_byte(a);
-                        match cnt {
-                            2 => with_k::<2, _, _>(zs, frontier, |[lhs, rhs]| {
-                                lhs.descend_to_byte(a);
-                                rhs.descend_to_byte(a);
 
-                                zipper_merge::<P, _, _, _, _, _>(lhs, rhs, out);
+                        // descend and refresh masks and indices
+                        for_each_bit(active, |i| {
+                            let mut z = &mut zs[i];
+                            z.descend_to_byte(a);
+                            masks[i] = z.child_mask();
+                            idxs[i] = 0;
+                        });
 
-                                rhs.ascend_byte();
-                                lhs.ascend_byte();
-                            }),
-                            3 => with_k::<3, _, _>(zs, frontier, |[lhs, mid, rhs]| {
-                                lhs.descend_to_byte(a);
-                                mid.descend_to_byte(a);
-                                rhs.descend_to_byte(a);
+                        if let Some(v) = P::combine_n(values(zs, active)) {
+                            out.set_val(v);
+                        }
 
-                                zipper_merge3::<P, _, _, _, _, _, _>(lhs, mid, rhs, out);
+                        k += 1;
+                        continue 'merge_level;
+                    }
 
-                                rhs.ascend_byte();
-                                mid.ascend_byte();
-                                lhs.ascend_byte();
-                            }),
-                            4 => with_k::<4, _, _>(zs, frontier, |[z0, z1, z2, z3]| {
-                                z0.descend_to_byte(a);
-                                z1.descend_to_byte(a);
-                                z2.descend_to_byte(a);
-                                z3.descend_to_byte(a);
-
-                                zipper_merge4::<P, _, _, _, _, _, _, _>(z0, z1, z2, z3, out);
-
-                                z3.ascend_byte();
-                                z2.ascend_byte();
-                                z1.ascend_byte();
-                                z0.ascend_byte();
-                            }),
-                            _ => {
-                                // descend all active in the frontier
-                                for_each_bit(frontier, |i| zs[i].descend_to_byte(a));
-
-                                // recursive call with SAME array, smaller mask
-                                zipper_merge_n_mono::<P, V, Out, A, N>(zs, frontier, out);
-
-                                //ascend
-                                for_each_bit(frontier, |i| {
-                                    zs[i].ascend_byte();
-                                });
+                    let cnt = frontier.count_ones();
+                    // - Case B: singleton (|frontier| = 1)
+                    if (cnt == 1) {
+                        let i = frontier.trailing_zeros() as usize;
+                        match next {
+                            None => {
+                                P::on_single(&mut zs[i], frontier, ByteMask::from_range(a..), out);
+                                break 'merge_level;
+                            }
+                            Some(b) => {
+                                P::on_single(&mut zs[i], frontier, ByteMask::from_range(a..b), out);
+                                // advance
+                                idxs[i] = masks[i].index_of(b);
                             }
                         }
+                    } else {
+                        // - Case C: subset (1 < k < N)
+                        if P::descend_on_some_equal(frontier) {
+                            out.descend_to_byte(a);
+                            match cnt {
+                                2 => with_k::<2, _, _>(zs, frontier, |[lhs, rhs]| {
+                                    lhs.descend_to_byte(a);
+                                    rhs.descend_to_byte(a);
 
-                        out.ascend_byte();
+                                    zipper_merge::<P, _, _, _, _, _>(lhs, rhs, out);
+
+                                    rhs.ascend_byte();
+                                    lhs.ascend_byte();
+                                }),
+                                3 => with_k::<3, _, _>(zs, frontier, |[lhs, mid, rhs]| {
+                                    lhs.descend_to_byte(a);
+                                    mid.descend_to_byte(a);
+                                    rhs.descend_to_byte(a);
+
+                                    zipper_merge3::<P, _, _, _, _, _, _>(lhs, mid, rhs, out);
+
+                                    rhs.ascend_byte();
+                                    mid.ascend_byte();
+                                    lhs.ascend_byte();
+                                }),
+                                4 => with_k::<4, _, _>(zs, frontier, |[z0, z1, z2, z3]| {
+                                    z0.descend_to_byte(a);
+                                    z1.descend_to_byte(a);
+                                    z2.descend_to_byte(a);
+                                    z3.descend_to_byte(a);
+
+                                    zipper_merge4::<P, _, _, _, _, _, _, _>(z0, z1, z2, z3, out);
+
+                                    z3.ascend_byte();
+                                    z2.ascend_byte();
+                                    z1.ascend_byte();
+                                    z0.ascend_byte();
+                                }),
+                                _ => {
+                                    // descend all active in the frontier
+                                    for_each_bit(frontier, |i| zs[i].descend_to_byte(a));
+
+                                    // recursive call with SAME array, smaller mask
+                                    zipper_merge_n_mono::<P, V, Out, A, N>(zs, frontier, out);
+
+                                    //ascend
+                                    for_each_bit(frontier, |i| {
+                                        zs[i].ascend_byte();
+                                    });
+                                }
+                            }
+
+                            out.ascend_byte();
+                        }
+
+                        // advance indices
+                        for_each_bit(frontier, |i| {
+                            idxs[i] += 1;
+                        });
                     }
-
-                    // advance indices
-                    for_each_bit(frontier, |i| {
-                        idxs[i] += 1;
-                    });
                 }
             }
         }
+
+        if (k == 0) {
+            break 'ascend;
+        }
+
+        let i0 = active.trailing_zeros() as usize;
+        let byte_from = *zs[i0].path().last().expect("non-empty path when k > 0");
+
+        // ascend
+        for_each_bit(active, |i| {
+            let mut z = &mut zs[i];
+            z.ascend_byte();
+            masks[i] = z.child_mask();
+            idxs[i] = masks[i].index_of(byte_from) + 1;
+        });
+
+        out.ascend_byte();
+        k -= 1;
     }
 }
 
