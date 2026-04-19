@@ -139,121 +139,26 @@ where
     ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
-    fn join_values<V, ZL, ZR, Out, A>(lhs: &ZL, rhs: &ZR, out: &mut Out)
-    where
-        V: Lattice + Clone + Send + Sync,
-        A: Allocator,
-        ZL: ZipperValues<V>,
-        ZR: ZipperValues<V>,
-        Out: ZipperWriting<V, A>,
-    {
-        if let Some(lv) = lhs.val() {
-            if let Some(rv) = rhs.val() {
-                match lv.pjoin(rv) {
-                    AlgebraicResult::None => {}
-                    AlgebraicResult::Identity(mask) => {
-                        if mask & SELF_IDENT != 0 {
-                            out.set_val(lv.clone());
-                        } else if mask & COUNTER_IDENT != 0 {
-                            out.set_val(rv.clone());
-                        }
-                    }
-                    AlgebraicResult::Element(v) => {
-                        out.set_val(v);
-                    }
-                }
-            } else {
-                out.set_val(lv.clone());
-            }
-        } else if let Some(rv) = rhs.val() {
-            out.set_val(rv.clone());
-        }
-    }
+    zipper_merge::<Join, V, ZL, ZR, Out, A>(lhs, rhs, out);
+}
 
-    // join root values before descending
-    join_values(lhs, rhs, out);
-
-    let mut k = 0;
-    let mut lhs_mask = lhs.child_mask();
-    let mut rhs_mask = rhs.child_mask();
-    let mut lhs_idx = 0;
-    let mut rhs_idx = 0;
-
-    // At each node, the algorithm treats the sets of child edges of `lhs` and `rhs` as two
-    // sorted sequences and performs a merge-like traversal:
-    //
-    // - If a range of edges exists only in one side, the corresponding subtries are *grafted*
-    //   into the output without further traversal.
-    // - If both sides contain the same edge, the algorithm descends into that child,
-    //   recursively merging the corresponding subtries.
-    // - Descent is simulated iteratively using zipper movement (`descend_to_byte` /
-    //   `ascend_byte`) and an explicit depth counter (`k`).
-    'ascend: loop {
-        'merge_level: loop {
-            let lhs_next = lhs_mask.indexed_bit::<true>(lhs_idx as usize);
-            let rhs_next = rhs_mask.indexed_bit::<true>(rhs_idx as usize);
-
-            match lhs_next {
-                Some(lhs_byte) => match rhs_next {
-                    Some(rhs_byte) if lhs_byte < rhs_byte => {
-                        out.graft_children(lhs, ByteMask::from_range(lhs_byte..rhs_byte));
-                        lhs_idx = lhs_mask.index_of(rhs_byte);
-                    }
-                    Some(rhs_byte) if lhs_byte > rhs_byte => {
-                        out.graft_children(rhs, ByteMask::from_range(rhs_byte..lhs_byte));
-                        rhs_idx = rhs_mask.index_of(lhs_byte);
-                    }
-                    Some(rhs_byte) => {
-                        // equal → descend
-                        out.descend_to_byte(lhs_byte);
-
-                        lhs.descend_to_byte(lhs_byte);
-                        rhs.descend_to_byte(lhs_byte);
-
-                        join_values(lhs, rhs, out);
-
-                        lhs_mask = lhs.child_mask();
-                        rhs_mask = rhs.child_mask();
-
-                        lhs_idx = 0;
-                        rhs_idx = 0;
-
-                        k += 1;
-                        continue 'merge_level;
-                    }
-                    None => {
-                        out.graft_children(lhs, ByteMask::from_range(lhs_byte..));
-                        break 'merge_level;
-                    }
-                },
-                None => match rhs_next {
-                    Some(rhs_byte) => {
-                        out.graft_children(rhs, ByteMask::from_range(rhs_byte..));
-                        break 'merge_level;
-                    }
-                    None => break 'merge_level,
-                },
-            }
-        }
-
-        // If we are at root and no deeper recursion pending, we're done
-        if k == 0 {
-            break 'ascend;
-        }
-
-        let byte_from = *lhs.path().last().expect("non-empty path when k > 0");
-
-        rhs.ascend_byte();
-        rhs_mask = rhs.child_mask();
-        rhs_idx = rhs_mask.index_of(byte_from) + 1;
-
-        lhs.ascend_byte();
-        lhs_mask = lhs.child_mask();
-        lhs_idx = lhs_mask.index_of(byte_from) + 1;
-
-        out.ascend_byte();
-        k -= 1;
-    }
+/// Performs an ordered join (least upper bound) of three radix-256 tries using zipper traversal.
+/// That is, it performs: (`lhs` ⊔ `mid`) ⊔ `rhs`, where `⊔` = [`zipper_join`]
+///
+/// # See also
+///
+/// [`zipper_join`]
+///
+pub fn zipper_join3<V, ZL, ZM, ZR, Out, A>(lhs: &mut ZL, mid: &mut ZM, rhs: &mut ZR, out: &mut Out)
+where
+    V: Lattice + Clone + Send + Sync,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZM: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    zipper_merge3::<Join, V, ZL, ZM, ZR, Out, A>(lhs, mid, rhs, out);
 }
 
 /// Performs an ordered meet (greatest lower bound) of two radix-256 tries using zipper traversal.
@@ -304,107 +209,26 @@ where
     ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
-    fn meet_values<V, ZL, ZR, Out, A>(lhs: &ZL, rhs: &ZR, out: &mut Out)
-    where
-        V: Lattice + Clone + Send + Sync,
-        A: Allocator,
-        ZL: ZipperValues<V>,
-        ZR: ZipperValues<V>,
-        Out: ZipperWriting<V, A>,
-    {
-        if let Some(lv) = lhs.val() {
-            if let Some(rv) = rhs.val() {
-                match lv.pmeet(rv) {
-                    AlgebraicResult::None => {}
-                    AlgebraicResult::Identity(mask) => {
-                        if mask & SELF_IDENT != 0 {
-                            out.set_val(lv.clone());
-                        } else if mask & COUNTER_IDENT != 0 {
-                            out.set_val(rv.clone());
-                        }
-                    }
-                    AlgebraicResult::Element(v) => {
-                        out.set_val(v);
-                    }
-                }
-            }
-        }
-    }
+    zipper_merge::<Meet, V, ZL, ZR, Out, A>(lhs, rhs, out);
+}
 
-    // meet root values before descending
-    meet_values(lhs, rhs, out);
-
-    let mut k = 0;
-    let mut lhs_mask = lhs.child_mask();
-    let mut rhs_mask = rhs.child_mask();
-    let mut lhs_idx = 0;
-    let mut rhs_idx = 0;
-
-    // At each node, the algorithm treats the sets of child edges of `lhs` and `rhs` as two
-    // sorted sequences and performs a merge-like traversal:
-    //
-    // - If a range of edges exists only in one side, the corresponding subtries are skipped
-    //   without further traversal.
-    // - If both sides contain the same edge, the algorithm descends into that child,
-    //   recursively merging the corresponding subtries.
-    // - Descent is simulated iteratively using zipper movement (`descend_to_byte` /
-    //   `ascend_byte`) and an explicit depth counter (`k`).
-    'ascend: loop {
-        'merge_level: loop {
-            let lhs_next = lhs_mask.indexed_bit::<true>(lhs_idx as usize);
-            let rhs_next = rhs_mask.indexed_bit::<true>(rhs_idx as usize);
-
-            match lhs_next {
-                Some(lhs_byte) => match rhs_next {
-                    Some(rhs_byte) if lhs_byte < rhs_byte => {
-                        // skip lhs-only range
-                        lhs_idx = lhs_mask.index_of(rhs_byte);
-                    }
-                    Some(rhs_byte) if lhs_byte > rhs_byte => {
-                        // skip rhs-only range
-                        rhs_idx = rhs_mask.index_of(lhs_byte);
-                    }
-                    Some(rhs_byte) => {
-                        // equal → descend
-                        out.descend_to_byte(lhs_byte);
-
-                        lhs.descend_to_byte(lhs_byte);
-                        rhs.descend_to_byte(lhs_byte);
-
-                        meet_values(lhs, rhs, out);
-
-                        lhs_mask = lhs.child_mask();
-                        rhs_mask = rhs.child_mask();
-
-                        lhs_idx = 0;
-                        rhs_idx = 0;
-
-                        k += 1;
-                        continue 'merge_level;
-                    }
-                    None => break 'merge_level,
-                },
-                None => break 'merge_level,
-            }
-        }
-
-        if k == 0 {
-            break 'ascend;
-        }
-
-        let byte_from = *lhs.path().last().expect("non-empty path when k > 0");
-
-        rhs.ascend_byte();
-        rhs_mask = rhs.child_mask();
-        rhs_idx = rhs_mask.index_of(byte_from) + 1;
-
-        lhs.ascend_byte();
-        lhs_mask = lhs.child_mask();
-        lhs_idx = lhs_mask.index_of(byte_from) + 1;
-
-        out.ascend_byte();
-        k -= 1;
-    }
+/// Performs an ordered meet (greater lower bound) of three radix-256 tries using zipper traversal.
+/// That is, it performs: (`lhs` ⊓ `mid`) ⊓ `rhs`, where `⊓` = [`zipper_meet`]
+///
+/// # See also
+///
+/// [`zipper_meet`]
+///
+pub fn zipper_meet3<V, ZL, ZM, ZR, Out, A>(lhs: &mut ZL, mid: &mut ZM, rhs: &mut ZR, out: &mut Out)
+where
+    V: Lattice + Clone + Send + Sync,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZM: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    zipper_merge3::<Meet, V, ZL, ZM, ZR, Out, A>(lhs, mid, rhs, out);
 }
 
 /// Performs an ordered subtraction (set difference, `lhs \ rhs`) of two radix-256 tries
@@ -461,36 +285,83 @@ where
     ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
-    fn combine_values<V, ZL, ZR, Out, A>(lhs: &ZL, rhs: &ZR, out: &mut Out)
+    zipper_merge::<Subtract, V, ZL, ZR, Out, A>(lhs, rhs, out);
+}
+
+/// Performs an ordered subtraction (set difference of three radix-256 tries using zipper traversal.
+/// That is, it performs: (`lhs` \ `mid`) \ `rhs`, where `\` = [`zipper_subtract`]
+///
+/// # See also
+///
+/// [`zipper_subtract`]
+///
+pub fn zipper_subtract3<V, ZL, ZM, ZR, Out, A>(
+    lhs: &mut ZL,
+    mid: &mut ZM,
+    rhs: &mut ZR,
+    out: &mut Out,
+) where
+    V: DistributiveLattice + Clone + Send + Sync,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZM: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    zipper_merge3::<Subtract, V, ZL, ZM, ZR, Out, A>(lhs, mid, rhs, out);
+}
+
+trait MergePolicy<V: Clone + Send + Sync> {
+    #[inline]
+    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
     where
-        V: DistributiveLattice + Clone + Send + Sync,
         A: Allocator,
-        ZL: ZipperValues<V>,
-        ZR: ZipperValues<V>,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        if let Some(lv) = lhs.val() {
-            if let Some(rv) = rhs.val() {
-                match lv.psubtract(rv) {
-                    AlgebraicResult::None => {}
-                    AlgebraicResult::Identity(mask) => {
-                        if mask & SELF_IDENT != 0 {
-                            out.set_val(lv.clone());
-                        }
-                    }
-                    AlgebraicResult::Element(v) => {
-                        out.set_val(v);
-                    }
-                }
-            } else {
-                // lhs-only → keep
-                out.set_val(lv.clone());
-            }
-        }
+        Self::on_single(z, 0b01, range, out);
     }
 
-    // combine root values before descending
-    combine_values(lhs, rhs, out);
+    #[inline]
+    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        Self::on_single(z, 0b10, range, out);
+    }
+
+    fn on_single<Z, Out, A>(z: &mut Z, mask: u64, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>;
+
+    fn descend_on_some_equal(mask: u64) -> bool;
+}
+
+trait ValuePolicy<V> {
+    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V>;
+    fn combine3(l: Option<&V>, m: Option<&V>, r: Option<&V>) -> Option<V> {
+        // (l op m) op r
+        Self::combine(Self::combine(l, m).as_ref(), r)
+    }
+}
+
+fn zipper_merge<P, V, ZL, ZR, Out, A>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
+where
+    V: Clone + Send + Sync,
+    P: MergePolicy<V> + ValuePolicy<V>,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    // merge root values before descending
+    if let Some(v) = P::combine(lhs.val(), rhs.val()) {
+        out.set_val(v);
+    }
 
     let mut k = 0;
     let mut lhs_mask = lhs.child_mask();
@@ -498,12 +369,15 @@ where
     let mut lhs_idx = 0;
     let mut rhs_idx = 0;
 
-    // The traversal follows a merge-like strategy over ordered child edges:
+    // At each node, the algorithm treats the sets of child edges of `lhs` and `rhs` as two sorted
+    // sequences and performs a merge-like traversal:
     //
-    // - Subtries that exist only in `lhs` are *grafted* directly into the output.
-    // - Subtries that exist only in `rhs` are skipped.
-    // - When both sides contain the same edge, the algorithm descends into that child
-    //   and continues subtracting recursively.
+    // - If a range of edges exists only in one side, the corresponding merge policy method is
+    //   called.
+    // - If both sides contain the same edge, the algorithm descends into that child, recursively
+    //   merging the corresponding subtries.
+    // - Descent is simulated iteratively using zipper movement (`descend_to_byte` / `ascend_byte`)
+    //   and an explicit depth counter (`k`).
     'ascend: loop {
         'merge_level: loop {
             let lhs_next = lhs_mask.indexed_bit::<true>(lhs_idx as usize);
@@ -512,11 +386,11 @@ where
             match lhs_next {
                 Some(lhs_byte) => match rhs_next {
                     Some(rhs_byte) if lhs_byte < rhs_byte => {
-                        out.graft_children(lhs, ByteMask::from_range(lhs_byte..rhs_byte));
+                        P::on_left_only(lhs, ByteMask::from_range(lhs_byte..rhs_byte), out);
                         lhs_idx = lhs_mask.index_of(rhs_byte);
                     }
                     Some(rhs_byte) if lhs_byte > rhs_byte => {
-                        // skip rhs-only range
+                        P::on_right_only(rhs, ByteMask::from_range(rhs_byte..lhs_byte), out);
                         rhs_idx = rhs_mask.index_of(lhs_byte);
                     }
                     Some(rhs_byte) => {
@@ -526,7 +400,9 @@ where
                         lhs.descend_to_byte(lhs_byte);
                         rhs.descend_to_byte(lhs_byte);
 
-                        combine_values(lhs, rhs, out);
+                        if let Some(v) = P::combine(lhs.val(), rhs.val()) {
+                            out.set_val(v);
+                        }
 
                         lhs_mask = lhs.child_mask();
                         rhs_mask = rhs.child_mask();
@@ -538,14 +414,21 @@ where
                         continue 'merge_level;
                     }
                     None => {
-                        out.graft_children(lhs, ByteMask::from_range(lhs_byte..));
+                        P::on_left_only(lhs, ByteMask::from_range(lhs_byte..), out);
                         break 'merge_level;
                     }
                 },
-                None => break 'merge_level,
+                None => match rhs_next {
+                    Some(rhs_byte) => {
+                        P::on_right_only(rhs, ByteMask::from_range(rhs_byte..), out);
+                        break 'merge_level;
+                    }
+                    None => break 'merge_level,
+                },
             }
         }
 
+        // If we are at root and no deeper recursion pending, we're done
         if k == 0 {
             break 'ascend;
         }
@@ -565,6 +448,369 @@ where
     }
 }
 
+#[inline(always)]
+fn cmp_swap(a: &mut Option<u8>, b: &mut Option<u8>) {
+    if let Some(x) = *a {
+        if let Some(y) = *b {
+            if y < x {
+                std::mem::swap(a, b);
+            }
+        }
+    } else {
+        std::mem::swap(a, b);
+    }
+}
+
+fn zipper_merge3<P, V, ZL, ZM, ZR, Out, A>(lhs: &mut ZL, mid: &mut ZM, rhs: &mut ZR, out: &mut Out)
+where
+    V: Clone + Send + Sync,
+    P: MergePolicy<V> + ValuePolicy<V>,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZM: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    const L: u8 = 0b001;
+    const M: u8 = 0b010;
+    const R: u8 = 0b100;
+    const LM: u8 = L | M;
+    const LR: u8 = L | R;
+    const MR: u8 = M | R;
+    const LMR: u8 = L | M | R;
+
+    fn descend2<P, V, ZL, ZR, Out, A>(b: u8, lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
+    where
+        V: Clone + Send + Sync,
+        P: MergePolicy<V> + ValuePolicy<V>,
+        A: Allocator,
+        ZL: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        ZR: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        out.descend_to_byte(b);
+        lhs.descend_to_byte(b);
+        rhs.descend_to_byte(b);
+
+        zipper_merge::<P, V, ZL, ZR, Out, A>(lhs, rhs, out);
+
+        rhs.ascend_byte();
+        lhs.ascend_byte();
+        out.ascend_byte();
+    }
+
+    // merge root values before descending
+    if let Some(v) = P::combine3(lhs.val(), mid.val(), rhs.val()) {
+        out.set_val(v);
+    }
+
+    let mut k = 0;
+    let mut lhs_mask = lhs.child_mask();
+    let mut mid_mask = mid.child_mask();
+    let mut rhs_mask = rhs.child_mask();
+    let mut lhs_idx = 0;
+    let mut mid_idx = 0;
+    let mut rhs_idx = 0;
+
+    'ascend: loop {
+        'merge_level: loop {
+            let l = lhs_mask.indexed_bit::<true>(lhs_idx as usize);
+            let m = mid_mask.indexed_bit::<true>(mid_idx as usize);
+            let r = rhs_mask.indexed_bit::<true>(rhs_idx as usize);
+
+            let mut a = l;
+            let mut b = m;
+            let mut c = r;
+
+            cmp_swap(&mut a, &mut b);
+            cmp_swap(&mut a, &mut c);
+
+            if let Some(min) = a {
+                let mut frontier = 0;
+                if a == l {
+                    frontier = L;
+                }
+                if a == m {
+                    frontier |= M;
+                }
+                if a == r {
+                    frontier |= R;
+                }
+
+                match frontier {
+                    // single → graft
+                    L => {
+                        cmp_swap(&mut b, &mut c);
+                        if let Some(next) = b {
+                            P::on_single(lhs, L as u64, ByteMask::from_range(min..next), out);
+                            lhs_idx = lhs_mask.index_of(next)
+                        } else {
+                            P::on_single(lhs, L as u64, ByteMask::from_range(min..), out);
+                            break 'merge_level;
+                        }
+                    }
+                    M => {
+                        cmp_swap(&mut b, &mut c);
+                        if let Some(next) = b {
+                            P::on_single(mid, M as u64, ByteMask::from_range(min..next), out);
+                            mid_idx = mid_mask.index_of(next);
+                        } else {
+                            P::on_single(mid, M as u64, ByteMask::from_range(min..), out);
+                            break 'merge_level;
+                        }
+                    }
+                    R => {
+                        cmp_swap(&mut b, &mut c);
+                        if let Some(next) = b {
+                            P::on_single(rhs, R as u64, ByteMask::from_range(min..next), out);
+                            rhs_idx = rhs_mask.index_of(next);
+                        } else {
+                            P::on_single(rhs, R as u64, ByteMask::from_range(min..), out);
+                            break 'merge_level;
+                        }
+                    }
+                    // two-way → descend 2
+                    LM => {
+                        if P::descend_on_some_equal(LM as u64) {
+                            descend2::<P, V, ZL, ZM, Out, A>(min, lhs, mid, out);
+                        }
+                        lhs_idx += 1;
+                        mid_idx += 1;
+                    }
+                    MR => {
+                        if P::descend_on_some_equal(MR as u64) {
+                            descend2::<P, V, ZM, ZR, Out, A>(min, mid, rhs, out);
+                        }
+                        mid_idx += 1;
+                        rhs_idx += 1;
+                    }
+                    LR => {
+                        if P::descend_on_some_equal(LR as u64) {
+                            descend2::<P, V, ZL, ZR, Out, A>(min, lhs, rhs, out);
+                        }
+                        lhs_idx += 1;
+                        rhs_idx += 1;
+                    }
+                    // full 3-way
+                    LMR => {
+                        out.descend_to_byte(min);
+
+                        lhs.descend_to_byte(min);
+                        mid.descend_to_byte(min);
+                        rhs.descend_to_byte(min);
+
+                        if let Some(val) = P::combine3(lhs.val(), mid.val(), rhs.val()) {
+                            out.set_val(val);
+                        }
+
+                        lhs_mask = lhs.child_mask();
+                        mid_mask = mid.child_mask();
+                        rhs_mask = rhs.child_mask();
+
+                        lhs_idx = 0;
+                        mid_idx = 0;
+                        rhs_idx = 0;
+
+                        k += 1;
+                        continue 'merge_level;
+                    }
+                    _ => unreachable!(),
+                }
+            } else {
+                break 'merge_level;
+            }
+        }
+
+        // If we are at root and no deeper recursion pending, we're done
+        if k == 0 {
+            break 'ascend;
+        }
+
+        let byte_from = *lhs.path().last().expect("non-empty path when k > 0");
+
+        rhs.ascend_byte();
+        rhs_mask = rhs.child_mask();
+        rhs_idx = rhs_mask.index_of(byte_from) + 1;
+
+        mid.ascend_byte();
+        mid_mask = mid.child_mask();
+        mid_idx = mid_mask.index_of(byte_from) + 1;
+
+        lhs.ascend_byte();
+        lhs_mask = lhs.child_mask();
+        lhs_idx = lhs_mask.index_of(byte_from) + 1;
+
+        out.ascend_byte();
+        k -= 1;
+    }
+}
+
+// ==================== JOIN ====================
+
+struct Join;
+impl<V: Clone + Send + Sync> MergePolicy<V> for Join {
+    #[inline]
+    fn on_single<Z, Out, A>(z: &mut Z, _mask: u64, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        out.graft_children(z, range);
+    }
+
+    #[inline]
+    fn descend_on_some_equal(_mask: u64) -> bool {
+        true
+    }
+}
+
+impl<V: Lattice + Clone> ValuePolicy<V> for Join {
+    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
+        if let Some(lv) = l {
+            if let Some(rv) = r {
+                match lv.pjoin(rv) {
+                    AlgebraicResult::None => None,
+                    AlgebraicResult::Identity(mask) => {
+                        if mask & SELF_IDENT != 0 {
+                            l.cloned()
+                        } else {
+                            r.cloned()
+                        }
+                    }
+                    AlgebraicResult::Element(v) => Some(v),
+                }
+            } else {
+                l.cloned()
+            }
+        } else {
+            r.cloned()
+        }
+    }
+}
+
+// ==================== MEET ====================
+
+struct Meet;
+impl<V: Clone + Send + Sync> MergePolicy<V> for Meet {
+    #[inline(always)]
+    fn on_single<Z, Out, A>(_z: &mut Z, _mask: u64, _range: ByteMask, _out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+    }
+
+    #[inline(always)]
+    fn descend_on_some_equal(_mask: u64) -> bool {
+        false
+    }
+}
+
+impl<V: Lattice + Clone> ValuePolicy<V> for Meet {
+    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
+        l.and_then(|lv| r.and_then(|rv| meet_refs(lv, rv)))
+    }
+
+    fn combine3(l: Option<&V>, m: Option<&V>, r: Option<&V>) -> Option<V> {
+        l.and_then(|x| m.and_then(|y| r.and_then(|z| meet_acc(meet_refs(x, y)?, z))))
+    }
+}
+
+#[inline]
+fn meet_refs<V: Lattice + Clone>(a: &V, b: &V) -> Option<V> {
+    match a.pmeet(b) {
+        AlgebraicResult::None => None,
+        AlgebraicResult::Identity(mask) => {
+            if mask & SELF_IDENT != 0 {
+                Some(a.clone())
+            } else {
+                Some(b.clone())
+            }
+        }
+        AlgebraicResult::Element(v) => Some(v),
+    }
+}
+#[inline]
+fn meet_acc<V: Lattice + Clone>(a: V, b: &V) -> Option<V> {
+    match a.pmeet(b) {
+        AlgebraicResult::None => None,
+        AlgebraicResult::Identity(mask) => {
+            if mask & SELF_IDENT != 0 {
+                Some(a)
+            } else {
+                Some(b.clone())
+            }
+        }
+        AlgebraicResult::Element(v) => Some(v),
+    }
+}
+
+// ==================== SUBTRACT ====================
+
+struct Subtract;
+impl<V: Clone + Send + Sync> MergePolicy<V> for Subtract {
+    #[inline]
+    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        out.graft_children(z, range);
+    }
+
+    #[inline]
+    fn on_right_only<Z, Out, A>(_z: &mut Z, _range: ByteMask, _out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+    }
+
+    #[inline]
+    fn on_single<Z, Out, A>(z: &mut Z, mask: u64, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        if mask == 1 {
+            out.graft_children(z, range);
+        }
+    }
+
+    #[inline]
+    fn descend_on_some_equal(mask: u64) -> bool {
+        mask & 1 != 0
+    }
+}
+
+impl<V: DistributiveLattice + Clone> ValuePolicy<V> for Subtract {
+    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
+        l.and_then(|lv| {
+            if let Some(rv) = r {
+                match lv.psubtract(rv) {
+                    AlgebraicResult::None => None,
+                    AlgebraicResult::Identity(mask) => {
+                        if mask & SELF_IDENT != 0 {
+                            Some(lv.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    AlgebraicResult::Element(v) => Some(v),
+                }
+            } else {
+                // lhs-only → keep
+                Some(lv.clone())
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -573,13 +819,22 @@ mod tests {
     };
 
     type Paths = &'static [(&'static [u8], u64)];
-    type Test = (Paths, Paths);
+    type BinaryTest = (Paths, Paths);
+    type TernaryTest = (Paths, Paths, Paths);
 
-    fn mk_test(test: &Test) -> (PathMap<u64>, PathMap<u64>) {
+    fn mk_binary_test(test: &BinaryTest) -> (PathMap<u64>, PathMap<u64>) {
         (PathMap::from_iter(test.0), PathMap::from_iter(test.1))
     }
 
-    fn check<
+    fn mk_ternary_test(test: &TernaryTest) -> (PathMap<u64>, PathMap<u64>, PathMap<u64>) {
+        (
+            PathMap::from_iter(test.0),
+            PathMap::from_iter(test.1),
+            PathMap::from_iter(test.2),
+        )
+    }
+
+    fn check2<
         'x,
         T: IntoIterator<Item = &'x (&'x [u8], u64)>,
         F: for<'a> FnOnce(
@@ -588,11 +843,11 @@ mod tests {
             &mut WriteZipperUntracked<'a, 'x, u64>,
         ),
     >(
-        test: &Test,
+        test: &BinaryTest,
         expected: T,
         op: F,
     ) {
-        let (left, right) = mk_test(test);
+        let (left, right) = mk_binary_test(test);
 
         let mut result = PathMap::new();
 
@@ -602,6 +857,41 @@ mod tests {
 
         op(&mut lhs, &mut rhs, &mut out);
 
+        assert_trie(expected, result);
+    }
+
+    fn check3<
+        'x,
+        T: IntoIterator<Item = &'x (&'x [u8], u64)>,
+        F: for<'a> FnOnce(
+            &mut ReadZipperUntracked<'a, 'x, u64>,
+            &mut ReadZipperUntracked<'a, 'x, u64>,
+            &mut ReadZipperUntracked<'a, 'x, u64>,
+            &mut WriteZipperUntracked<'a, 'x, u64>,
+        ),
+    >(
+        test: &TernaryTest,
+        expected: T,
+        op: F,
+    ) {
+        let (left, middle, right) = mk_ternary_test(test);
+
+        let mut result = PathMap::new();
+
+        let mut lhs = left.read_zipper();
+        let mut mid = middle.read_zipper();
+        let mut rhs = right.read_zipper();
+        let mut out = result.write_zipper();
+
+        op(&mut lhs, &mut mid, &mut rhs, &mut out);
+
+        assert_trie(expected, result);
+    }
+
+    fn assert_trie<'a, T: IntoIterator<Item = &'a (&'a [u8], u64)>>(
+        expected: T,
+        result: PathMap<u64>,
+    ) {
         let mut result_copy = result.clone();
 
         for (expected_path, expected_val) in expected {
@@ -625,7 +915,7 @@ mod tests {
         );
     }
 
-    const DISJOINT_PATHS: Test = (
+    const DISJOINT_PATHS: BinaryTest = (
         &[
             (&[0x00], 0),
             (&[0x00, 0x00], 1),
@@ -640,17 +930,50 @@ mod tests {
         ],
     );
 
-    const PATHS_WITH_SHARED_PREFIX: Test = (
+    const DISJOINT_PATHS_3: TernaryTest = (
+        &[
+            (&[0x00], 0),
+            (&[0x00, 0x00], 1),
+            (&[0x00, 0x00, 0x00], 2),
+            (&[0x00, 0x00, 0x00, 0x00], 3),
+        ],
+        &[
+            (&[0xF0], 0),
+            (&[0xF0, 0x00], 1),
+            (&[0xF0, 0x00, 0x00], 2),
+            (&[0xF0, 0x00, 0x00, 0x00], 3),
+        ],
+        &[
+            (&[0xFF], 0),
+            (&[0xFF, 0x00], 1),
+            (&[0xFF, 0x00, 0x00], 2),
+            (&[0xFF, 0x00, 0x00, 0x00], 3),
+        ],
+    );
+
+    const PATHS_WITH_SHARED_PREFIX: BinaryTest = (
         &[(b"aaaaa0", 0), (b"bbbbbbbb0", 1)],
         &[(b"aaaaa1", 0), (b"bbbbb1", 1), (b"bbbbbbbb1", 2)],
     );
 
-    const INTERLEAVING_PATHS: Test = (
+    const PATHS_WITH_SHARED_PREFIX_3: TernaryTest = (
+        &[(b"aaaaa0", 0), (b"bbbbbbbb0", 1)],
+        &[(b"aaaaa1", 0), (b"bbbbb1", 1), (b"bbbbbbbb1", 2)],
+        &[(b"aaaaa2", 0), (b"bbbbb2", 1), (b"bbbbbbbb2", 2)],
+    );
+
+    const INTERLEAVING_PATHS: BinaryTest = (
         &[(&[0], 0), (&[2], 1), (&[4], 2), (&[6], 3)],
         &[(&[1], 0), (&[3], 1), (&[5], 2), (&[7], 3)],
     );
 
-    const ONE_SIDED_PATHS: Test = (
+    const INTERLEAVING_PATHS_3: TernaryTest = (
+        &[(&[0], 0), (&[3], 1), (&[6], 2), (&[9], 3)],
+        &[(&[1], 0), (&[4], 1), (&[7], 2), (&[10], 3)],
+        &[(&[2], 0), (&[5], 1), (&[8], 2), (&[11], 3)],
+    );
+
+    const ONE_SIDED_PATHS: BinaryTest = (
         &[
             (&[0x00], 0),
             (&[0x00, 0x01], 1),
@@ -670,7 +993,28 @@ mod tests {
         ],
     );
 
-    const ALMOST_IDENTICAL_PATHS: Test = (
+    const ONE_SIDED_PATHS_3: TernaryTest = (
+        &[
+            (&[0x00], 0),
+            (&[0x00, 0x01], 1),
+            (&[0x00, 0x01, 0x02], 2),
+            (&[0x00, 0x01, 0x02, 0x03], 3),
+            (&[0x01], 4),
+            (&[0x01, 0x02], 5),
+            (&[0x01, 0x02, 0x03], 6),
+            (&[0x01, 0x02, 0x03, 0x04], 7),
+            (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
+            (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
+        ],
+        &[
+            (&[0x00], 0),
+            (&[0x00, 0x01, 0x02, 0x03], 1),
+            (&[0x01, 0x02, 0x03, 0x04, 0x05], 2),
+        ],
+        &[(&[0x00], 0), (&[0x00, 0x01, 0x02], 1)],
+    );
+
+    const ALMOST_IDENTICAL_PATHS: BinaryTest = (
         &[
             (b"abcdefg", 0),
             (b"hijklmnop", 1),
@@ -694,11 +1038,48 @@ mod tests {
         ],
     );
 
-    const LHS_EMPTY: Test = (&[], &[(&[1], 0), (&[2], 1)]);
+    const ALMOST_IDENTICAL_PATHS_3: TernaryTest = (
+        &[
+            (b"abcdefg", 0),
+            (b"hijklmnop", 1),
+            (b"qrstuwvxyz", 2),
+            (b"0", 3),
+            (b"1", 4),
+            (b"2", 5),
+            (b"3", 6),
+            (b"4", 7),
+            (b"5", 8),
+            (b"6789", 9),
+        ],
+        &[
+            (b"abcdefg", 0),
+            (b"qrstuwvxyz", 2),
+            (b"0", 3),
+            (b"1", 4),
+            (b"4", 7),
+            (b"5", 8),
+            (b"6789", 9),
+        ],
+        &[
+            (b"abcdefg", 0),
+            (b"hijklmnop", 1),
+            (b"1", 4),
+            (b"2", 5),
+            (b"3", 6),
+            (b"4", 7),
+            (b"5", 8),
+        ],
+    );
 
-    const RHS_EMPTY: Test = (&[(&[1], 0), (&[2], 1)], &[]);
+    const LHS_EMPTY: BinaryTest = (&[], &[(&[1], 0), (&[2], 1)]);
+    const LHS_EMPTY_3: TernaryTest = (&[], &[(&[1], 0), (&[2], 1)], &[(&[3], 0), (&[4], 1)]);
 
-    const PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN: Test = (
+    const RHS_EMPTY: BinaryTest = (&[(&[1], 0), (&[2], 1)], &[]);
+    const RHS_EMPTY_3: TernaryTest = (&[(&[1], 0), (&[2], 1)], &[(&[3], 0), (&[4], 1)], &[]);
+
+    const MID_EMPTY: TernaryTest = (&[(&[1], 0), (&[2], 1)], &[], &[(&[3], 0), (&[4], 1)]);
+
+    const PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN: BinaryTest = (
         &[
             (&[1, 2, 3], 0),
             (&[1, 2, 3, 4], 1),
@@ -711,7 +1092,25 @@ mod tests {
         ],
     );
 
-    const ZIGZAG_PATHS: Test = (
+    const PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3: TernaryTest = (
+        &[
+            (&[1, 2, 3], 0),
+            (&[1, 2, 3, 4], 1),
+            (&[1, 2, 3, 10, 11, 12], 2),
+        ],
+        &[
+            (&[1, 2, 3], 10),
+            (&[1, 2, 3, 5], 11),
+            (&[1, 2, 3, 10, 11, 0], 12),
+        ],
+        &[
+            (&[1, 2, 3], 20),
+            (&[1, 2, 3, 6], 21),
+            (&[1, 2, 3, 10, 11, 1], 22),
+        ],
+    );
+
+    const ZIGZAG_PATHS: BinaryTest = (
         &[
             (&[1, 1], 0),
             (&[2], 1),
@@ -731,16 +1130,50 @@ mod tests {
         ],
     );
 
-    const PATHS_WITH_ROOT_VALS_AND_CHILDREN: Test =
+    const ZIGZAG_PATHS_3: TernaryTest = (
+        &[
+            (&[1, 1], 0),
+            (&[2], 1),
+            (&[2, 1], 2),
+            (&[3], 3),
+            (&[3, 2, 1], 4),
+            (&[4], 4),
+            (&[4, 3, 2, 1], 5),
+        ],
+        &[
+            (&[1], 0),
+            (&[1, 2], 1),
+            (&[2, 1], 2),
+            (&[3], 3),
+            (&[3, 4], 4),
+            (&[4, 3], 5),
+        ],
+        &[
+            (&[1], 0),
+            (&[2], 1),
+            (&[2, 1], 2),
+            (&[3, 2, 1, 0], 3),
+            (&[4, 3, 2, 1, 0], 4),
+            (&[4, 3, 2, 1], 5),
+        ],
+    );
+
+    const PATHS_WITH_ROOT_VALS_AND_CHILDREN: BinaryTest =
         (&[(&[], 1), (&[1], 10)], &[(&[], 2), (&[1], 20)]);
+
+    const PATHS_WITH_ROOT_VALS_AND_CHILDREN_3: TernaryTest = (
+        &[(&[], 1), (&[1], 10)],
+        &[(&[], 2), (&[1], 20)],
+        &[(&[], 3), (&[1], 30)],
+    );
 
     mod join {
         use super::*;
-        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_join};
+        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_join, zipper_join3};
 
         #[test]
         fn test_disjoint() {
-            check(
+            check2(
                 &DISJOINT_PATHS,
                 &[DISJOINT_PATHS.0, DISJOINT_PATHS.1].concat(),
                 |lhs, rhs, out| lhs.join(rhs, out),
@@ -748,8 +1181,17 @@ mod tests {
         }
 
         #[test]
+        fn test_disjoint3() {
+            check3(
+                &DISJOINT_PATHS_3,
+                &[DISJOINT_PATHS_3.0, DISJOINT_PATHS_3.1, DISJOINT_PATHS_3.2].concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_deep_shared_prefix_then_split() {
-            check(
+            check2(
                 &PATHS_WITH_SHARED_PREFIX,
                 &[PATHS_WITH_SHARED_PREFIX.0, PATHS_WITH_SHARED_PREFIX.1].concat(),
                 |lhs, rhs, out| lhs.join(rhs, out),
@@ -757,8 +1199,22 @@ mod tests {
         }
 
         #[test]
+        fn test_deep_shared_prefix_then_split3() {
+            check3(
+                &PATHS_WITH_SHARED_PREFIX_3,
+                &[
+                    PATHS_WITH_SHARED_PREFIX_3.0,
+                    PATHS_WITH_SHARED_PREFIX_3.1,
+                    PATHS_WITH_SHARED_PREFIX_3.2,
+                ]
+                .concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_interleaving_paths() {
-            check(
+            check2(
                 &INTERLEAVING_PATHS,
                 &[INTERLEAVING_PATHS.0, INTERLEAVING_PATHS.1].concat(),
                 |lhs, rhs, out| lhs.join(rhs, out),
@@ -766,15 +1222,38 @@ mod tests {
         }
 
         #[test]
+        fn test_interleaving_paths3() {
+            check3(
+                &INTERLEAVING_PATHS_3,
+                &[
+                    INTERLEAVING_PATHS_3.0,
+                    INTERLEAVING_PATHS_3.1,
+                    INTERLEAVING_PATHS_3.2,
+                ]
+                .concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_one_side_empty_at_many_levels() {
-            check(&ONE_SIDED_PATHS, ONE_SIDED_PATHS.0, |lhs, rhs, out| {
+            check2(&ONE_SIDED_PATHS, ONE_SIDED_PATHS.0, |lhs, rhs, out| {
                 lhs.join(rhs, out)
             });
         }
 
         #[test]
+        fn test_one_side_empty_at_many_levels3() {
+            check3(
+                &ONE_SIDED_PATHS_3,
+                ONE_SIDED_PATHS_3.0,
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_almost_identical_paths() {
-            check(
+            check2(
                 &ALMOST_IDENTICAL_PATHS,
                 ALMOST_IDENTICAL_PATHS.0,
                 |lhs, rhs, out| lhs.join(rhs, out),
@@ -782,9 +1261,37 @@ mod tests {
         }
 
         #[test]
+        fn test_almost_identical_paths3() {
+            check3(
+                &ALMOST_IDENTICAL_PATHS_3,
+                ALMOST_IDENTICAL_PATHS_3.0,
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_one_side_empty() {
-            check(&LHS_EMPTY, LHS_EMPTY.1, |lhs, rhs, out| lhs.join(rhs, out));
-            check(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| lhs.join(rhs, out));
+            check2(&LHS_EMPTY, LHS_EMPTY.1, |lhs, rhs, out| lhs.join(rhs, out));
+            check2(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| lhs.join(rhs, out));
+        }
+
+        #[test]
+        fn test_one_side_empty3() {
+            check3(
+                &LHS_EMPTY_3,
+                &[LHS_EMPTY_3.1, LHS_EMPTY_3.2].concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+            check3(
+                &MID_EMPTY,
+                &[MID_EMPTY.0, MID_EMPTY.2].concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+            check3(
+                &RHS_EMPTY_3,
+                &[RHS_EMPTY_3.0, RHS_EMPTY_3.1].concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
         }
 
         #[test]
@@ -796,7 +1303,7 @@ mod tests {
                 (&[1, 2, 3, 10, 11, 0], 12),
                 (&[1, 2, 3, 10, 11, 12], 2),
             ];
-            check(
+            check2(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 expected,
                 |lhs, rhs, out| lhs.join(rhs, out),
@@ -804,8 +1311,26 @@ mod tests {
         }
 
         #[test]
+        fn test_exact_overlap_divergent_subtries3() {
+            let expected: Paths = &[
+                (&[1, 2, 3], 0),
+                (&[1, 2, 3, 4], 1),
+                (&[1, 2, 3, 5], 11),
+                (&[1, 2, 3, 6], 21),
+                (&[1, 2, 3, 10, 11, 0], 12),
+                (&[1, 2, 3, 10, 11, 1], 22),
+                (&[1, 2, 3, 10, 11, 12], 2),
+            ];
+            check3(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
+                expected,
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_zigzag() {
-            check(
+            check2(
                 &ZIGZAG_PATHS,
                 &[ZIGZAG_PATHS.0, ZIGZAG_PATHS.1].concat(),
                 |lhs, rhs, out| lhs.join(rhs, out),
@@ -813,37 +1338,76 @@ mod tests {
         }
 
         #[test]
+        fn test_zigzag3() {
+            check3(
+                &ZIGZAG_PATHS_3,
+                &[ZIGZAG_PATHS.0, ZIGZAG_PATHS.1, ZIGZAG_PATHS_3.2].concat(),
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_root_values() {
-            check(
+            check2(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
                 |lhs, rhs, out| lhs.join(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_root_values3() {
+            check3(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN_3,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN_3.0,
+                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
             );
         }
     }
 
     mod meet {
         use super::*;
-        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_meet};
+        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_meet, zipper_meet3};
 
         #[test]
         fn test_disjoint() {
-            check(&DISJOINT_PATHS, [], |lhs, rhs, out| {
+            check2(&DISJOINT_PATHS, [], |lhs, rhs, out| {
                 lhs.meet(rhs, out);
+            });
+        }
+
+        #[test]
+        fn test_disjoint3() {
+            check3(&DISJOINT_PATHS_3, [], |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out);
             });
         }
 
         #[test]
         fn test_deep_shared_prefix_then_split() {
-            check(&PATHS_WITH_SHARED_PREFIX, [], |lhs, rhs, out| {
+            check2(&PATHS_WITH_SHARED_PREFIX, [], |lhs, rhs, out| {
                 lhs.meet(rhs, out);
             });
         }
 
         #[test]
+        fn test_deep_shared_prefix_then_split3() {
+            check3(&PATHS_WITH_SHARED_PREFIX_3, [], |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
         fn test_interleaving_paths() {
-            check(&INTERLEAVING_PATHS, [], |lhs, rhs, out| {
+            check2(&INTERLEAVING_PATHS, [], |lhs, rhs, out| {
                 lhs.meet(rhs, out);
+            });
+        }
+
+        #[test]
+        fn test_interleaving_paths3() {
+            check3(&INTERLEAVING_PATHS_3, [], |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out);
             });
         }
 
@@ -854,14 +1418,22 @@ mod tests {
                 (&[0x00, 0x01, 0x02, 0x03], 3),
                 (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
             ];
-            check(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
+            check2(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
                 lhs.meet(rhs, out);
             });
         }
 
         #[test]
+        fn test_one_side_empty_at_many_levels3() {
+            let expected: Paths = &[(&[0x00], 0)];
+            check3(&ONE_SIDED_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
         fn test_almost_identical_paths() {
-            check(
+            check2(
                 &ALMOST_IDENTICAL_PATHS,
                 ALMOST_IDENTICAL_PATHS.1,
                 |lhs, rhs, out| lhs.meet(rhs, out),
@@ -869,15 +1441,36 @@ mod tests {
         }
 
         #[test]
+        fn test_almost_identical_paths3() {
+            let expected: Paths = &[(b"abcdefg", 0), (b"1", 4), (b"4", 7), (b"5", 8)];
+            check3(&ALMOST_IDENTICAL_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
         fn test_one_side_empty() {
-            check(&LHS_EMPTY, [], |lhs, rhs, out| lhs.meet(rhs, out));
-            check(&RHS_EMPTY, [], |lhs, rhs, out| lhs.meet(rhs, out));
+            check2(&LHS_EMPTY, [], |lhs, rhs, out| lhs.meet(rhs, out));
+            check2(&RHS_EMPTY, [], |lhs, rhs, out| lhs.meet(rhs, out));
+        }
+
+        #[test]
+        fn test_one_side_empty3() {
+            check3(&LHS_EMPTY_3, [], |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out)
+            });
+            check3(&MID_EMPTY, [], |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out)
+            });
+            check3(&RHS_EMPTY_3, [], |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out)
+            });
         }
 
         #[test]
         fn test_exact_overlap_divergent_subtries() {
             let expected: Paths = &[(&[1, 2, 3], 0)];
-            check(
+            check2(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 expected,
                 |lhs, rhs, out| lhs.meet(rhs, out),
@@ -885,37 +1478,77 @@ mod tests {
         }
 
         #[test]
+        fn test_exact_overlap_divergent_subtries3() {
+            let expected: Paths = &[(&[1, 2, 3], 0)];
+            check3(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
+                expected,
+                |lhs, mid, rhs, out| zipper_meet3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
         fn test_zigzag() {
             let expected: Paths = &[(&[2, 1], 2), (&[3], 3)];
-            check(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
+            check2(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
                 lhs.meet(rhs, out);
             });
         }
 
         #[test]
+        fn test_zigzag3() {
+            let expected: Paths = &[(&[2, 1], 2)];
+            check3(&ZIGZAG_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_meet3(lhs, mid, rhs, out)
+            });
+        }
+
+        #[test]
         fn test_root_values() {
-            check(
+            check2(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
                 |lhs, rhs, out| lhs.meet(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_root_values3() {
+            check3(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN_3,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
+                |lhs, mid, rhs, out| zipper_meet3(lhs, mid, rhs, out),
             );
         }
     }
 
     mod subtract {
         use super::*;
-        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_subtract};
+        use crate::experimental::zipper_algebra::{
+            ZipperAlgebraExt, zipper_subtract, zipper_subtract3,
+        };
 
         #[test]
         fn test_disjoint() {
-            check(&DISJOINT_PATHS, DISJOINT_PATHS.0, |lhs, rhs, out| {
+            check2(&DISJOINT_PATHS, DISJOINT_PATHS.0, |lhs, rhs, out| {
                 lhs.subtract(rhs, out);
             });
         }
 
         #[test]
+        fn test_disjoint3() {
+            check3(
+                &DISJOINT_PATHS_3,
+                DISJOINT_PATHS_3.0,
+                |lhs, mid, rhs, out| {
+                    zipper_subtract3(lhs, mid, rhs, out);
+                },
+            );
+        }
+
+        #[test]
         fn test_deep_shared_prefix_then_split() {
-            check(
+            check2(
                 &PATHS_WITH_SHARED_PREFIX,
                 PATHS_WITH_SHARED_PREFIX.0,
                 |lhs, rhs, out| lhs.subtract(rhs, out),
@@ -923,11 +1556,33 @@ mod tests {
         }
 
         #[test]
+        fn test_deep_shared_prefix_then_split3() {
+            check3(
+                &PATHS_WITH_SHARED_PREFIX_3,
+                PATHS_WITH_SHARED_PREFIX_3.0,
+                |lhs, mid, rhs, out| {
+                    zipper_subtract3(lhs, mid, rhs, out);
+                },
+            );
+        }
+
+        #[test]
         fn test_interleaving_paths() {
-            check(
+            check2(
                 &INTERLEAVING_PATHS,
                 INTERLEAVING_PATHS.0,
                 |lhs, rhs, out| lhs.subtract(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_interleaving_paths3() {
+            check3(
+                &INTERLEAVING_PATHS_3,
+                INTERLEAVING_PATHS_3.0,
+                |lhs, mid, rhs, out| {
+                    zipper_subtract3(lhs, mid, rhs, out);
+                },
             );
         }
 
@@ -944,33 +1599,82 @@ mod tests {
                 (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
                 (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
             ];
-            check(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
+            check2(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
                 lhs.subtract(rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_one_side_empty_at_many_levels3() {
+            let expected: Paths = &[
+                (&[0x00, 0x01], 1),
+                (&[0x00, 0x01, 0x02], 2),
+                (&[0x00, 0x01, 0x02, 0x03], 3),
+                (&[0x01], 4),
+                (&[0x01, 0x02], 5),
+                (&[0x01, 0x02, 0x03], 6),
+                (&[0x01, 0x02, 0x03, 0x04], 7),
+                (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
+                (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
+            ];
+            check3(&ONE_SIDED_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_subtract3(lhs, mid, rhs, out);
             });
         }
 
         #[test]
         fn test_almost_identical_paths() {
             let expected: Paths = &[(b"hijklmnop", 1), (b"2", 5), (b"3", 6)];
-            check(&ALMOST_IDENTICAL_PATHS, expected, |lhs, rhs, out| {
+            check2(&ALMOST_IDENTICAL_PATHS, expected, |lhs, rhs, out| {
                 lhs.subtract(rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_almost_identical_paths3() {
+            check3(&ALMOST_IDENTICAL_PATHS_3, [], |lhs, mid, rhs, out| {
+                zipper_subtract3(lhs, mid, rhs, out);
             });
         }
 
         #[test]
         fn test_one_side_empty() {
-            check(&LHS_EMPTY, [], |lhs, rhs, out| lhs.subtract(rhs, out));
-            check(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| {
+            check2(&LHS_EMPTY, [], |lhs, rhs, out| lhs.subtract(rhs, out));
+            check2(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| {
                 lhs.subtract(rhs, out)
             });
         }
 
         #[test]
+        fn test_one_side_empty3() {
+            check3(&LHS_EMPTY_3, [], |lhs, mid, rhs, out| {
+                zipper_subtract3(lhs, mid, rhs, out);
+            });
+            check3(&MID_EMPTY, MID_EMPTY.0, |lhs, mid, rhs, out| {
+                zipper_subtract3(lhs, mid, rhs, out);
+            });
+            check3(&RHS_EMPTY_3, RHS_EMPTY_3.0, |lhs, mid, rhs, out| {
+                zipper_subtract3(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
         fn test_exact_overlap_divergent_subtries() {
-            check(
+            check2(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN.0,
                 |lhs, rhs, out| lhs.subtract(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_exact_overlap_divergent_subtries3() {
+            check3(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
+                PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3.0,
+                |lhs, mid, rhs, out| {
+                    zipper_subtract3(lhs, mid, rhs, out);
+                },
             );
         }
 
@@ -983,17 +1687,36 @@ mod tests {
                 (&[4], 4),
                 (&[4, 3, 2, 1], 5),
             ];
-            check(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
+            check2(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
                 lhs.subtract(rhs, out)
             });
         }
 
         #[test]
+        fn test_zigzag3() {
+            let expected: Paths = &[(&[1, 1], 0), (&[3, 2, 1], 4), (&[4], 4)];
+            check3(&ZIGZAG_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_subtract3(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
         fn test_root_values() {
-            check(
+            check2(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
                 |lhs, rhs, out| lhs.subtract(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_root_values3() {
+            check3(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN_3,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN_3.0,
+                |lhs, mid, rhs, out| {
+                    zipper_subtract3(lhs, mid, rhs, out);
+                },
             );
         }
     }
