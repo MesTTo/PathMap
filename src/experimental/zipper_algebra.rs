@@ -1437,28 +1437,6 @@ mod zipper_algebra_poly {
         RZT(ReadZipperTracked<'trie, 'path, V, A>),
     }
 
-    impl<V: Clone + Send + Sync + Unpin, A: Allocator> zipper_priv::ZipperPriv for SomeZ<'_, '_, V, A> {
-        type V = V;
-
-        type A = A;
-
-        #[inline]
-        fn get_focus(&self) -> AbstractNodeRef<'_, Self::V, Self::A> {
-            match self {
-                SomeZ::RZ(inner) => inner.get_focus(),
-                SomeZ::RZT(inner) => inner.get_focus(),
-            }
-        }
-
-        #[inline]
-        fn try_borrow_focus(&self) -> Option<&TrieNodeODRc<Self::V, Self::A>> {
-            match self {
-                SomeZ::RZ(inner) => inner.try_borrow_focus(),
-                SomeZ::RZT(inner) => inner.try_borrow_focus(),
-            }
-        }
-    }
-
     impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A>
         for SomeZ<'_, '_, V, A>
     {
@@ -1473,6 +1451,20 @@ mod zipper_algebra_poly {
             match self {
                 SomeZ::RZ(inner) => inner.get_trie_ref(),
                 SomeZ::RZT(inner) => inner.get_trie_ref(),
+            }
+        }
+
+        fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> {
+            match self {
+                SomeZ::RZ(inner) => inner.get_focus(),
+                SomeZ::RZT(inner) => inner.get_focus(),
+            }
+        }
+
+        fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
+            match self {
+                SomeZ::RZ(inner) => inner.try_borrow_focus(),
+                SomeZ::RZT(inner) => inner.try_borrow_focus(),
             }
         }
     }
