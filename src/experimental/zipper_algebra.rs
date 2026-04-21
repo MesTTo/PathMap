@@ -1676,6 +1676,71 @@ mod zipper_algebra_poly {
         Z21, Z22, Z23, Z24, Z25, Z26, Z27, Z28, Z29, Z30, Z31, Z32
     );
 
+    /// Performs an N-ary zipper join by borrowing all inputs mutably
+    /// and forwarding them to [`ZipperMergeF::join_n`].
+    ///
+    /// # Example
+    /// ```
+    /// zipper_join_n!(z1, z2, z3 => out);
+    /// ```
+    ///
+    /// Expands roughly to:
+    /// ```ignore
+    /// (&mut z1, &mut z2, &mut z3).join_n(&mut out)
+    /// ```
+    ///
+    /// # See also
+    /// [`ZipperMergeF::join_n`]
+    #[macro_export]
+    macro_rules! zipper_join_n {
+    ( $($z:ident),+ => $out:ident ) => {{
+        ( $( &mut $z ),+ ).join_n(&mut $out)
+    }};
+}
+
+    /// Performs an N-ary zipper meet by borrowing all inputs mutably
+    /// and forwarding them to [`ZipperMergeF::meet_n`].
+    ///
+    /// # Example
+    /// ```
+    /// zipper_meet_n!(z1, z2, z3 => out);
+    /// ```
+    ///
+    /// Expands roughly to:
+    /// ```ignore
+    /// (&mut z1, &mut z2, &mut z3).meet_n(&mut out)
+    /// ```
+    ///
+    /// # See also
+    /// [`ZipperMergeF::meet_n`]
+    #[macro_export]
+    macro_rules! zipper_meet_n {
+    ( $($z:ident),+ => $out:ident ) => {{
+        ( $( &mut $z ),+ ).meet_n(&mut $out)
+    }};
+}
+
+    /// Performs an N-ary zipper subtract by borrowing all inputs mutably
+    /// and forwarding them to [`ZipperMergeF::subtract_n`].
+    ///
+    /// # Example
+    /// ```
+    /// zipper_subtract_n!(z1, z2, z3 => out);
+    /// ```
+    ///
+    /// Expands roughly to:
+    /// ```ignore
+    /// (&mut z1, &mut z2, &mut z3).subtract_n(&mut out)
+    /// ```
+    ///
+    /// # See also
+    /// [`ZipperMergeF::subtract_n`]
+    #[macro_export]
+    macro_rules! zipper_subtract_n {
+    ( $($z:ident),+ => $out:ident ) => {{
+        ( $( &mut $z ),+ ).subtract_n(&mut $out)
+    }};
+}
 }
 
 #[cfg(test)]
