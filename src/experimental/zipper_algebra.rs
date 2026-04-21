@@ -1753,6 +1753,8 @@ mod tests {
     type Paths = &'static [(&'static [u8], u64)];
     type BinaryTest = (Paths, Paths);
     type TernaryTest = (Paths, Paths, Paths);
+    type NaryTest = [Paths; N];
+    const N: usize = 6;
 
     fn mk_binary_test(test: &BinaryTest) -> (PathMap<u64>, PathMap<u64>) {
         (PathMap::from_iter(test.0), PathMap::from_iter(test.1))
@@ -1764,6 +1766,10 @@ mod tests {
             PathMap::from_iter(test.1),
             PathMap::from_iter(test.2),
         )
+    }
+
+    fn mk_nary_test(test: &NaryTest) -> [PathMap<u64>; N] {
+        test.map(PathMap::from_iter)
     }
 
     fn check2<
@@ -1816,6 +1822,27 @@ mod tests {
         let mut out = result.write_zipper();
 
         op(&mut lhs, &mut mid, &mut rhs, &mut out);
+
+        assert_trie(expected, result);
+    }
+
+    fn checkn<
+        'x,
+        T: IntoIterator<Item = &'x (&'x [u8], u64)>,
+        F: for<'a> FnOnce([ReadZipperUntracked<'a, 'x, u64>; N], WriteZipperUntracked<'a, 'x, u64>),
+    >(
+        test: &NaryTest,
+        expected: T,
+        op: F,
+    ) {
+        let path_maps = mk_nary_test(test);
+
+        let mut result = PathMap::new();
+
+        op(
+            path_maps.each_ref().map(PathMap::read_zipper),
+            result.write_zipper(),
+        );
 
         assert_trie(expected, result);
     }
@@ -1883,6 +1910,45 @@ mod tests {
         ],
     );
 
+    const DISJOINT_PATHS_N: NaryTest = [
+        &[
+            (&[0x00], 0),
+            (&[0x00, 0x00], 1),
+            (&[0x00, 0x00, 0x00], 2),
+            (&[0x00, 0x00, 0x00, 0x00], 3),
+        ],
+        &[
+            (&[0xC0], 0),
+            (&[0xC0, 0x00], 1),
+            (&[0xC0, 0x00, 0x00], 2),
+            (&[0xC0, 0x00, 0x00, 0x00], 3),
+        ],
+        &[
+            (&[0xD0], 0),
+            (&[0xD0, 0x00], 1),
+            (&[0xD0, 0x00, 0x00], 2),
+            (&[0xD0, 0x00, 0x00, 0x00], 3),
+        ],
+        &[
+            (&[0xE0], 0),
+            (&[0xE0, 0x00], 1),
+            (&[0xE0, 0x00, 0x00], 2),
+            (&[0xE0, 0x00, 0x00, 0x00], 3),
+        ],
+        &[
+            (&[0xF0], 0),
+            (&[0xF0, 0x00], 1),
+            (&[0xF0, 0x00, 0x00], 2),
+            (&[0xF0, 0x00, 0x00, 0x00], 3),
+        ],
+        &[
+            (&[0xFF], 0),
+            (&[0xFF, 0x00], 1),
+            (&[0xFF, 0x00, 0x00], 2),
+            (&[0xFF, 0x00, 0x00, 0x00], 3),
+        ],
+    ];
+
     const PATHS_WITH_SHARED_PREFIX: BinaryTest = (
         &[(b"aaaaa0", 0), (b"bbbbbbbb0", 1)],
         &[(b"aaaaa1", 0), (b"bbbbb1", 1), (b"bbbbbbbb1", 2)],
@@ -1894,6 +1960,15 @@ mod tests {
         &[(b"aaaaa2", 0), (b"bbbbb2", 1), (b"bbbbbbbb2", 2)],
     );
 
+    const PATHS_WITH_SHARED_PREFIX_N: NaryTest = [
+        &[(b"aaaaa0", 0), (b"bbbbbbbb0", 1)],
+        &[(b"aaaaa1", 0), (b"bbbbb1", 1), (b"bbbbbbbb1", 2)],
+        &[(b"aaaaa2", 0), (b"bbbbb2", 1), (b"bbbbbbbb2", 2)],
+        &[(b"aaaaa3", 0), (b"bbbbb3", 1), (b"bbbbbbbb3", 2)],
+        &[(b"aaaaa4", 0), (b"bbbbb4", 1), (b"bbbbbbbb4", 2)],
+        &[(b"aaaaa5", 0), (b"bbbbb5", 1), (b"bbbbbbbb5", 2)],
+    ];
+
     const INTERLEAVING_PATHS: BinaryTest = (
         &[(&[0], 0), (&[2], 1), (&[4], 2), (&[6], 3)],
         &[(&[1], 0), (&[3], 1), (&[5], 2), (&[7], 3)],
@@ -1904,6 +1979,15 @@ mod tests {
         &[(&[1], 0), (&[4], 1), (&[7], 2), (&[10], 3)],
         &[(&[2], 0), (&[5], 1), (&[8], 2), (&[11], 3)],
     );
+
+    const INTERLEAVING_PATHS_N: NaryTest = [
+        &[(&[0], 0), (&[6], 1), (&[12], 2), (&[18], 3)],
+        &[(&[1], 0), (&[7], 1), (&[13], 2), (&[19], 3)],
+        &[(&[2], 0), (&[8], 1), (&[14], 2), (&[20], 3)],
+        &[(&[3], 0), (&[9], 1), (&[15], 2), (&[21], 3)],
+        &[(&[4], 0), (&[10], 1), (&[16], 2), (&[22], 3)],
+        &[(&[5], 0), (&[11], 1), (&[17], 2), (&[23], 3)],
+    ];
 
     const ONE_SIDED_PATHS: BinaryTest = (
         &[
@@ -1945,6 +2029,30 @@ mod tests {
         ],
         &[(&[0x00], 0), (&[0x00, 0x01, 0x02], 1)],
     );
+
+    const ONE_SIDED_PATHS_N: NaryTest = [
+        &[
+            (&[0x00], 0),
+            (&[0x00, 0x01], 1),
+            (&[0x00, 0x01, 0x02], 2),
+            (&[0x00, 0x01, 0x02, 0x03], 3),
+            (&[0x01], 4),
+            (&[0x01, 0x02], 5),
+            (&[0x01, 0x02, 0x03], 6),
+            (&[0x01, 0x02, 0x03, 0x04], 7),
+            (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
+            (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
+        ],
+        &[
+            (&[0x00], 0),
+            (&[0x00, 0x01, 0x02, 0x03], 1),
+            (&[0x01, 0x02, 0x03, 0x04, 0x05], 2),
+        ],
+        &[(&[0x00], 0), (&[0x00, 0x01, 0x02], 1)],
+        &[(&[0x01], 4)],
+        &[(&[0x01], 4), (&[0x01, 0x02], 5)],
+        &[(&[0x01], 4), (&[0x01, 0x02, 0x03], 5)],
+    ];
 
     const ALMOST_IDENTICAL_PATHS: BinaryTest = (
         &[
@@ -2003,13 +2111,94 @@ mod tests {
         ],
     );
 
+    const ALMOST_IDENTICAL_PATHS_N: NaryTest = [
+        &[
+            (b"abcdefg", 0),
+            (b"hijklmnop", 1),
+            (b"qrstuwvxyz", 2),
+            (b"0", 3),
+            (b"1", 4),
+            (b"2", 5),
+            (b"3", 6),
+            (b"4", 7),
+            (b"5", 8),
+            (b"6789", 9),
+        ],
+        &[
+            (b"abcdefg", 0),
+            (b"qrstuwvxyz", 2),
+            (b"0", 3),
+            (b"1", 4),
+            (b"4", 7),
+            (b"5", 8),
+            (b"6789", 9),
+        ],
+        &[
+            (b"abcdefg", 0),
+            (b"hijklmnop", 1),
+            (b"1", 4),
+            (b"2", 5),
+            (b"3", 6),
+            (b"4", 7),
+            (b"5", 8),
+        ],
+        &[
+            (b"hijklmnop", 1),
+            (b"1", 4),
+            (b"2", 5),
+            (b"3", 6),
+            (b"4", 7),
+            (b"5", 8),
+        ],
+        &[
+            (b"hijklmnop", 1),
+            (b"1", 4),
+            (b"2", 5),
+            (b"3", 6),
+            (b"4", 7),
+            (b"5", 8),
+        ],
+        &[
+            (b"hijklmnop", 1),
+            (b"1", 4),
+            (b"2", 5),
+            (b"3", 6),
+            (b"4", 7),
+            (b"5", 8),
+        ],
+    ];
+
     const LHS_EMPTY: BinaryTest = (&[], &[(&[1], 0), (&[2], 1)]);
     const LHS_EMPTY_3: TernaryTest = (&[], &[(&[1], 0), (&[2], 1)], &[(&[3], 0), (&[4], 1)]);
+    const LHS_EMPTY_N: NaryTest = [
+        &[],
+        &[(&[1], 0), (&[2], 1)],
+        &[(&[3], 0), (&[4], 1)],
+        &[(&[5], 0)],
+        &[(&[6], 0)],
+        &[(&[7], 0), (&[8], 1)],
+    ];
 
     const RHS_EMPTY: BinaryTest = (&[(&[1], 0), (&[2], 1)], &[]);
     const RHS_EMPTY_3: TernaryTest = (&[(&[1], 0), (&[2], 1)], &[(&[3], 0), (&[4], 1)], &[]);
+    const RHS_EMPTY_N: NaryTest = [
+        &[(&[1], 0), (&[2], 1)],
+        &[(&[3], 0), (&[4], 1)],
+        &[(&[5], 0)],
+        &[(&[6], 0)],
+        &[(&[7], 0), (&[8], 1)],
+        &[],
+    ];
 
     const MID_EMPTY: TernaryTest = (&[(&[1], 0), (&[2], 1)], &[], &[(&[3], 0), (&[4], 1)]);
+    const MID_EMPTY_N: NaryTest = [
+        &[(&[1], 0), (&[2], 1)],
+        &[(&[3], 0), (&[4], 1)],
+        &[],
+        &[(&[5], 0)],
+        &[(&[6], 0)],
+        &[(&[7], 0), (&[8], 1)],
+    ];
 
     const PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN: BinaryTest = (
         &[
@@ -2041,6 +2230,39 @@ mod tests {
             (&[1, 2, 3, 10, 11, 1], 22),
         ],
     );
+
+    const PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_N: NaryTest = [
+        &[
+            (&[1, 2, 3], 0),
+            (&[1, 2, 3, 4], 1),
+            (&[1, 2, 3, 10, 11, 12], 2),
+        ],
+        &[
+            (&[1, 2, 3], 10),
+            (&[1, 2, 3, 5], 11),
+            (&[1, 2, 3, 10, 11, 0], 12),
+        ],
+        &[
+            (&[1, 2, 3], 20),
+            (&[1, 2, 3, 6], 21),
+            (&[1, 2, 3, 10, 11, 1], 22),
+        ],
+        &[
+            (&[1, 2, 3], 30),
+            (&[1, 2, 3, 7], 31),
+            (&[1, 2, 3, 10, 11, 2], 32),
+        ],
+        &[
+            (&[1, 2, 3], 40),
+            (&[1, 2, 3, 8], 41),
+            (&[1, 2, 3, 10, 11, 3], 42),
+        ],
+        &[
+            (&[1, 2, 3], 50),
+            (&[1, 2, 3, 9], 51),
+            (&[1, 2, 3, 10, 11, 4], 52),
+        ],
+    ];
 
     const ZIGZAG_PATHS: BinaryTest = (
         &[
@@ -2099,9 +2321,21 @@ mod tests {
         &[(&[], 3), (&[1], 30)],
     );
 
+    const PATHS_WITH_ROOT_VALS_AND_CHILDREN_N: NaryTest = [
+        &[(&[], 1), (&[1], 10), (&[2], 110)],
+        &[(&[], 2), (&[1], 20), (&[2], 120)],
+        &[(&[], 3), (&[1], 30), (&[2], 130)],
+        &[(&[], 4), (&[1], 40), (&[2], 140)],
+        &[(&[], 5), (&[1], 50), (&[2], 150)],
+        &[(&[], 6), (&[1], 60), (&[2], 160)],
+    ];
+
     mod join {
         use super::*;
-        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_join, zipper_join3};
+        use crate::experimental::zipper_algebra::{
+            ZipperAlgebraExt, ZipperMergeF, zipper_join, zipper_join3,
+        };
+        use crate::zipper_join_n;
 
         #[test]
         fn test_disjoint() {
@@ -2118,6 +2352,23 @@ mod tests {
                 &DISJOINT_PATHS_3,
                 &[DISJOINT_PATHS_3.0, DISJOINT_PATHS_3.1, DISJOINT_PATHS_3.2].concat(),
                 |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_disjoint_n() {
+            checkn(
+                &DISJOINT_PATHS_N,
+                &[
+                    DISJOINT_PATHS_N[0],
+                    DISJOINT_PATHS_N[1],
+                    DISJOINT_PATHS_N[2],
+                    DISJOINT_PATHS_N[3],
+                    DISJOINT_PATHS_N[4],
+                    DISJOINT_PATHS_N[5],
+                ]
+                .concat(),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_join_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -2145,6 +2396,23 @@ mod tests {
         }
 
         #[test]
+        fn test_deep_shared_prefix_then_split_n() {
+            checkn(
+                &PATHS_WITH_SHARED_PREFIX_N,
+                &[
+                    PATHS_WITH_SHARED_PREFIX_N[0],
+                    PATHS_WITH_SHARED_PREFIX_N[1],
+                    PATHS_WITH_SHARED_PREFIX_N[2],
+                    PATHS_WITH_SHARED_PREFIX_N[3],
+                    PATHS_WITH_SHARED_PREFIX_N[4],
+                    PATHS_WITH_SHARED_PREFIX_N[5],
+                ]
+                .concat(),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_join_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
         fn test_interleaving_paths() {
             check2(
                 &INTERLEAVING_PATHS,
@@ -2168,6 +2436,23 @@ mod tests {
         }
 
         #[test]
+        fn test_interleaving_paths_n() {
+            checkn(
+                &INTERLEAVING_PATHS_N,
+                &[
+                    INTERLEAVING_PATHS_N[0],
+                    INTERLEAVING_PATHS_N[1],
+                    INTERLEAVING_PATHS_N[2],
+                    INTERLEAVING_PATHS_N[3],
+                    INTERLEAVING_PATHS_N[4],
+                    INTERLEAVING_PATHS_N[5],
+                ]
+                .concat(),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_join_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
         fn test_one_side_empty_at_many_levels() {
             check2(&ONE_SIDED_PATHS, ONE_SIDED_PATHS.0, |lhs, rhs, out| {
                 lhs.join(rhs, out)
@@ -2180,6 +2465,15 @@ mod tests {
                 &ONE_SIDED_PATHS_3,
                 ONE_SIDED_PATHS_3.0,
                 |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_one_side_empty_at_many_levels_n() {
+            checkn(
+                &ONE_SIDED_PATHS_N,
+                ONE_SIDED_PATHS_N[0],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_join_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -2198,6 +2492,15 @@ mod tests {
                 &ALMOST_IDENTICAL_PATHS_3,
                 ALMOST_IDENTICAL_PATHS_3.0,
                 |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_almost_identical_paths_n() {
+            checkn(
+                &ALMOST_IDENTICAL_PATHS_N,
+                ALMOST_IDENTICAL_PATHS_N[0],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_join_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -2223,6 +2526,46 @@ mod tests {
                 &RHS_EMPTY_3,
                 &[RHS_EMPTY_3.0, RHS_EMPTY_3.1].concat(),
                 |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_one_side_empty_n() {
+            checkn(
+                &LHS_EMPTY_N,
+                &[
+                    LHS_EMPTY_N[1],
+                    LHS_EMPTY_N[2],
+                    LHS_EMPTY_N[3],
+                    LHS_EMPTY_N[4],
+                    LHS_EMPTY_N[5],
+                ]
+                .concat(),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_join_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+            checkn(
+                &MID_EMPTY_N,
+                &[
+                    MID_EMPTY_N[0],
+                    MID_EMPTY_N[1],
+                    MID_EMPTY_N[3],
+                    MID_EMPTY_N[4],
+                    MID_EMPTY_N[5],
+                ]
+                .concat(),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_join_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+            checkn(
+                &RHS_EMPTY_N,
+                &[
+                    RHS_EMPTY_N[0],
+                    RHS_EMPTY_N[1],
+                    RHS_EMPTY_N[2],
+                    RHS_EMPTY_N[3],
+                    RHS_EMPTY_N[4],
+                ]
+                .concat(),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_join_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -2261,6 +2604,30 @@ mod tests {
         }
 
         #[test]
+        fn test_exact_overlap_divergent_subtries_n() {
+            let expected: Paths = &[
+                (&[1, 2, 3], 0),
+                (&[1, 2, 3, 4], 1),
+                (&[1, 2, 3, 5], 11),
+                (&[1, 2, 3, 6], 21),
+                (&[1, 2, 3, 7], 31),
+                (&[1, 2, 3, 8], 41),
+                (&[1, 2, 3, 9], 51),
+                (&[1, 2, 3, 10, 11, 0], 12),
+                (&[1, 2, 3, 10, 11, 1], 22),
+                (&[1, 2, 3, 10, 11, 2], 32),
+                (&[1, 2, 3, 10, 11, 3], 42),
+                (&[1, 2, 3, 10, 11, 4], 52),
+                (&[1, 2, 3, 10, 11, 12], 2),
+            ];
+            checkn(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_N,
+                expected,
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_join_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
         fn test_zigzag() {
             check2(
                 &ZIGZAG_PATHS,
@@ -2273,7 +2640,7 @@ mod tests {
         fn test_zigzag3() {
             check3(
                 &ZIGZAG_PATHS_3,
-                &[ZIGZAG_PATHS.0, ZIGZAG_PATHS.1, ZIGZAG_PATHS_3.2].concat(),
+                &[ZIGZAG_PATHS_3.0, ZIGZAG_PATHS_3.1, ZIGZAG_PATHS_3.2].concat(),
                 |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
             );
         }
@@ -2295,11 +2662,23 @@ mod tests {
                 |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
             );
         }
+
+        #[test]
+        fn test_root_values_n() {
+            checkn(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN_N,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN_N[0],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_join_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
     }
 
     mod meet {
         use super::*;
-        use crate::experimental::zipper_algebra::{ZipperAlgebraExt, zipper_meet, zipper_meet3};
+        use crate::experimental::zipper_algebra::{
+            ZipperAlgebraExt, ZipperMergeF, zipper_meet, zipper_meet3,
+        };
+        use crate::zipper_meet_n;
 
         #[test]
         fn test_disjoint() {
@@ -2313,6 +2692,15 @@ mod tests {
             check3(&DISJOINT_PATHS_3, [], |lhs, mid, rhs, out| {
                 zipper_meet3(lhs, mid, rhs, out);
             });
+        }
+
+        #[test]
+        fn test_disjoint_n() {
+            checkn(
+                &DISJOINT_PATHS_N,
+                [],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_meet_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
         }
 
         #[test]
@@ -2330,6 +2718,15 @@ mod tests {
         }
 
         #[test]
+        fn test_deep_shared_prefix_then_split_n() {
+            checkn(
+                &PATHS_WITH_SHARED_PREFIX_N,
+                [],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_meet_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
         fn test_interleaving_paths() {
             check2(&INTERLEAVING_PATHS, [], |lhs, rhs, out| {
                 lhs.meet(rhs, out);
@@ -2341,6 +2738,15 @@ mod tests {
             check3(&INTERLEAVING_PATHS_3, [], |lhs, mid, rhs, out| {
                 zipper_meet3(lhs, mid, rhs, out);
             });
+        }
+
+        #[test]
+        fn test_interleaving_paths_n() {
+            checkn(
+                &INTERLEAVING_PATHS_N,
+                [],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_meet_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
         }
 
         #[test]
@@ -2364,6 +2770,15 @@ mod tests {
         }
 
         #[test]
+        fn test_one_side_empty_at_many_levels_n() {
+            checkn(
+                &ONE_SIDED_PATHS_N,
+                [],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_meet_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
         fn test_almost_identical_paths() {
             check2(
                 &ALMOST_IDENTICAL_PATHS,
@@ -2378,6 +2793,16 @@ mod tests {
             check3(&ALMOST_IDENTICAL_PATHS_3, expected, |lhs, mid, rhs, out| {
                 zipper_meet3(lhs, mid, rhs, out);
             });
+        }
+
+        #[test]
+        fn test_almost_identical_paths_n() {
+            let expected: Paths = &[(b"1", 4), (b"4", 7), (b"5", 8)];
+            checkn(
+                &ALMOST_IDENTICAL_PATHS_N,
+                expected,
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_meet_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
         }
 
         #[test]
@@ -2400,6 +2825,25 @@ mod tests {
         }
 
         #[test]
+        fn test_one_side_empty_n() {
+            checkn(
+                &LHS_EMPTY_N,
+                [],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_meet_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+            checkn(
+                &MID_EMPTY_N,
+                [],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_meet_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+            checkn(
+                &RHS_EMPTY_N,
+                [],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_meet_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
         fn test_exact_overlap_divergent_subtries() {
             let expected: Paths = &[(&[1, 2, 3], 0)];
             check2(
@@ -2416,6 +2860,16 @@ mod tests {
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
                 expected,
                 |lhs, mid, rhs, out| zipper_meet3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_exact_overlap_divergent_subtries_n() {
+            let expected: Paths = &[(&[1, 2, 3], 0)];
+            checkn(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_N,
+                expected,
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_meet_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -2452,13 +2906,23 @@ mod tests {
                 |lhs, mid, rhs, out| zipper_meet3(lhs, mid, rhs, out),
             );
         }
+
+        #[test]
+        fn test_root_values_n() {
+            checkn(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN_N,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN_N[0],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_meet_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
     }
 
     mod subtract {
         use super::*;
         use crate::experimental::zipper_algebra::{
-            ZipperAlgebraExt, zipper_subtract, zipper_subtract3,
+            ZipperAlgebraExt, ZipperMergeF, zipper_subtract, zipper_subtract3,
         };
+        use crate::zipper_subtract_n;
 
         #[test]
         fn test_disjoint() {
@@ -2475,6 +2939,15 @@ mod tests {
                 |lhs, mid, rhs, out| {
                     zipper_subtract3(lhs, mid, rhs, out);
                 },
+            );
+        }
+
+        #[test]
+        fn test_disjoint_n() {
+            checkn(
+                &DISJOINT_PATHS_N,
+                DISJOINT_PATHS_N[0],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_subtract_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -2499,6 +2972,15 @@ mod tests {
         }
 
         #[test]
+        fn test_deep_shared_prefix_then_split_n() {
+            checkn(
+                &PATHS_WITH_SHARED_PREFIX_N,
+                PATHS_WITH_SHARED_PREFIX_N[0],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_subtract_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
         fn test_interleaving_paths() {
             check2(
                 &INTERLEAVING_PATHS,
@@ -2515,6 +2997,15 @@ mod tests {
                 |lhs, mid, rhs, out| {
                     zipper_subtract3(lhs, mid, rhs, out);
                 },
+            );
+        }
+
+        #[test]
+        fn test_interleaving_paths_n() {
+            checkn(
+                &INTERLEAVING_PATHS_N,
+                INTERLEAVING_PATHS_N[0],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_subtract_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -2555,6 +3046,24 @@ mod tests {
         }
 
         #[test]
+        fn test_one_side_empty_at_many_levels_n() {
+            let expected: Paths = &[
+                (&[0x00, 0x01], 1),
+                (&[0x00, 0x01, 0x02], 2),
+                (&[0x00, 0x01, 0x02, 0x03], 3),
+                (&[0x01, 0x02, 0x03], 6),
+                (&[0x01, 0x02, 0x03, 0x04], 7),
+                (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
+                (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
+            ];
+            checkn(
+                &ONE_SIDED_PATHS_N,
+                expected,
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_subtract_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
         fn test_almost_identical_paths() {
             let expected: Paths = &[(b"hijklmnop", 1), (b"2", 5), (b"3", 6)];
             check2(&ALMOST_IDENTICAL_PATHS, expected, |lhs, rhs, out| {
@@ -2567,6 +3076,15 @@ mod tests {
             check3(&ALMOST_IDENTICAL_PATHS_3, [], |lhs, mid, rhs, out| {
                 zipper_subtract3(lhs, mid, rhs, out);
             });
+        }
+
+        #[test]
+        fn test_almost_identical_paths_n() {
+            checkn(
+                &ALMOST_IDENTICAL_PATHS_N,
+                [],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_subtract_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
         }
 
         #[test]
@@ -2591,6 +3109,25 @@ mod tests {
         }
 
         #[test]
+        fn test_one_side_empty_n() {
+            checkn(
+                &LHS_EMPTY_N,
+                [],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_subtract_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+            checkn(
+                &MID_EMPTY_N,
+                MID_EMPTY_N[0],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_subtract_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+            checkn(
+                &RHS_EMPTY_N,
+                RHS_EMPTY_N[0],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_subtract_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
         fn test_exact_overlap_divergent_subtries() {
             check2(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
@@ -2607,6 +3144,15 @@ mod tests {
                 |lhs, mid, rhs, out| {
                     zipper_subtract3(lhs, mid, rhs, out);
                 },
+            );
+        }
+
+        #[test]
+        fn test_exact_overlap_divergent_subtries_n() {
+            checkn(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_N,
+                PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_N[0],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_subtract_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -2649,6 +3195,15 @@ mod tests {
                 |lhs, mid, rhs, out| {
                     zipper_subtract3(lhs, mid, rhs, out);
                 },
+            );
+        }
+
+        #[test]
+        fn test_root_values_n() {
+            checkn(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN_N,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN_N[0],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_subtract_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
     }
