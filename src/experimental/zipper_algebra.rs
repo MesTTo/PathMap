@@ -956,6 +956,9 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
     Out: ZipperWriting<V, A>,
 {
     debug_assert!(N > 0 && N <= 64);
+    // LLVM needs to prove: `0 ≤ i < N` But i comes from: `i = bits.trailing_zeros() as usize;`` So the
+    // compiler must connect: “this bitmask only contains bits < N”
+    assert!(active >> N == 0);
 
     #[inline]
     fn active_bits<const N: usize>(active: u64) -> impl Iterator<Item = usize> {
@@ -1080,13 +1083,15 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
                         }
                         Some(m) => {
                             next = match next {
-                                Some(n) if n <= b => Some(n),
+                                old @ Some(n) if n <= b => old,
                                 _ => Some(b),
                             };
                         }
                     }
                 }
             }
+
+            debug_assert!(frontier <= active);
 
             match min {
                 None => {
@@ -1572,7 +1577,7 @@ mod zipper_algebra_poly {
             V: Clone + Send + Sync + Unpin + 'trie,
             A: Allocator + 'trie,
             $(
-                for<'x> &'x mut $Z: Into<SomeZ<'x, 'trie, 'path, V, A>>,
+                for<'x> &'x mut $Z: Into<SomeMutRefZ<'x, 'trie, 'path, V, A>>,
             )+
             Out: ZipperWriting<V, A>,
         {
