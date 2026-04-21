@@ -10,6 +10,8 @@ use crate::{
     },
 };
 
+pub use zipper_algebra_poly::ZipperMergeF;
+
 /// Extension trait providing algebraic merge operations on radix-256 trie zippers.
 ///
 /// This trait exposes high-level operations such as [`join`](Self::join),
@@ -944,7 +946,7 @@ use zipper_algebra_poly::SomeZ as Z;
 //   for improved performance.
 // - Requires `N ≤ 64`.
 fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
-    zs: &mut [Z<'_, '_, V, A>; N],
+    zs: &mut [Z<'_, '_, '_, V, A>; N],
     active: u64,
     out: &mut Out,
 ) where
@@ -961,9 +963,9 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
     }
 
     fn zippers<'a, 'trie, 'path, V, A, const N: usize>(
-        zs: &'a [Z<'trie, 'path, V, A>; N],
+        zs: &'a [Z<'a, 'trie, 'path, V, A>; N],
         active: u64,
-    ) -> impl Iterator<Item = (usize, &'a Z<'trie, 'path, V, A>)>
+    ) -> impl Iterator<Item = (usize, &'a Z<'a, 'trie, 'path, V, A>)>
     where
         V: Clone + Send + Sync + Unpin,
         A: Allocator,
@@ -971,8 +973,8 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
         active_bits::<N>(active).map(|i| (i, &zs[i]))
     }
 
-    fn values<'a, 'trie, 'path, V, A, const N: usize>(
-        zs: &'a [Z<'trie, 'path, V, A>; N],
+    fn values<'a, V, A, const N: usize>(
+        zs: &'a [Z<'a, '_, '_, V, A>; N],
         active: u64,
     ) -> impl Iterator<Item = Option<&'a V>>
     where
@@ -1427,18 +1429,19 @@ mod zipper_algebra_poly {
     use crate as pathmap;
     use crate::PathMap;
     use crate::alloc::Allocator;
+    use crate::ring::{DistributiveLattice, Lattice};
     use crate::trie_node::*;
     use crate::zipper::*;
 
     #[derive(PolyZipperExplicit)]
     #[poly_zipper_explicit(traits(ZipperMoving, ZipperValues))]
-    pub(super) enum SomeZ<'trie, 'path, V: Clone + Send + Sync + Unpin, A: Allocator> {
-        RZ(ReadZipperUntracked<'trie, 'path, V, A>),
-        RZT(ReadZipperTracked<'trie, 'path, V, A>),
+    pub(super) enum SomeZ<'a, 'trie, 'path, V: Clone + Send + Sync + Unpin, A: Allocator> {
+        RZ(&'a mut ReadZipperUntracked<'trie, 'path, V, A>),
+        RZT(&'a mut ReadZipperTracked<'trie, 'path, V, A>),
     }
 
     impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A>
-        for SomeZ<'_, '_, V, A>
+        for SomeZ<'_, '_, '_, V, A>
     {
         fn make_map(&self) -> PathMap<V, A> {
             match self {
@@ -1468,6 +1471,211 @@ mod zipper_algebra_poly {
             }
         }
     }
+
+    pub trait ZipperMergeF<V, Out, A>
+    where
+        V: Clone + Send + Sync,
+        A: Allocator,
+        Self: Sized,
+    {
+        /// Performs an N-way ordered join (least upper bound) of radix-256 trie zippers using a stackless traversal.
+        ///
+        /// This function generalizes pairwise [`super::zipper_join`] to an arbitrary number of input tries,
+        fn join_n(self, out: &mut Out)
+        where
+            V: Lattice,
+        {
+            self.merge_n::<super::Join>(out);
+        }
+
+        /// Performs an N-way ordered meet(greeatest lower bound) of radix-256 trie zippers using a stackless traversal.
+        ///
+        /// This function generalizes pairwise [`super::zipper_meet`] to an arbitrary number of input tries,
+        fn meet_n(self, out: &mut Out)
+        where
+            V: Lattice,
+        {
+            self.merge_n::<super::Meet>(out);
+        }
+
+        /// Performs an N-way ordered subtraction (left-associative) of radix-256 trie zippers using a stackless traversal.
+        ///
+        /// This function generalizes pairwise [`super::zipper_subtract`] to an arbitrary number of input tries,
+        fn subtract_n(self, out: &mut Out)
+        where
+            V: DistributiveLattice,
+        {
+            self.merge_n::<super::Subtract>(out);
+        }
+
+        fn merge_n<P>(self, out: &mut Out)
+        where
+            P: super::MergePolicy<V> + super::ValuePolicy<V>;
+    }
+
+    impl<V, Z1, Z2, Out, A> ZipperMergeF<V, Out, A> for (&mut Z1, &mut Z2)
+    where
+        V: Clone + Send + Sync,
+        A: Allocator,
+        Z1: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Z2: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        fn merge_n<P>(mut self, out: &mut Out)
+        where
+            P: super::MergePolicy<V> + super::ValuePolicy<V>,
+        {
+            super::zipper_merge::<P, _, _, _, _, _>(self.0, self.1, out);
+        }
+    }
+
+    impl<V, Z1, Z2, Z3, Out, A> ZipperMergeF<V, Out, A> for (&mut Z1, &mut Z2, &mut Z3)
+    where
+        V: Clone + Send + Sync,
+        A: Allocator,
+        Z1: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Z2: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Z3: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        fn merge_n<P>(mut self, out: &mut Out)
+        where
+            P: super::MergePolicy<V> + super::ValuePolicy<V>,
+        {
+            super::zipper_merge3::<P, _, _, _, _, _, _>(self.0, self.1, self.2, out);
+        }
+    }
+
+    impl<V, Z1, Z2, Z3, Z4, Out, A> ZipperMergeF<V, Out, A> for (&mut Z1, &mut Z2, &mut Z3, &mut Z4)
+    where
+        V: Clone + Send + Sync,
+        A: Allocator,
+        Z1: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Z2: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Z3: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Z4: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        fn merge_n<P>(mut self, out: &mut Out)
+        where
+            P: super::MergePolicy<V> + super::ValuePolicy<V>,
+        {
+            super::zipper_merge4::<P, _, _, _, _, _, _, _>(self.0, self.1, self.2, self.3, out);
+        }
+    }
+
+    macro_rules! impl_zipper_merge_f {
+    ($($Z:ident),+) => {
+        impl<'trie, 'path, V, $($Z),+, Out, A> ZipperMergeF<V, Out, A>
+            for ($( &mut $Z ),+)
+        where
+            V: Clone + Send + Sync + Unpin + 'trie,
+            A: Allocator + 'trie,
+            $(
+                for<'x> &'x mut $Z: Into<SomeZ<'x, 'trie, 'path, V, A>>,
+            )+
+            Out: ZipperWriting<V, A>,
+        {
+            fn merge_n<P>(mut self, out: &mut Out)
+            where
+                P: super::MergePolicy<V> + super::ValuePolicy<V>,
+            {
+                // destructure the tuple
+                let ($( $Z ),+) = self;
+
+                let mut zs = [
+                    $( $Z.into() ),+
+                ];
+
+                let active: u64 = (1 << zs.len()) - 1;
+
+                super::zipper_merge_n_mono::<P, _, _, _, _>(
+                    &mut zs,
+                    active,
+                    out,
+                );
+            }
+        }
+    };
+}
+
+    impl_zipper_merge_f!(Z1, Z2, Z3, Z4, Z5);
+    impl_zipper_merge_f!(Z1, Z2, Z3, Z4, Z5, Z6);
+    impl_zipper_merge_f!(Z1, Z2, Z3, Z4, Z5, Z6, Z7);
+    impl_zipper_merge_f!(Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8);
+    impl_zipper_merge_f!(Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9);
+    impl_zipper_merge_f!(Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10);
+    impl_zipper_merge_f!(Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11);
+    impl_zipper_merge_f!(Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12);
+    impl_zipper_merge_f!(Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13);
+    impl_zipper_merge_f!(Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14);
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19, Z20
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19, Z20,
+        Z21
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19, Z20,
+        Z21, Z22
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19, Z20,
+        Z21, Z22, Z23
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19, Z20,
+        Z21, Z22, Z23, Z24
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19, Z20,
+        Z21, Z22, Z23, Z24, Z25
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19, Z20,
+        Z21, Z22, Z23, Z24, Z25, Z26
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19, Z20,
+        Z21, Z22, Z23, Z24, Z25, Z26, Z27
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19, Z20,
+        Z21, Z22, Z23, Z24, Z25, Z26, Z27, Z28
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19, Z20,
+        Z21, Z22, Z23, Z24, Z25, Z26, Z27, Z28, Z29
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19, Z20,
+        Z21, Z22, Z23, Z24, Z25, Z26, Z27, Z28, Z29, Z30
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19, Z20,
+        Z21, Z22, Z23, Z24, Z25, Z26, Z27, Z28, Z29, Z30, Z31
+    );
+    impl_zipper_merge_f!(
+        Z1, Z2, Z3, Z4, Z5, Z6, Z7, Z8, Z9, Z10, Z11, Z12, Z13, Z14, Z15, Z16, Z17, Z18, Z19, Z20,
+        Z21, Z22, Z23, Z24, Z25, Z26, Z27, Z28, Z29, Z30, Z31, Z32
+    );
+
 }
 
 #[cfg(test)]
