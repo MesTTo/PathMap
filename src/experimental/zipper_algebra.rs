@@ -938,7 +938,7 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
     }
 }
 
-use zipper_algebra_poly::SomeZ as Z;
+use zipper_algebra_poly::SomeMutRefZ as Z;
 
 // - The function is fully monomorphized over `N` and uses a bitmask (`active`)
 //   to track participating zippers.
@@ -1435,39 +1435,39 @@ mod zipper_algebra_poly {
 
     #[derive(PolyZipperExplicit)]
     #[poly_zipper_explicit(traits(ZipperMoving, ZipperValues))]
-    pub(super) enum SomeZ<'a, 'trie, 'path, V: Clone + Send + Sync + Unpin, A: Allocator> {
+    pub(super) enum SomeMutRefZ<'a, 'trie, 'path, V: Clone + Send + Sync + Unpin, A: Allocator> {
         RZ(&'a mut ReadZipperUntracked<'trie, 'path, V, A>),
         RZT(&'a mut ReadZipperTracked<'trie, 'path, V, A>),
     }
 
     impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A>
-        for SomeZ<'_, '_, '_, V, A>
+        for SomeMutRefZ<'_, '_, '_, V, A>
     {
         fn make_map(&self) -> PathMap<V, A> {
             match self {
-                SomeZ::RZ(inner) => inner.make_map(),
-                SomeZ::RZT(inner) => inner.make_map(),
+                SomeMutRefZ::RZ(inner) => inner.make_map(),
+                SomeMutRefZ::RZT(inner) => inner.make_map(),
             }
         }
 
         fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
             match self {
-                SomeZ::RZ(inner) => inner.get_trie_ref(),
-                SomeZ::RZT(inner) => inner.get_trie_ref(),
+                SomeMutRefZ::RZ(inner) => inner.get_trie_ref(),
+                SomeMutRefZ::RZT(inner) => inner.get_trie_ref(),
             }
         }
 
         fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> {
             match self {
-                SomeZ::RZ(inner) => inner.get_focus(),
-                SomeZ::RZT(inner) => inner.get_focus(),
+                SomeMutRefZ::RZ(inner) => inner.get_focus(),
+                SomeMutRefZ::RZT(inner) => inner.get_focus(),
             }
         }
 
         fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
             match self {
-                SomeZ::RZ(inner) => inner.try_borrow_focus(),
-                SomeZ::RZT(inner) => inner.try_borrow_focus(),
+                SomeMutRefZ::RZ(inner) => inner.try_borrow_focus(),
+                SomeMutRefZ::RZT(inner) => inner.try_borrow_focus(),
             }
         }
     }
