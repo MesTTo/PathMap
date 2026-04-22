@@ -386,8 +386,8 @@ where
     let mut k = 0;
     let mut lhs_mask = lhs.child_mask();
     let mut rhs_mask = rhs.child_mask();
-    let mut lhs_idx = 0;
-    let mut rhs_idx = 0;
+    let mut lhs_next = lhs_mask.indexed_bit::<true>(0);
+    let mut rhs_next = rhs_mask.indexed_bit::<true>(0);
 
     // At each node, the algorithm treats the sets of child edges of `lhs` and `rhs` as two sorted
     // sequences and performs a merge-like traversal:
@@ -400,18 +400,15 @@ where
     //   and an explicit depth counter (`k`).
     'ascend: loop {
         'merge_level: loop {
-            let lhs_next = lhs_mask.indexed_bit::<true>(lhs_idx as usize);
-            let rhs_next = rhs_mask.indexed_bit::<true>(rhs_idx as usize);
-
             match lhs_next {
                 Some(lhs_byte) => match rhs_next {
                     Some(rhs_byte) if lhs_byte < rhs_byte => {
                         P::on_left_only(lhs, ByteMask::from_range(lhs_byte..rhs_byte), out);
-                        lhs_idx = lhs_mask.index_of(rhs_byte);
+                        lhs_next = (lhs_mask & ByteMask::from_range(rhs_byte..)).next_bit(0);
                     }
                     Some(rhs_byte) if lhs_byte > rhs_byte => {
                         P::on_right_only(rhs, ByteMask::from_range(rhs_byte..lhs_byte), out);
-                        rhs_idx = rhs_mask.index_of(lhs_byte);
+                        rhs_next = (rhs_mask & ByteMask::from_range(lhs_byte..)).next_bit(0);
                     }
                     Some(rhs_byte) => {
                         // equal → descend
@@ -427,8 +424,8 @@ where
                         lhs_mask = lhs.child_mask();
                         rhs_mask = rhs.child_mask();
 
-                        lhs_idx = 0;
-                        rhs_idx = 0;
+                        lhs_next = lhs_mask.indexed_bit::<true>(0);
+                        rhs_next = rhs_mask.indexed_bit::<true>(0);
 
                         k += 1;
                         continue 'merge_level;
@@ -457,11 +454,11 @@ where
 
         rhs.ascend_byte();
         rhs_mask = rhs.child_mask();
-        rhs_idx = rhs_mask.index_of(byte_from) + 1;
+        rhs_next = rhs_mask.next_bit(byte_from);
 
         lhs.ascend_byte();
         lhs_mask = lhs.child_mask();
-        lhs_idx = lhs_mask.index_of(byte_from) + 1;
+        lhs_next = lhs_mask.next_bit(byte_from);
 
         out.ascend_byte();
         k -= 1;
@@ -528,16 +525,12 @@ where
     let mut lhs_mask = lhs.child_mask();
     let mut mid_mask = mid.child_mask();
     let mut rhs_mask = rhs.child_mask();
-    let mut lhs_idx = 0;
-    let mut mid_idx = 0;
-    let mut rhs_idx = 0;
+    let mut l = lhs_mask.indexed_bit::<true>(0);
+    let mut m = mid_mask.indexed_bit::<true>(0);
+    let mut r = rhs_mask.indexed_bit::<true>(0);
 
     'ascend: loop {
         'merge_level: loop {
-            let l = lhs_mask.indexed_bit::<true>(lhs_idx as usize);
-            let m = mid_mask.indexed_bit::<true>(mid_idx as usize);
-            let r = rhs_mask.indexed_bit::<true>(rhs_idx as usize);
-
             let mut a = l;
             let mut b = m;
             let mut c = r;
@@ -563,7 +556,7 @@ where
                         cmp_swap(&mut b, &mut c);
                         if let Some(next) = b {
                             P::on_single(lhs, L as u64, ByteMask::from_range(min..next), out);
-                            lhs_idx = lhs_mask.index_of(next)
+                            l = (lhs_mask & ByteMask::from_range(next..)).next_bit(0);
                         } else {
                             P::on_single(lhs, L as u64, ByteMask::from_range(min..), out);
                             break 'merge_level;
@@ -573,7 +566,7 @@ where
                         cmp_swap(&mut b, &mut c);
                         if let Some(next) = b {
                             P::on_single(mid, M as u64, ByteMask::from_range(min..next), out);
-                            mid_idx = mid_mask.index_of(next);
+                            m = (mid_mask & ByteMask::from_range(next..)).next_bit(0);
                         } else {
                             P::on_single(mid, M as u64, ByteMask::from_range(min..), out);
                             break 'merge_level;
@@ -583,7 +576,7 @@ where
                         cmp_swap(&mut b, &mut c);
                         if let Some(next) = b {
                             P::on_single(rhs, R as u64, ByteMask::from_range(min..next), out);
-                            rhs_idx = rhs_mask.index_of(next);
+                            r = (rhs_mask & ByteMask::from_range(next..)).next_bit(0);
                         } else {
                             P::on_single(rhs, R as u64, ByteMask::from_range(min..), out);
                             break 'merge_level;
@@ -594,22 +587,22 @@ where
                         if P::descend_on_some_equal(LM as u64) {
                             descend2::<P, V, ZL, ZM, Out, A>(min, lhs, mid, out);
                         }
-                        lhs_idx += 1;
-                        mid_idx += 1;
+                        l = lhs_mask.next_bit(min);
+                        m = mid_mask.next_bit(min);
                     }
                     MR => {
                         if P::descend_on_some_equal(MR as u64) {
                             descend2::<P, V, ZM, ZR, Out, A>(min, mid, rhs, out);
                         }
-                        mid_idx += 1;
-                        rhs_idx += 1;
+                        m = mid_mask.next_bit(min);
+                        r = rhs_mask.next_bit(min);
                     }
                     LR => {
                         if P::descend_on_some_equal(LR as u64) {
                             descend2::<P, V, ZL, ZR, Out, A>(min, lhs, rhs, out);
                         }
-                        lhs_idx += 1;
-                        rhs_idx += 1;
+                        l = lhs_mask.next_bit(min);
+                        r = rhs_mask.next_bit(min);
                     }
                     // full 3-way
                     LMR => {
@@ -627,9 +620,9 @@ where
                         mid_mask = mid.child_mask();
                         rhs_mask = rhs.child_mask();
 
-                        lhs_idx = 0;
-                        mid_idx = 0;
-                        rhs_idx = 0;
+                        l = lhs_mask.indexed_bit::<true>(0);
+                        m = mid_mask.indexed_bit::<true>(0);
+                        r = rhs_mask.indexed_bit::<true>(0);
 
                         k += 1;
                         continue 'merge_level;
@@ -650,15 +643,15 @@ where
 
         rhs.ascend_byte();
         rhs_mask = rhs.child_mask();
-        rhs_idx = rhs_mask.index_of(byte_from) + 1;
+        r = rhs_mask.next_bit(byte_from);
 
         mid.ascend_byte();
         mid_mask = mid.child_mask();
-        mid_idx = mid_mask.index_of(byte_from) + 1;
+        m = mid_mask.next_bit(byte_from);
 
         lhs.ascend_byte();
         lhs_mask = lhs.child_mask();
-        lhs_idx = lhs_mask.index_of(byte_from) + 1;
+        l = lhs_mask.next_bit(byte_from);
 
         out.ascend_byte();
         k -= 1;
@@ -698,19 +691,14 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
     let mut m2 = z2.child_mask();
     let mut m3 = z3.child_mask();
 
-    let mut i0 = 0;
-    let mut i1 = 0;
-    let mut i2 = 0;
-    let mut i3 = 0;
+    let mut b0 = m0.indexed_bit::<true>(0);
+    let mut b1 = m1.indexed_bit::<true>(0);
+    let mut b2 = m2.indexed_bit::<true>(0);
+    let mut b3 = m3.indexed_bit::<true>(0);
 
     'ascend: loop {
         'merge_level: loop {
             // min selection
-            let mut b0 = m0.indexed_bit::<true>(i0 as usize);
-            let mut b1 = m1.indexed_bit::<true>(i1 as usize);
-            let mut b2 = m2.indexed_bit::<true>(i2 as usize);
-            let mut b3 = m3.indexed_bit::<true>(i3 as usize);
-
             let mut a = b0;
             let mut b = b1;
             let mut c = b2;
@@ -749,13 +737,13 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
                     }
 
                     m0 = z0.child_mask();
-                    i0 = 0;
+                    b0 = m0.indexed_bit::<true>(0);
                     m1 = z1.child_mask();
-                    i1 = 0;
+                    b1 = m1.indexed_bit::<true>(0);
                     m2 = z2.child_mask();
-                    i2 = 0;
+                    b2 = m2.indexed_bit::<true>(0);
                     m3 = z3.child_mask();
-                    i3 = 0;
+                    b3 = m3.indexed_bit::<true>(0);
 
                     k += 1;
                     continue 'merge_level;
@@ -771,7 +759,7 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
                         0b0001 => {
                             if let Some(next) = b {
                                 P::on_single(z0, 0b0001, ByteMask::from_range(min..next), out);
-                                i0 = m0.index_of(next);
+                                b0 = (m0 & ByteMask::from_range(next..)).next_bit(0);
                             } else {
                                 P::on_single(z0, 0b0001, ByteMask::from_range(min..), out);
                                 break 'merge_level;
@@ -780,7 +768,7 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
                         0b0010 => {
                             if let Some(next) = b {
                                 P::on_single(z1, 0b0010, ByteMask::from_range(min..next), out);
-                                i1 = m1.index_of(next);
+                                b1 = (m1 & ByteMask::from_range(next..)).next_bit(0);
                             } else {
                                 P::on_single(z1, 0b0010, ByteMask::from_range(min..), out);
                                 break 'merge_level;
@@ -789,7 +777,7 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
                         0b0100 => {
                             if let Some(next) = b {
                                 P::on_single(z2, 0b0100, ByteMask::from_range(min..next), out);
-                                i2 = m2.index_of(next);
+                                b2 = (m2 & ByteMask::from_range(next..)).next_bit(0);
                             } else {
                                 P::on_single(z2, 0b0100, ByteMask::from_range(min..), out);
                                 break 'merge_level;
@@ -798,7 +786,7 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
                         0b1000 => {
                             if let Some(next) = b {
                                 P::on_single(z3, 0b1000, ByteMask::from_range(min..next), out);
-                                i3 = m3.index_of(next);
+                                b3 = (m3 & ByteMask::from_range(next..)).next_bit(0);
                             } else {
                                 P::on_single(z3, 0b1000, ByteMask::from_range(min..), out);
                                 break 'merge_level;
@@ -893,16 +881,16 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
                     }
                     // then advance
                     if frontier & 0b0001 != 0 {
-                        i0 += 1;
+                        b0 = m0.next_bit(min);
                     }
                     if frontier & 0b0010 != 0 {
-                        i1 += 1;
+                        b1 = m1.next_bit(min);
                     }
                     if frontier & 0b0100 != 0 {
-                        i2 += 1;
+                        b2 = m2.next_bit(min);
                     }
                     if frontier & 0b1000 != 0 {
-                        i3 += 1;
+                        b3 = m3.next_bit(min);
                     }
                 }
             } else {
@@ -919,19 +907,19 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
 
         z0.ascend_byte();
         m0 = z0.child_mask();
-        i0 = m0.index_of(byte_from) + 1;
+        b0 = m0.next_bit(byte_from);
 
         z1.ascend_byte();
         m1 = z1.child_mask();
-        i1 = m1.index_of(byte_from) + 1;
+        b1 = m1.next_bit(byte_from);
 
         z2.ascend_byte();
         m2 = z2.child_mask();
-        i2 = m2.index_of(byte_from) + 1;
+        b2 = m2.next_bit(byte_from);
 
         z3.ascend_byte();
         m3 = z3.child_mask();
-        i3 = m3.index_of(byte_from) + 1;
+        b3 = m3.next_bit(byte_from);
 
         out.ascend_byte();
         k -= 1;
@@ -1031,10 +1019,11 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
         out.set_val(v);
     }
 
-    let mut idxs = [0; N];
+    let mut bytes = [None; N];
     let mut masks = [ByteMask::EMPTY; N];
     for (i, z) in zippers(zs, active) {
         masks[i] = z.child_mask();
+        bytes[i] = masks[i].indexed_bit::<true>(0);
     }
 
     // At each node, the algorithm:
@@ -1067,7 +1056,7 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
             let mut next = None;
 
             for i in active_bits::<N>(active) {
-                if let Some(b) = masks[i].indexed_bit::<true>(idxs[i] as usize) {
+                if let Some(b) = bytes[i] {
                     match min {
                         None => {
                             min = Some(b);
@@ -1109,7 +1098,7 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
                             let mut z = &mut zs[i];
                             z.descend_to_byte(a);
                             masks[i] = z.child_mask();
-                            idxs[i] = 0;
+                            bytes[i] = masks[i].indexed_bit::<true>(0);
                         });
 
                         if let Some(v) = P::combine_n(values(zs, active)) {
@@ -1132,7 +1121,7 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
                             Some(b) => {
                                 P::on_single(&mut zs[i], frontier, ByteMask::from_range(a..b), out);
                                 // advance
-                                idxs[i] = masks[i].index_of(b);
+                                bytes[i] = (masks[i] & ByteMask::from_range(b..)).next_bit(0);
                             }
                         }
                     } else {
@@ -1192,7 +1181,7 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
 
                         // advance indices
                         for_each_bit(frontier, |i| {
-                            idxs[i] += 1;
+                            bytes[i] = masks[i].next_bit(a);
                         });
                     }
                 }
@@ -1211,7 +1200,7 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
             let mut z = &mut zs[i];
             z.ascend_byte();
             masks[i] = z.child_mask();
-            idxs[i] = masks[i].index_of(byte_from) + 1;
+            bytes[i] = masks[i].next_bit(byte_from);
         });
 
         out.ascend_byte();
