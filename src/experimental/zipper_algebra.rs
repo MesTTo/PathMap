@@ -352,20 +352,24 @@ trait MergePolicy<V: Clone + Send + Sync> {
 
 trait ValuePolicy<V> {
     fn combine(l: Option<&V>, r: Option<&V>) -> Option<V>;
+    #[inline]
+    fn combine_acc(l: Option<V>, r: Option<&V>) -> Option<V> {
+        Self::combine(l.as_ref(), r)
+    }
     fn combine3(l: Option<&V>, m: Option<&V>, r: Option<&V>) -> Option<V> {
         // (l op m) op r
-        Self::combine(Self::combine(l, m).as_ref(), r)
+        Self::combine_acc(Self::combine(l, m), r)
     }
     fn combine4(a: Option<&V>, b: Option<&V>, c: Option<&V>, d: Option<&V>) -> Option<V> {
         // ((a op b) op c) op d
-        Self::combine(Self::combine(Self::combine(a, b).as_ref(), c).as_ref(), d)
+        Self::combine_acc(Self::combine_acc(Self::combine(a, b), c), d)
     }
     fn combine_n<'a, I>(vals: I) -> Option<V>
     where
         I: Iterator<Item = Option<&'a V>>,
         V: 'a,
     {
-        vals.fold(None, |acc, v| Self::combine(acc.as_ref(), v))
+        vals.fold(None, |acc, v| Self::combine_acc(acc, v))
     }
 }
 
@@ -1250,6 +1254,28 @@ impl<V: Lattice + Clone> ValuePolicy<V> for Join {
             r.cloned()
         }
     }
+
+    fn combine_acc(l: Option<V>, r: Option<&V>) -> Option<V> {
+        if let Some(lv) = l {
+            if let Some(rv) = r {
+                match lv.pjoin(rv) {
+                    AlgebraicResult::None => None,
+                    AlgebraicResult::Identity(mask) => {
+                        if mask & SELF_IDENT != 0 {
+                            Some(lv)
+                        } else {
+                            r.cloned()
+                        }
+                    }
+                    AlgebraicResult::Element(v) => Some(v),
+                }
+            } else {
+                Some(lv)
+            }
+        } else {
+            r.cloned()
+        }
+    }
 }
 
 // ==================== MEET ====================
@@ -1376,17 +1402,7 @@ impl<V: DistributiveLattice + Clone> ValuePolicy<V> for Subtract {
     fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
         l.and_then(|lv| {
             if let Some(rv) = r {
-                match lv.psubtract(rv) {
-                    AlgebraicResult::None => None,
-                    AlgebraicResult::Identity(mask) => {
-                        if mask & SELF_IDENT != 0 {
-                            Some(lv.clone())
-                        } else {
-                            None
-                        }
-                    }
-                    AlgebraicResult::Element(v) => Some(v),
-                }
+                subtract_refs(lv, rv)
             } else {
                 // lhs-only → keep
                 Some(lv.clone())
@@ -1402,19 +1418,49 @@ impl<V: DistributiveLattice + Clone> ValuePolicy<V> for Subtract {
         let mut it = vals;
         let z = it.next()?.cloned()?;
         it.try_fold(z, |acc, v| match v {
-            Some(rv) => match acc.psubtract(rv) {
-                AlgebraicResult::None => None,
-                AlgebraicResult::Identity(mask) => {
-                    if mask & SELF_IDENT != 0 {
-                        Some(acc)
-                    } else {
-                        None
-                    }
-                }
-                AlgebraicResult::Element(x) => Some(x),
-            },
+            Some(rv) => subtract_acc(acc, rv),
             None => Some(acc),
         })
+    }
+
+    fn combine_acc(l: Option<V>, r: Option<&V>) -> Option<V> {
+        l.and_then(|lv| {
+            if let Some(rv) = r {
+                subtract_acc(lv, rv)
+            } else {
+                // lhs-only → keep
+                Some(lv)
+            }
+        })
+    }
+}
+
+#[inline]
+fn subtract_refs<V: DistributiveLattice + Clone>(a: &V, b: &V) -> Option<V> {
+    match a.psubtract(b) {
+        AlgebraicResult::None => None,
+        AlgebraicResult::Identity(mask) => {
+            if mask & SELF_IDENT != 0 {
+                Some(a.clone())
+            } else {
+                None
+            }
+        }
+        AlgebraicResult::Element(v) => Some(v),
+    }
+}
+#[inline]
+fn subtract_acc<V: DistributiveLattice>(a: V, b: &V) -> Option<V> {
+    match a.psubtract(b) {
+        AlgebraicResult::None => None,
+        AlgebraicResult::Identity(mask) => {
+            if mask & SELF_IDENT != 0 {
+                Some(a)
+            } else {
+                None
+            }
+        }
+        AlgebraicResult::Element(v) => Some(v),
     }
 }
 
