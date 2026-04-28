@@ -1,13 +1,8 @@
-use pathmap_derive::PolyZipperExplicit;
-
 use crate::{
     alloc::{Allocator, GlobalAlloc},
     ring::{AlgebraicResult, COUNTER_IDENT, DistributiveLattice, Lattice, SELF_IDENT},
     utils::ByteMask,
-    zipper::{
-        ReadZipperTracked, ReadZipperUntracked, Zipper, ZipperInfallibleSubtries, ZipperMoving,
-        ZipperValues, ZipperWriting,
-    },
+    zipper::*,
 };
 
 pub use zipper_algebra_poly::ZipperMergeF;
@@ -930,21 +925,136 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
     }
 }
 
-use zipper_algebra_poly::SomeMutRefZ as Z;
+/// Performs an ordered N-way join (least upper bound) of radix-256 trie zippers.
+///
+/// This function merges `N` tries by traversing them simultaneously in lexicographic
+/// order, using a zipper-based depth-first traversal. At each node, child edges are
+/// treated as sorted streams and merged via a frontier-based strategy:
+///
+/// - Edges present in only one input are grafted directly,
+/// - Shared edges trigger descent and recursive merging,
+/// - Fully shared edges use a fast-path descent without recursion.
+///
+/// Values are combined using the lattice join (`∨`).
+///
+/// # Complexity
+///
+/// Let:
+/// - `h` be the maximum key length,
+/// - `f` be the total frontier size across levels,
+/// - `n` be the size of overlapping structure.
+///
+/// Then:
+///
+/// - Best case (disjoint): **O(h)**
+/// - Typical: **O(h + f)**
+/// - Worst case (fully overlapping): **O(n)**
+///
+/// # Notes
+///
+/// This is the most general and least pruning-friendly variant:
+/// joins preserve information, so most structure must be visited.
+///
+pub fn zipper_n_join<V, Z, Out, A, const N: usize>(zs: &mut [Z; N], out: &mut Out)
+where
+    V: Lattice + Clone + Send + Sync + Unpin,
+    Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+    A: Allocator,
+{
+    zipper_merge_n_mono::<Join, _, _, _, _, _>(zs, (1 << N) - 1, out);
+}
 
-// - The function is fully monomorphized over `N` and uses a bitmask (`active`)
+/// Performs an ordered N-way meet (greatest lower bound) of radix-256 trie zippers.
+///
+/// Only keys present in *all* input tries are retained. Traversal is aggressively
+/// pruned: any branch missing from even one input is discarded without descent.
+///
+/// Values are combined using the lattice meet (`∧`) with the convention that `None ∧ x = None`.
+///
+/// # Complexity
+///
+/// Let:
+/// - `h` be the maximum key length,
+/// - `d` be the size of the common intersection.
+///
+/// Then:
+///
+/// - Typical: **O(h + d)**
+/// - Often much smaller than join due to early annihilation of branches.
+///
+/// # Notes
+///
+/// Compared to join, meet is typically **asymptotically faster** on sparse or
+/// partially overlapping inputs, since entire subtries are skipped as soon as
+/// any participant is missing.
+///
+/// In practice, this behaves like intersecting sorted trees with short-circuiting.
+///
+pub fn zipper_n_meet<V, Z, Out, A, const N: usize>(zs: &mut [Z; N], out: &mut Out)
+where
+    V: Lattice + Clone + Send + Sync + Unpin,
+    Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+    A: Allocator,
+{
+    zipper_merge_n_mono::<Meet, _, _, _, _, _>(zs, (1 << N) - 1, out);
+}
+
+/// Performs a left-associative N-way subtraction of radix-256 trie zippers.
+///
+/// Only the leftmost zipper contributes structure; subsequent zippers remove
+/// values and subtries according to lattice subtraction semantics.
+///
+/// - Left-only branches are grafted directly,
+/// - Right-only branches are ignored,
+/// - Shared structure triggers descent when required by the policy.
+///
+/// Values are combined via using distributive
+/// subtraction.
+///
+/// # Complexity
+///
+/// Let:
+/// - `h` be the maximum key length,
+/// - `l` be the size of the left-hand trie,
+/// - `d` be the overlapping portion.
+///
+/// Then:
+///
+/// - Typical: **O(h + l)**
+/// - Often significantly faster than join, since traversal is guided primarily
+///   by the left-hand structure.
+///
+/// # Notes
+///
+/// Subtraction is **structurally biased** toward the leftmost input and benefits
+/// from early pruning when right-hand operands eliminate branches.
+///
+/// This makes it particularly efficient for difference-like workloads,
+/// where large portions of the right-hand tries can be skipped entirely.
+///
+pub fn zipper_n_subtract<V, Z, Out, A, const N: usize>(zs: &mut [Z; N], out: &mut Out)
+where
+    V: DistributiveLattice + Clone + Send + Sync + Unpin,
+    Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+    A: Allocator,
+{
+    zipper_merge_n_mono::<Subtract, _, _, _, _, _>(zs, (1 << N) - 1, out);
+}
+
+// - The function is fully monomorphized over `Z` and `N` and uses a bitmask (`active`)
 //   to track participating zippers.
 // - Small frontiers (`k ≤ 4`) are dispatched to specialized implementations
 //   for improved performance.
 // - Requires `N ≤ 64`.
-fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
-    zs: &mut [Z<'_, '_, '_, V, A>; N],
-    active: u64,
-    out: &mut Out,
-) where
+fn zipper_merge_n_mono<P, V, Z, Out, A, const N: usize>(zs: &mut [Z; N], active: u64, out: &mut Out)
+where
     V: Clone + Send + Sync + Unpin,
     P: MergePolicy<V> + ValuePolicy<V>,
     A: Allocator,
+    Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
     debug_assert!(N > 0 && N <= 64);
@@ -957,26 +1067,22 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
         (0..N).filter(move |i| (active >> i) & 1 != 0)
     }
 
-    fn zippers<'a, 'trie, 'path, V, A, const N: usize>(
-        zs: &'a [Z<'a, 'trie, 'path, V, A>; N],
+    fn only_active<'a, T, const N: usize>(
+        zs: &'a [T; N],
         active: u64,
-    ) -> impl Iterator<Item = (usize, &'a Z<'a, 'trie, 'path, V, A>)>
-    where
-        V: Clone + Send + Sync + Unpin,
-        A: Allocator,
-    {
+    ) -> impl Iterator<Item = (usize, &'a T)> {
         active_bits::<N>(active).map(|i| (i, &zs[i]))
     }
 
-    fn values<'a, V, A, const N: usize>(
-        zs: &'a [Z<'a, '_, '_, V, A>; N],
+    fn values<'a, V, Z, const N: usize>(
+        zs: &'a [Z; N],
         active: u64,
     ) -> impl Iterator<Item = Option<&'a V>>
     where
-        V: Clone + Send + Sync + Unpin,
-        A: Allocator,
+        V: 'a,
+        Z: ZipperValues<V>,
     {
-        zippers(zs, active).map(|(_, z)| z.val())
+        only_active(zs, active).map(|(_, z)| z.val())
     }
 
     // small micro-helpers
@@ -1025,7 +1131,7 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
 
     let mut bytes = [None; N];
     let mut masks = [ByteMask::EMPTY; N];
-    for (i, z) in zippers(zs, active) {
+    for (i, z) in only_active(zs, active) {
         masks[i] = z.child_mask();
         bytes[i] = masks[i].indexed_bit::<true>(0);
     }
@@ -1171,7 +1277,7 @@ fn zipper_merge_n_mono<P, V, Out, A, const N: usize>(
                                     for_each_bit(frontier, |i| zs[i].descend_to_byte(a));
 
                                     // recursive call with SAME array, smaller mask
-                                    zipper_merge_n_mono::<P, V, Out, A, N>(zs, frontier, out);
+                                    zipper_merge_n_mono::<P, V, Z, Out, A, N>(zs, frontier, out);
 
                                     //ascend
                                     for_each_bit(frontier, |i| {
@@ -1472,6 +1578,7 @@ mod zipper_algebra_poly {
     use crate::ring::{DistributiveLattice, Lattice};
     use crate::trie_node::*;
     use crate::zipper::*;
+    use pathmap_derive::PolyZipperExplicit;
 
     #[derive(PolyZipperExplicit)]
     #[poly_zipper_explicit(traits(ZipperMoving, ZipperValues))]
@@ -1629,7 +1736,7 @@ mod zipper_algebra_poly {
 
                 let active: u64 = (1 << zs.len()) - 1;
 
-                super::zipper_merge_n_mono::<P, _, _, _, _>(
+                super::zipper_merge_n_mono::<P, _, SomeMutRefZ<'_, 'trie, 'path, V, A>, _, _, _>(
                     &mut zs,
                     active,
                     out,
