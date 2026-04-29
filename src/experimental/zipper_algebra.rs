@@ -1336,10 +1336,7 @@ where
 
                         // descend and refresh masks and indices
                         for_each_bit(active, |i| {
-                            let mut z = &mut zs[i];
-                            z.descend_to_byte(a);
-                            masks[i] = z.child_mask();
-                            bytes[i] = masks[i].indexed_bit::<true>(0);
+                            zs[i].descend_to_byte(a);
                         });
 
                         // check structural sharing first
@@ -1357,6 +1354,11 @@ where
                         if let Some(v) = P::combine_n(values(zs, active)) {
                             out.set_val(v);
                         }
+
+                        for_each_bit(active, |i| {
+                            masks[i] = zs[i].child_mask();
+                            bytes[i] = masks[i].indexed_bit::<true>(0);
+                        });
 
                         k += 1;
                         continue 'merge_level;
