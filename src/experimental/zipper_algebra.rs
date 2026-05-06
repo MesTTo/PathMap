@@ -2069,7 +2069,10 @@ mod zipper_algebra_poly {
 mod tests {
     use crate::{
         PathMap,
-        zipper::{ReadZipperUntracked, WriteZipperUntracked},
+        zipper::{
+            ReadZipperUntracked, WriteZipperUntracked, ZipperInfallibleSubtries, ZipperMoving,
+            ZipperWriting,
+        },
     };
 
     type Paths = &'static [(&'static [u8], u64)];
@@ -3528,5 +3531,128 @@ mod tests {
                 |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_subtract_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
+    }
+
+    const FOR_MERKLEIZATION: Paths = &[
+        // X
+        (&[0b100000, 0b00, 0b0001], 1),
+        (&[0b100000, 0b00, 0b0011], 2),
+        (&[0b100000, 0b00, 0b0111], 3),
+        (&[0b100000, 0b00, 0b1111], 4),
+        (&[0b010000, 0b00, 0b0001], 1),
+        (&[0b010000, 0b00, 0b0011], 2),
+        (&[0b010000, 0b00, 0b0111], 3),
+        (&[0b010000, 0b00, 0b1111], 4),
+        // Y
+        (&[0b001000, 0b01, 0b0001], 5),
+        (&[0b001000, 0b01, 0b0011], 6),
+        (&[0b001000, 0b01, 0b0111], 7),
+        (&[0b001000, 0b01, 0b1111], 8),
+        (&[0b000100, 0b01, 0b0001], 5),
+        (&[0b000100, 0b01, 0b0011], 6),
+        (&[0b000100, 0b01, 0b0111], 7),
+        (&[0b000100, 0b01, 0b1111], 8),
+        // Z
+        (&[0b000010, 0b11, 0b0001], 9),
+        (&[0b000010, 0b11, 0b0011], 10),
+        (&[0b000010, 0b11, 0b0111], 11),
+        (&[0b000010, 0b11, 0b1111], 12),
+        (&[0b000001, 0b11, 0b0001], 9),
+        (&[0b000001, 0b11, 0b0011], 10),
+        (&[0b000001, 0b11, 0b0111], 11),
+        (&[0b000001, 0b11, 0b1111], 12),
+    ];
+
+    #[test]
+    fn test_merkleization() {
+        use crate::experimental::zipper_algebra::*;
+        use crate::{zipper_join_n, zipper_meet_n};
+
+        let mut map = PathMap::from_iter(FOR_MERKLEIZATION);
+        let merkelize_result = map.merkleize();
+        assert!(merkelize_result.reused > 0);
+
+        let mut r1 = map.read_zipper();
+        let mut r2 = map.read_zipper();
+        let mut r3 = map.read_zipper();
+        let mut r4 = map.read_zipper();
+        let mut r5 = map.read_zipper();
+        let mut r6 = map.read_zipper();
+
+        r1.descend_to_byte(0b000001);
+        r2.descend_to_byte(0b000010);
+        r3.descend_to_byte(0b000100);
+        r4.descend_to_byte(0b001000);
+        r5.descend_to_byte(0b010000);
+        r6.descend_to_byte(0b100000);
+
+        // this one simulates X \/ X, where X is shared
+        let mut result0 = PathMap::new();
+        let mut w0 = result0.write_zipper();
+        zipper_join(&mut r1, &mut r2, &mut w0);
+        let expected0: Paths = &[
+            (&[0b11, 0b0001], 9),
+            (&[0b11, 0b0011], 10),
+            (&[0b11, 0b0111], 11),
+            (&[0b11, 0b1111], 12),
+        ];
+        assert_trie(expected0, result0);
+
+        fn prefixed<V: Clone + Send + Sync + Unpin, Z: ZipperInfallibleSubtries<V>>(
+            rz: &Z,
+            path: &[u8],
+        ) -> PathMap<V> {
+            let mut res = PathMap::new();
+            let mut out = res.write_zipper_at_path(path);
+            out.graft(rz);
+            res
+        }
+
+        let mut map1 = prefixed(&mut r3, &[0]);
+        let mut map2 = prefixed(&mut r4, &[0]);
+        let mut r31 = map1.read_zipper();
+        let mut r32 = map1.read_zipper();
+        let mut r33 = map1.read_zipper();
+        let mut r41 = map2.read_zipper();
+        let mut r42 = map2.read_zipper();
+        let mut r43 = map2.read_zipper();
+
+        // this one simulates X.prefixed(0) /\ X.prefixed(0) ..., where X is shared
+        let mut result1 = PathMap::new();
+        let mut w1 = result1.write_zipper();
+        zipper_meet_n!(r31, r32, r33, r41, r42, r43 => w1);
+        let expected1: Paths = &[
+            (&[0b0, 0b01, 0b0001], 5),
+            (&[0b0, 0b01, 0b0011], 6),
+            (&[0b0, 0b01, 0b0111], 7),
+            (&[0b0, 0b01, 0b1111], 8),
+        ];
+        assert_trie(expected1, result1);
+
+        let mut map3 = prefixed(&mut r5, &[0]);
+        let mut map4 = prefixed(&mut r6, &[1]);
+        let mut r51 = map3.read_zipper();
+        let mut r52 = map3.read_zipper();
+        let mut r53 = map3.read_zipper();
+        let mut r54 = map3.read_zipper();
+        let mut r61 = map4.read_zipper();
+        let mut r62 = map4.read_zipper();
+        let mut r63 = map4.read_zipper();
+
+        // this one simulates X.prefixed(0) \/ X.prefixed(0) ... \/ X.prefixed(1) \/ ..., where X is shared
+        let mut result2 = PathMap::new();
+        let mut w2 = result2.write_zipper();
+        zipper_join_n!(r51, r52, r53, r54, r61, r62, r63 => w2);
+        let expected2: Paths = &[
+            (&[0b0, 0b00, 0b0001], 1),
+            (&[0b0, 0b00, 0b0011], 2),
+            (&[0b0, 0b00, 0b0111], 3),
+            (&[0b0, 0b00, 0b1111], 4),
+            (&[0b1, 0b00, 0b0001], 1),
+            (&[0b1, 0b00, 0b0011], 2),
+            (&[0b1, 0b00, 0b0111], 3),
+            (&[0b1, 0b00, 0b1111], 4),
+        ];
+        assert_trie(expected2, result2);
     }
 }
