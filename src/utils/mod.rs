@@ -161,6 +161,8 @@ impl ByteMask {
     }
 
     /// Returns the byte corresponding to the `nth` set bit in the mask, counting forwards or backwards
+    ///
+    /// GOAT TODO Optimization: There should be a code path for `idx > 8` where we do a binary search instead of just scanning linearly
     pub fn indexed_bit<const FORWARD: bool>(&self, idx: usize) -> Option<u8> {
         let mut i = if FORWARD { 0 } else { 3 };
         let mut m = self.0[i];
