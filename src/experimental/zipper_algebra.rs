@@ -2002,7 +2002,7 @@ mod zipper_algebra_poly {
     /// and forwarding them to [`ZipperMergeF::join_n`].
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// zipper_join_n!(z1, z2, z3 => out);
     /// ```
     ///
@@ -2024,7 +2024,7 @@ mod zipper_algebra_poly {
     /// and forwarding them to [`ZipperMergeF::meet_n`].
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// zipper_meet_n!(z1, z2, z3 => out);
     /// ```
     ///
@@ -2046,7 +2046,7 @@ mod zipper_algebra_poly {
     /// and forwarding them to [`ZipperMergeF::subtract_n`].
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// zipper_subtract_n!(z1, z2, z3 => out);
     /// ```
     ///
