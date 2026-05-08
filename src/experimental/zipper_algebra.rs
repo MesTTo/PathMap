@@ -1786,6 +1786,13 @@ mod zipper_algebra_poly {
             }
         }
 
+        fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> {
+            match self {
+                SomeMutRefZ::RZ(inner) => inner.get_focus_at(path),
+                SomeMutRefZ::RZT(inner) => inner.get_focus_at(path),
+            }
+        }
+
         fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
             match self {
                 SomeMutRefZ::RZ(inner) => inner.try_borrow_focus(),

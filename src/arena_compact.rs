@@ -1655,6 +1655,10 @@ where Storage: AsRef<[u8]>
     fn val(&self) -> Option<&()> {
         self.get_value().map(|_x| &())
     }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&()> {
+//GOAT
+        panic!()
+    }
 }
 
 impl<'tree, Storage> ZipperValues<u64> for ACTZipper<'tree, Storage, u64>
@@ -1663,7 +1667,7 @@ where Storage: AsRef<[u8]>
     fn val(&self) -> Option<&u64> {
         let value = self.get_value()?;
         if self.tree.value.get() != value {
-            self.tree.value.set(value);            
+            self.tree.value.set(value);
         }
         let ptr = self.tree.value.as_ptr();
         // technically if someone borrows the value twice, they will hit UB
@@ -1672,6 +1676,10 @@ where Storage: AsRef<[u8]>
         // all of this is done so that the value can be borrowed with the same
         // lifetime as the tree.
         Some(unsafe { &*ptr })
+    }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&u64> {
+//GOAT
+        panic!()
     }
 }
 
@@ -1699,6 +1707,10 @@ where Storage: AsRef<[u8]>
     fn get_val(&self) -> Option<&'tree ()> {
         self.get_value().map(|_x| &())
     }
+    fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'tree ()> {
+//GOAT
+        panic!()
+    }
 }
 
 impl<'tree, Storage> ZipperReadOnlyValues<'tree, u64> for ACTZipper<'tree, Storage, u64>
@@ -1711,6 +1723,10 @@ where Storage: AsRef<[u8]>
         }
         let ptr = self.tree.value.as_ptr();
         Some(unsafe { &*ptr })
+    }
+    fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'tree u64> {
+//GOAT
+        panic!()
     }
 }
 

@@ -226,6 +226,15 @@ impl<'prefix, Z, V> ZipperValues<V> for PrefixZipper<'prefix, Z>
         }
         self.source.val()
     }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
+        if self.position.is_source() {
+            self.source.val_at(path)
+        } else {
+//GOAT, If path is a valid continuation of the prefix then adjust it appropriately and fall through to a call to `val_at`, otherwise return None
+//Make sure there is a test to exercise all 3 branches through this code
+            panic!()
+        }
+    }
 }
 
 impl<'prefix, 'source, Z, V> ZipperReadOnlyValues<'source, V>
@@ -238,6 +247,15 @@ impl<'prefix, 'source, Z, V> ZipperReadOnlyValues<'source, V>
             return None;
         }
         self.source.get_val()
+    }
+    fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'source V> {
+        if self.position.is_source() {
+            self.source.get_val_at(path)
+        } else {
+//GOAT, If path is a valid continuation of the prefix then adjust it appropriately and fall through to a call to `get_val_at`, otherwise return None
+//Make sure there is a test to exercise all 3 branches through this code
+            panic!()
+        }
     }
 }
 
@@ -634,6 +652,7 @@ impl<'prefix, V: Clone + Send + Sync + Unpin, Z, A: Allocator> ZipperInfallibleS
         }
     }
     fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> { self.source.get_focus() }
+    fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> { self.source.get_focus_at(path) }
     fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> { self.source.try_borrow_focus() }
 }
 

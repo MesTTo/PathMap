@@ -232,6 +232,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for TrieRefBo
     fn val(&self) -> Option<&V> {
         self.get_val()
     }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
+        self.get_val_at(path)
+    }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for TrieRefBorrowed<'_, V, A> {
@@ -274,6 +277,10 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A
             OpaqueAbstractNodeRef(AbstractNodeRef::None)
         }
     }
+    fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> {
+//GOAT
+        panic!()
+    }
     fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
         if self.is_valid() {
             let node_key = self.node_key();
@@ -310,6 +317,10 @@ impl<'a, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ZipperReadOnlyV
         } else {
             None
         }
+    }
+    fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'a V> {
+//GOAT
+        panic!()
     }
 }
 
@@ -577,6 +588,10 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for TrieRefOw
             None
         }
     }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
+//GOAT
+        panic!()
+    }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for TrieRefOwned<V, A> {
@@ -618,6 +633,10 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A
         } else {
             OpaqueAbstractNodeRef(AbstractNodeRef::None)
         }
+    }
+    fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> {
+//GOAT
+        panic!()
     }
     fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
         if self.is_valid() {
@@ -749,6 +768,12 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for TrieRef<'
             TrieRef::Owned(trie_ref) => trie_ref.val(),
         }
     }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
+        match self {
+            TrieRef::Borrowed(trie_ref) => trie_ref.val_at(path),
+            TrieRef::Owned(trie_ref) => trie_ref.val_at(path),
+        }
+    }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for TrieRef<'_, V, A> {
@@ -788,6 +813,10 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A
             TrieRef::Borrowed(trie_ref) => trie_ref.get_focus(),
             TrieRef::Owned(trie_ref) => trie_ref.get_focus(),
         }
+    }
+    fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> {
+//GOAT
+        panic!()
     }
     fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
         match self {
