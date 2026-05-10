@@ -1101,151 +1101,99 @@ mod tests {
     }
 
     #[test]
-    fn trie_ref_borrowed_val_at_test() {
-        let mut map = PathMap::<i32>::new();
-        map.set_val_at(b"root:a:new_a", 10);
-        map.set_val_at(b"root:a:nested:deep", 11);
-        map.set_val_at(b"root:c:new_c", 30);
+    fn trie_ref_val_at_test() {
+        fn assert_val_at<T: ZipperValues<i32>>(trie_ref: T) {
+            assert_eq!(trie_ref.val(), None);
+            assert_eq!(trie_ref.val_at(b"root:a:new_a"), Some(&10));
+            assert_eq!(trie_ref.val_at(b"root:a:nested:deep"), Some(&11));
+            assert_eq!(trie_ref.val_at(b"root:b:missing"), None);
+        }
 
-        let trie_ref = map.trie_ref_at_path(b"root");
-        assert_eq!(trie_ref.val(), None);
-        assert_eq!(trie_ref.val_at(b":a:new_a"), Some(&10));
-        assert_eq!(trie_ref.val_at(b":a:nested:deep"), Some(&11));
-        assert_eq!(trie_ref.val_at(b":b:missing"), None);
-    }
+        let mut borrowed_map = PathMap::<i32>::new();
+        borrowed_map.set_val_at(b"root:a:new_a", 10);
+        borrowed_map.set_val_at(b"root:a:nested:deep", 11);
+        borrowed_map.set_val_at(b"root:c:new_c", 30);
+        assert_val_at(borrowed_map.trie_ref_at_path(b""));
 
-    #[test]
-    fn trie_ref_borrowed_get_focus_at_test() {
-        let mut src = PathMap::<i32>::new();
-        src.set_val_at(b"root:a:new_a", 10);
-        src.set_val_at(b"root:a:nested:deep", 11);
-        src.set_val_at(b"root:branch:mid:leaf", 40);
-        src.set_val_at(b"root:c:new_c", 30);
-
-        let src_ref = src.trie_ref_at_path(b"root");
-        let src_ref_colon = src.trie_ref_at_path(b"root:");
-
-        let mut dst = PathMap::<i32>::new();
-        dst.set_val_at(b"root:p:old_p", 1);
-        dst.set_val_at(b"root:q:old_q", 2);
-        dst.set_val_at(b"root:r:old_r", 3);
-        dst.set_val_at(b"root:s:old_s", 4);
-        dst.set_val_at(b"root:t:old_t", 5);
-        dst.set_val_at(b"root:u:old_u", 6);
-        dst.set_val_at(b"root:v:old_v", 7);
-
-        dst.write_zipper_at_path(b"root:p").graft_src_at(&src_ref_colon, b"");
-        dst.write_zipper_at_path(b"root:q").graft_src_at(&src_ref, b":");
-        dst.write_zipper_at_path(b"root:r").graft_src_at(&src_ref, b":a");
-        dst.write_zipper_at_path(b"root:s").graft_src_at(&src_ref, b":a:nested");
-        dst.write_zipper_at_path(b"root:t").graft_src_at(&src_ref, b":missing");
-        dst.write_zipper_at_path(b"root:u").graft_src_at(&src_ref, b":branch:mid");
-
-        assert_eq!(dst.get_val_at(b"root:p:old_p"), None);
-        assert_eq!(dst.get_val_at(b"root:p:a:new_a"), Some(&10));
-        assert_eq!(dst.get_val_at(b"root:p:a:nested:deep"), Some(&11));
-        assert_eq!(dst.get_val_at(b"root:p:branch:mid:leaf"), Some(&40));
-        assert_eq!(dst.get_val_at(b"root:p:c:new_c"), Some(&30));
-
-        assert_eq!(dst.get_val_at(b"root:q:old_q"), None);
-        assert_eq!(dst.get_val_at(b"root:q:a:new_a"), Some(&10));
-        assert_eq!(dst.get_val_at(b"root:q:branch:mid:leaf"), Some(&40));
-        assert_eq!(dst.get_val_at(b"root:q:c:new_c"), Some(&30));
-
-        assert_eq!(dst.get_val_at(b"root:r:old_r"), None);
-        assert_eq!(dst.get_val_at(b"root:r:new_a"), Some(&10));
-        assert_eq!(dst.get_val_at(b"root:r:nested:deep"), Some(&11));
-        assert_eq!(dst.get_val_at(b"root:r:branch:mid:leaf"), None);
-
-        assert_eq!(dst.get_val_at(b"root:s:old_s"), None);
-        assert_eq!(dst.get_val_at(b"root:s:deep"), Some(&11));
-        assert_eq!(dst.get_val_at(b"root:s:new_a"), None);
-
-        assert_eq!(dst.get_val_at(b"root:t"), None);
-        assert_eq!(dst.get_val_at(b"root:t:old_t"), None);
-
-        assert_eq!(dst.get_val_at(b"root:u:old_u"), None);
-        assert_eq!(dst.get_val_at(b"root:u:leaf"), Some(&40));
-
-        assert_eq!(dst.get_val_at(b"root:v:old_v"), Some(&7));
-    }
-
-    #[test]
-    fn trie_ref_owned_val_at_test() {
-        let mut map = PathMap::<i32>::new();
-        map.set_val_at(b"root:a:new_a", 10);
-        map.set_val_at(b"root:a:nested:deep", 11);
-        map.set_val_at(b"root:c:new_c", 30);
-
-        let trie_ref = TrieRef::from(map);
-        let owned = match trie_ref {
+        let mut owned_map = PathMap::<i32>::new();
+        owned_map.set_val_at(b"root:a:new_a", 10);
+        owned_map.set_val_at(b"root:a:nested:deep", 11);
+        owned_map.set_val_at(b"root:c:new_c", 30);
+        let owned = match TrieRef::from(owned_map) {
             TrieRef::Owned(trie_ref) => trie_ref,
             TrieRef::Borrowed(_) => unreachable!(),
         };
-
-        assert_eq!(owned.val(), None);
-        assert_eq!(owned.val_at(b"root:a:new_a"), Some(&10));
-        assert_eq!(owned.val_at(b"root:a:nested:deep"), Some(&11));
-        assert_eq!(owned.val_at(b"root:b:missing"), None);
+        assert_val_at(owned);
     }
 
     #[test]
-    fn trie_ref_owned_get_focus_at_test() {
-        let mut src = PathMap::<i32>::new();
-        src.set_val_at(b"root:a:new_a", 10);
-        src.set_val_at(b"root:a:nested:deep", 11);
-        src.set_val_at(b"root:branch:mid:leaf", 40);
-        src.set_val_at(b"root:c:new_c", 30);
+    fn trie_ref_graft_src_at_test() {
+        fn assert_graft_src_at<S: ZipperInfallibleSubtries<i32>>(src_ref: S, src_ref_colon: S) {
+            let mut dst = PathMap::<i32>::new();
+            dst.set_val_at(b"root:p:old_p", 1);
+            dst.set_val_at(b"root:q:old_q", 2);
+            dst.set_val_at(b"root:r:old_r", 3);
+            dst.set_val_at(b"root:s:old_s", 4);
+            dst.set_val_at(b"root:t:old_t", 5);
+            dst.set_val_at(b"root:u:old_u", 6);
+            dst.set_val_at(b"root:v:old_v", 7);
 
-        let src_ref = TrieRef::from(src);
-        let owned = match src_ref {
+            dst.write_zipper_at_path(b"root:p").graft_src_at(&src_ref_colon, b"");
+            dst.write_zipper_at_path(b"root:q").graft_src_at(&src_ref, b":");
+            dst.write_zipper_at_path(b"root:r").graft_src_at(&src_ref, b":a");
+            dst.write_zipper_at_path(b"root:s").graft_src_at(&src_ref, b":a:nested");
+            dst.write_zipper_at_path(b"root:t").graft_src_at(&src_ref, b":missing");
+            dst.write_zipper_at_path(b"root:u").graft_src_at(&src_ref, b":branch:mid");
+
+            assert_eq!(dst.get_val_at(b"root:p:old_p"), None);
+            assert_eq!(dst.get_val_at(b"root:p:a:new_a"), Some(&10));
+            assert_eq!(dst.get_val_at(b"root:p:a:nested:deep"), Some(&11));
+            assert_eq!(dst.get_val_at(b"root:p:branch:mid:leaf"), Some(&40));
+            assert_eq!(dst.get_val_at(b"root:p:c:new_c"), Some(&30));
+
+            assert_eq!(dst.get_val_at(b"root:q:old_q"), None);
+            assert_eq!(dst.get_val_at(b"root:q:a:new_a"), Some(&10));
+            assert_eq!(dst.get_val_at(b"root:q:branch:mid:leaf"), Some(&40));
+            assert_eq!(dst.get_val_at(b"root:q:c:new_c"), Some(&30));
+
+            assert_eq!(dst.get_val_at(b"root:r:old_r"), None);
+            assert_eq!(dst.get_val_at(b"root:r:new_a"), Some(&10));
+            assert_eq!(dst.get_val_at(b"root:r:nested:deep"), Some(&11));
+            assert_eq!(dst.get_val_at(b"root:r:branch:mid:leaf"), None);
+
+            assert_eq!(dst.get_val_at(b"root:s:old_s"), None);
+            assert_eq!(dst.get_val_at(b"root:s:deep"), Some(&11));
+            assert_eq!(dst.get_val_at(b"root:s:new_a"), None);
+
+            assert_eq!(dst.get_val_at(b"root:t"), None);
+            assert_eq!(dst.get_val_at(b"root:t:old_t"), None);
+
+            assert_eq!(dst.get_val_at(b"root:u:old_u"), None);
+            assert_eq!(dst.get_val_at(b"root:u:leaf"), Some(&40));
+
+            assert_eq!(dst.get_val_at(b"root:v:old_v"), Some(&7));
+        }
+
+        let mut borrowed_src = PathMap::<i32>::new();
+        borrowed_src.set_val_at(b"root:a:new_a", 10);
+        borrowed_src.set_val_at(b"root:a:nested:deep", 11);
+        borrowed_src.set_val_at(b"root:branch:mid:leaf", 40);
+        borrowed_src.set_val_at(b"root:c:new_c", 30);
+        assert_graft_src_at(
+            borrowed_src.trie_ref_at_path(b"root"),
+            borrowed_src.trie_ref_at_path(b"root:"),
+        );
+
+        let mut owned_src = PathMap::<i32>::new();
+        owned_src.set_val_at(b"root:a:new_a", 10);
+        owned_src.set_val_at(b"root:a:nested:deep", 11);
+        owned_src.set_val_at(b"root:branch:mid:leaf", 40);
+        owned_src.set_val_at(b"root:c:new_c", 30);
+        let owned = match TrieRef::from(owned_src) {
             TrieRef::Owned(trie_ref) => trie_ref,
             TrieRef::Borrowed(_) => unreachable!(),
         };
         let owned_colon = owned.trie_ref_at_path(b":");
-
-        let mut dst = PathMap::<i32>::new();
-        dst.set_val_at(b"root:p:old_p", 1);
-        dst.set_val_at(b"root:q:old_q", 2);
-        dst.set_val_at(b"root:r:old_r", 3);
-        dst.set_val_at(b"root:s:old_s", 4);
-        dst.set_val_at(b"root:t:old_t", 5);
-        dst.set_val_at(b"root:u:old_u", 6);
-        dst.set_val_at(b"root:v:old_v", 7);
-
-        dst.write_zipper_at_path(b"root:p").graft_src_at(&owned_colon, b"");
-        dst.write_zipper_at_path(b"root:q").graft_src_at(&owned, b":");
-        dst.write_zipper_at_path(b"root:r").graft_src_at(&owned, b":a");
-        dst.write_zipper_at_path(b"root:s").graft_src_at(&owned, b":a:nested");
-        dst.write_zipper_at_path(b"root:t").graft_src_at(&owned, b":missing");
-        dst.write_zipper_at_path(b"root:u").graft_src_at(&owned, b":branch:mid");
-
-        assert_eq!(dst.get_val_at(b"root:p:old_p"), None);
-        assert_eq!(dst.get_val_at(b"root:p:a:new_a"), Some(&10));
-        assert_eq!(dst.get_val_at(b"root:p:a:nested:deep"), Some(&11));
-        assert_eq!(dst.get_val_at(b"root:p:branch:mid:leaf"), Some(&40));
-        assert_eq!(dst.get_val_at(b"root:p:c:new_c"), Some(&30));
-
-        assert_eq!(dst.get_val_at(b"root:q:old_q"), None);
-        assert_eq!(dst.get_val_at(b"root:q:a:new_a"), Some(&10));
-        assert_eq!(dst.get_val_at(b"root:q:branch:mid:leaf"), Some(&40));
-        assert_eq!(dst.get_val_at(b"root:q:c:new_c"), Some(&30));
-
-        assert_eq!(dst.get_val_at(b"root:r:old_r"), None);
-        assert_eq!(dst.get_val_at(b"root:r:new_a"), Some(&10));
-        assert_eq!(dst.get_val_at(b"root:r:nested:deep"), Some(&11));
-        assert_eq!(dst.get_val_at(b"root:r:branch:mid:leaf"), None);
-
-        assert_eq!(dst.get_val_at(b"root:s:old_s"), None);
-        assert_eq!(dst.get_val_at(b"root:s:deep"), Some(&11));
-        assert_eq!(dst.get_val_at(b"root:s:new_a"), None);
-
-        assert_eq!(dst.get_val_at(b"root:t"), None);
-        assert_eq!(dst.get_val_at(b"root:t:old_t"), None);
-
-        assert_eq!(dst.get_val_at(b"root:u:old_u"), None);
-        assert_eq!(dst.get_val_at(b"root:u:leaf"), Some(&40));
-
-        assert_eq!(dst.get_val_at(b"root:v:old_v"), Some(&7));
+        assert_graft_src_at(owned, owned_colon);
     }
 }
