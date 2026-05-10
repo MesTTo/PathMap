@@ -1497,8 +1497,12 @@ where Storage: AsRef<[u8]>
         let value = read_varint_u64(&data[1..]).0;
         Some(value)
     }
+
     /// Internal method to facilitate traversing to a path without needing to clone the zipper
-    fn get_value_at(&self, path: &[u8]) -> Option<u64> {
+    fn with_lookup_from_focus<R, F>(&self, path: &[u8], mut f: F) -> Option<R>
+    where
+        F: FnMut(Node, usize) -> Option<R>,
+    {
         if self.invalid > 0 {
             return None;
         }
@@ -1508,18 +1512,17 @@ where Storage: AsRef<[u8]>
         let mut node_depth = self.stack.last()?.node_depth;
 
         loop {
-            match &cur_node {
+            match cur_node {
                 Node::Branch(node) => {
                     if path.is_empty() {
-                        return node.value;
+                        return f(Node::Branch(node), node_depth);
                     }
                     if !node.bytemask.test_bit(path[0]) {
                         return None;
                     }
                     let first_child = node.first_child?;
                     let idx = node.bytemask.index_of(path[0]) as usize;
-                    let (node, _, _) = self.tree.nth_node(first_child, idx);
-                    cur_node = node;
+                    cur_node = self.tree.nth_node(first_child, idx).0;
                     node_depth = 0;
                     path = &path[1..];
                 }
@@ -1529,10 +1532,14 @@ where Storage: AsRef<[u8]>
                     if !starts_with(path, rest_path) {
                         return None;
                     }
+                    if path.len() < rest_path.len() {
+                        node_depth += path.len();
+                        return f(Node::Line(line), node_depth);
+                    }
                     path = &path[rest_path.len()..];
                     if path.is_empty() {
                         if line.value.is_some() {
-                            return line.value;
+                            return f(Node::Line(line), line_path.len());
                         }
                         cur_node = self.tree.get_node(line.child?).0;
                         node_depth = 0;
@@ -1543,6 +1550,21 @@ where Storage: AsRef<[u8]>
                 }
             }
         }
+    }
+    fn get_value_at(&self, path: &[u8]) -> Option<u64> {
+        self.with_lookup_from_focus(path, |node, node_depth| {
+            match node {
+                Node::Branch(node) => node.value,
+                Node::Line(line) => {
+                    let line_path = self.tree.get_line(line.path);
+                    if node_depth < line_path.len() {
+                        None
+                    } else {
+                        line.value
+                    }
+                }
+            }
+        })
     }
 
     fn ascend_invalid(&mut self, limit: Option<&mut usize>) -> bool {
