@@ -1513,34 +1513,13 @@ pub(crate) mod read_zipper_core {
         }
         #[inline]
         fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> {
-            let path = path.as_ref();
-            let node_key = self.node_key();
-
-            match (node_key.len() == 0, path.len() == 0) {
-                //No onward key means we want to reference the focus node, but we want to get the ODRC, so we can clone it by reference
-                (true, true) => {
-                    match self.ancestors.last() {
-                        Some((focus_node, _iter_tok, _prefix_offset)) => OpaqueAbstractNodeRef(focus_node.get_node_at_key(self.parent_key())),
-                        None => OpaqueAbstractNodeRef(AbstractNodeRef::BorrowedRc(self.root_node.as_ref()))
-                    }
-                },
-                //Based off the `node_key` only
-                (false, true) => {
-                    OpaqueAbstractNodeRef(self.focus_node.get_node_at_key(node_key))
-                },
-                //Based off of the supplied `path` only
-                (true, false) => {
-                    OpaqueAbstractNodeRef(self.focus_node.get_node_at_key(path))
-                },
-                //Combine both
-                (false, false) => {
-//GOAT, no alloc allowed!!!  This is temporary Cheese
-                    let mut full_key = Vec::with_capacity(node_key.len() + path.len());
-                    full_key.extend_from_slice(node_key);
-                    full_key.extend_from_slice(path);
-                    OpaqueAbstractNodeRef(self.focus_node.get_node_at_key(&full_key))
-                },
-            }
+            OpaqueAbstractNodeRef(TrieRefBorrowed::new_with_key_and_path_in(
+                self.focus_parent(),
+                || self.val(),
+                self.node_key(),
+                path.as_ref(),
+                self.alloc.clone(),
+            ).into_focus())
         }
         fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
             let node_key = self.node_key();

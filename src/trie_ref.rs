@@ -188,6 +188,21 @@ impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, 
         TrieRefBorrowed::new_with_node_and_path_in(node, val, key, alloc)
     }
 
+    /// Internal Method to convert a trie ref into an [AbstractNodeRef]
+    #[inline]
+    pub(crate) fn into_focus(self) -> AbstractNodeRef<'a, V, A> {
+        if let Some(focus_node) = self.focus_node {
+            let node_key = self.node_key();
+            if node_key.len() > 0 {
+                focus_node.as_tagged().get_node_at_key(node_key)
+            } else {
+                AbstractNodeRef::BorrowedRc(focus_node)
+            }
+        } else {
+            AbstractNodeRef::None
+        }
+    }
+
     /// Internal.  Checks if the `TrieRef` is valid, which is a prerequisite to see if it's pointing
     /// at an existing path
     #[inline]

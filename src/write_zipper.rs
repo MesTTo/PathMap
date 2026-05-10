@@ -1264,8 +1264,13 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         }
     }
     pub(crate) fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> {
-//GOAT
-        panic!()
+        OpaqueAbstractNodeRef(TrieRefBorrowed::new_with_key_and_path_in(
+            self.focus_parent(),
+            || self.val(),
+            self.key.node_key(),
+            path.as_ref(),
+            self.alloc.clone(),
+        ).into_focus())
     }
     pub(crate) fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
         let node_key = self.key.node_key();
@@ -5335,15 +5340,16 @@ mod tests {
 
     #[test]
     fn write_zipper_graft_masked_branches_test2() {
-        // Case 4: Root the source zipper at `root` rather than `root:` so `get_focus_at(&[child_byte])`  must
-        // combine a non-empty `node_key` with the supplied child byte and traverse past the current node key.
+        // Case 4: Root the source zipper at `root` rather than `root:` so `get_focus_at(&[child_byte])`
+        // must resolve the `:` child from a focus with a non-empty remaining key, then graft the
+        // entire downstream subtree below that branch.
         let mut src: PathMap<i32> = PathMap::new();
         src.set_val_at(b"root:a:new_a", 10);
         src.set_val_at(b"root:a:nested:deep", 11);
         src.set_val_at(b"root:c:new_c", 30);
         src.set_val_at(b"root:e:unmasked", 50);
 
-        let child_mask = ByteMask::from_iter([b'a', b'b', b'c']);
+        let child_mask = ByteMask::from(b':');
 
         let mut dst: PathMap<i32> = PathMap::new();
         dst.set_val_at(b"root:a:old_a", 1);
@@ -5358,15 +5364,18 @@ mod tests {
         drop(wz);
         drop(rz);
 
+        let rz = dst.read_zipper_at_path(b"root:");
+        assert_eq!(rz.path_exists(), true);
+        drop(rz);
         assert_eq!(dst.get_val_at(b"root:a:old_a"), None);
         assert_eq!(dst.get_val_at(b"root:a:new_a"), Some(&10));
         assert_eq!(dst.get_val_at(b"root:a:nested:deep"), Some(&11));
         assert_eq!(dst.get_val_at(b"root:b:old_b"), None);
         assert_eq!(dst.get_val_at(b"root:c:old_c"), None);
         assert_eq!(dst.get_val_at(b"root:c:new_c"), Some(&30));
-        assert_eq!(dst.get_val_at(b"root:d:old_d"), Some(&4));
-        assert_eq!(dst.get_val_at(b"root:z:old_z"), Some(&26));
-        assert_eq!(dst.get_val_at(b"root:e:unmasked"), None);
+        assert_eq!(dst.get_val_at(b"root:d:old_d"), None);
+        assert_eq!(dst.get_val_at(b"root:z:old_z"), None);
+        assert_eq!(dst.get_val_at(b"root:e:unmasked"), Some(&50));
     }
 
     crate::zipper::zipper_moving_tests::zipper_moving_tests!(write_zipper,
