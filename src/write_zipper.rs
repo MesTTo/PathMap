@@ -5240,98 +5240,134 @@ mod tests {
         assert_eq!(map4.get_val_at(b"root:t:old_t"), Some(&44));  // 't' preserved
     }
 
-    // #[test]
-    // fn write_zipper_graft_masked_branches_test() {
-    //     // Source has masked branches `a` and `c`, but no `b`, plus an unrelated `e` branch.
-    //     let mut src: PathMap<i32> = PathMap::new();
-    //     src.set_val_at(b"root:", 700);
-    //     src.set_val_at(b"root:a:new_a", 10);
-    //     src.set_val_at(b"root:a:nested:deep", 11);
-    //     src.set_val_at(b"root:c:new_c", 30);
-    //     src.set_val_at(b"root:e:unmasked", 50);
+    #[test]
+    fn write_zipper_graft_masked_branches_test1() {
+        // Source has masked branches `a` and `c`, but no `b`, plus an unrelated `e` branch.
+        let mut src: PathMap<i32> = PathMap::new();
+        src.set_val_at(b"root:", 700);
+        src.set_val_at(b"root:a:new_a", 10);
+        src.set_val_at(b"root:a:nested:deep", 11);
+        src.set_val_at(b"root:c:new_c", 30);
+        src.set_val_at(b"root:e:unmasked", 50);
 
-    //     let child_mask = ByteMask::from_iter([b'a', b'b', b'c']);
+        let child_mask = ByteMask::from_iter([b'a', b'b', b'c']);
 
-    //     // Case 1: `remove_unset=false` replaces masked branches and removes masked-missing `b`, while preserving unmasked siblings.
-    //     let mut dst1: PathMap<i32> = PathMap::new();
-    //     dst1.set_val_at(b"root:", 900);
-    //     dst1.set_val_at(b"root:a:old_a", 1);
-    //     dst1.set_val_at(b"root:b:old_b", 2);
-    //     dst1.set_val_at(b"root:c:old_c", 3);
-    //     dst1.set_val_at(b"root:d:old_d", 4);
-    //     dst1.set_val_at(b"root:z:old_z", 26);
+        // Case 1: `remove_unset=false` replaces masked branches and removes masked-missing `b`, while preserving unmasked siblings.
+        let mut dst1: PathMap<i32> = PathMap::new();
+        dst1.set_val_at(b"root:", 900);
+        dst1.set_val_at(b"root:a:old_a", 1);
+        dst1.set_val_at(b"root:b:old_b", 2);
+        dst1.set_val_at(b"root:c:old_c", 3);
+        dst1.set_val_at(b"root:d:old_d", 4);
+        dst1.set_val_at(b"root:z:old_z", 26);
 
-    //     let mut wz1 = dst1.write_zipper_at_path(b"root:");
-    //     let mut rz1 = src.read_zipper_at_path(b"root:");
-    //     wz1.graft_masked_branches(&mut rz1, child_mask, false);
-    //     assert_eq!(wz1.val(), Some(&900));
-    //     assert_eq!(rz1.path(), b"");
-    //     assert_eq!(rz1.child_mask(), ByteMask::from_iter([b'a', b'c', b'e']));
-    //     drop(wz1);
-    //     drop(rz1);
+        let mut wz1 = dst1.write_zipper_at_path(b"root:");
+        let mut rz1 = src.read_zipper_at_path(b"root:");
+        wz1.graft_masked_branches(&mut rz1, child_mask, false);
+        assert_eq!(wz1.val(), Some(&900));
+        assert_eq!(rz1.path(), b"");
+        assert_eq!(rz1.child_mask(), ByteMask::from_iter([b'a', b'c', b'e']));
+        drop(wz1);
+        drop(rz1);
 
-    //     assert_eq!(dst1.get_val_at(b"root:"), Some(&900));
-    //     assert_eq!(dst1.get_val_at(b"root:a:old_a"), None);
-    //     assert_eq!(dst1.get_val_at(b"root:a:new_a"), Some(&10));
-    //     assert_eq!(dst1.get_val_at(b"root:a:nested:deep"), Some(&11));
-    //     assert_eq!(dst1.get_val_at(b"root:b:old_b"), None);
-    //     assert_eq!(dst1.get_val_at(b"root:c:old_c"), None);
-    //     assert_eq!(dst1.get_val_at(b"root:c:new_c"), Some(&30));
-    //     assert_eq!(dst1.get_val_at(b"root:d:old_d"), Some(&4));
-    //     assert_eq!(dst1.get_val_at(b"root:z:old_z"), Some(&26));
-    //     assert_eq!(dst1.get_val_at(b"root:e:unmasked"), None);
+        assert_eq!(dst1.get_val_at(b"root:"), Some(&900));
+        assert_eq!(dst1.get_val_at(b"root:a:old_a"), None);
+        assert_eq!(dst1.get_val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(dst1.get_val_at(b"root:a:nested:deep"), Some(&11));
+        assert_eq!(dst1.get_val_at(b"root:b:old_b"), None);
+        assert_eq!(dst1.get_val_at(b"root:c:old_c"), None);
+        assert_eq!(dst1.get_val_at(b"root:c:new_c"), Some(&30));
+        assert_eq!(dst1.get_val_at(b"root:d:old_d"), Some(&4));
+        assert_eq!(dst1.get_val_at(b"root:z:old_z"), Some(&26));
+        assert_eq!(dst1.get_val_at(b"root:e:unmasked"), None);
 
-    //     // Case 2: `remove_unset=true` removes unmasked siblings in addition to grafting masked branches.
-    //     let mut dst2: PathMap<i32> = PathMap::new();
-    //     dst2.set_val_at(b"root:", 901);
-    //     dst2.set_val_at(b"root:a:old_a", 101);
-    //     dst2.set_val_at(b"root:b:old_b", 102);
-    //     dst2.set_val_at(b"root:c:old_c", 103);
-    //     dst2.set_val_at(b"root:d:old_d", 104);
-    //     dst2.set_val_at(b"root:z:old_z", 126);
+        // Case 2: `remove_unset=true` removes unmasked siblings in addition to grafting masked branches.
+        let mut dst2: PathMap<i32> = PathMap::new();
+        dst2.set_val_at(b"root:", 901);
+        dst2.set_val_at(b"root:a:old_a", 101);
+        dst2.set_val_at(b"root:b:old_b", 102);
+        dst2.set_val_at(b"root:c:old_c", 103);
+        dst2.set_val_at(b"root:d:old_d", 104);
+        dst2.set_val_at(b"root:z:old_z", 126);
 
-    //     let mut wz2 = dst2.write_zipper_at_path(b"root:");
-    //     let mut rz2 = src.read_zipper_at_path(b"root:");
-    //     wz2.graft_masked_branches(&mut rz2, child_mask, true);
-    //     assert_eq!(wz2.val(), Some(&901));
-    //     assert_eq!(rz2.path(), b"");
-    //     drop(wz2);
-    //     drop(rz2);
+        let mut wz2 = dst2.write_zipper_at_path(b"root:");
+        let mut rz2 = src.read_zipper_at_path(b"root:");
+        wz2.graft_masked_branches(&mut rz2, child_mask, true);
+        assert_eq!(wz2.val(), Some(&901));
+        assert_eq!(rz2.path(), b"");
+        drop(wz2);
+        drop(rz2);
 
-    //     assert_eq!(dst2.get_val_at(b"root:"), Some(&901));
-    //     assert_eq!(dst2.get_val_at(b"root:a:old_a"), None);
-    //     assert_eq!(dst2.get_val_at(b"root:a:new_a"), Some(&10));
-    //     assert_eq!(dst2.get_val_at(b"root:a:nested:deep"), Some(&11));
-    //     assert_eq!(dst2.get_val_at(b"root:b:old_b"), None);
-    //     assert_eq!(dst2.get_val_at(b"root:c:old_c"), None);
-    //     assert_eq!(dst2.get_val_at(b"root:c:new_c"), Some(&30));
-    //     assert_eq!(dst2.get_val_at(b"root:d:old_d"), None);
-    //     assert_eq!(dst2.get_val_at(b"root:z:old_z"), None);
-    //     assert_eq!(dst2.val_count(), 4);
+        assert_eq!(dst2.get_val_at(b"root:"), Some(&901));
+        assert_eq!(dst2.get_val_at(b"root:a:old_a"), None);
+        assert_eq!(dst2.get_val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(dst2.get_val_at(b"root:a:nested:deep"), Some(&11));
+        assert_eq!(dst2.get_val_at(b"root:b:old_b"), None);
+        assert_eq!(dst2.get_val_at(b"root:c:old_c"), None);
+        assert_eq!(dst2.get_val_at(b"root:c:new_c"), Some(&30));
+        assert_eq!(dst2.get_val_at(b"root:d:old_d"), None);
+        assert_eq!(dst2.get_val_at(b"root:z:old_z"), None);
+        assert_eq!(dst2.val_count(), 4);
 
-    //     // Case 3: a masked child missing in `src` must not create a new dangling branch when `self` also lacks that child.
-    //     let mut dst3: PathMap<i32> = PathMap::new();
-    //     dst3.set_val_at(b"root:", 902);
+        // Case 3: a masked child missing in `src` must not create a new dangling branch when `self` also lacks that child.
+        let mut dst3: PathMap<i32> = PathMap::new();
+        dst3.set_val_at(b"root:", 902);
 
-    //     let mut wz3 = dst3.write_zipper_at_path(b"root:");
-    //     let mut rz3 = src.read_zipper_at_path(b"root:");
-    //     wz3.graft_masked_branches(&mut rz3, child_mask, false);
-    //     assert_eq!(wz3.val(), Some(&902));
-    //     assert_eq!(wz3.child_mask(), ByteMask::from_iter([b'a', b'c']));
-    //     assert_eq!(rz3.path(), b"");
-    //     drop(wz3);
-    //     drop(rz3);
+        let mut wz3 = dst3.write_zipper_at_path(b"root:");
+        let mut rz3 = src.read_zipper_at_path(b"root:");
+        wz3.graft_masked_branches(&mut rz3, child_mask, false);
+        assert_eq!(wz3.val(), Some(&902));
+        assert_eq!(wz3.child_mask(), ByteMask::from_iter([b'a', b'c']));
+        assert_eq!(rz3.path(), b"");
+        drop(wz3);
+        drop(rz3);
 
-    //     let rz3 = dst3.read_zipper_at_path(b"root:b");
-    //     assert_eq!(rz3.path_exists(), false);
-    //     drop(rz3);
-    //     assert_eq!(dst3.get_val_at(b"root:"), Some(&902));
-    //     assert_eq!(dst3.get_val_at(b"root:a:new_a"), Some(&10));
-    //     assert_eq!(dst3.get_val_at(b"root:a:nested:deep"), Some(&11));
-    //     assert_eq!(dst3.get_val_at(b"root:b"), None);
-    //     assert_eq!(dst3.get_val_at(b"root:c:new_c"), Some(&30));
-    //     assert_eq!(dst3.val_count(), 4);
-    // }
+        let rz3 = dst3.read_zipper_at_path(b"root:b");
+        assert_eq!(rz3.path_exists(), false);
+        drop(rz3);
+        assert_eq!(dst3.get_val_at(b"root:"), Some(&902));
+        assert_eq!(dst3.get_val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(dst3.get_val_at(b"root:a:nested:deep"), Some(&11));
+        assert_eq!(dst3.get_val_at(b"root:b"), None);
+        assert_eq!(dst3.get_val_at(b"root:c:new_c"), Some(&30));
+        assert_eq!(dst3.val_count(), 4);
+    }
+
+    #[test]
+    fn write_zipper_graft_masked_branches_test2() {
+        // Case 4: Root the source zipper at `root` rather than `root:` so `get_focus_at(&[child_byte])`  must
+        // combine a non-empty `node_key` with the supplied child byte and traverse past the current node key.
+        let mut src: PathMap<i32> = PathMap::new();
+        src.set_val_at(b"root:a:new_a", 10);
+        src.set_val_at(b"root:a:nested:deep", 11);
+        src.set_val_at(b"root:c:new_c", 30);
+        src.set_val_at(b"root:e:unmasked", 50);
+
+        let child_mask = ByteMask::from_iter([b'a', b'b', b'c']);
+
+        let mut dst: PathMap<i32> = PathMap::new();
+        dst.set_val_at(b"root:a:old_a", 1);
+        dst.set_val_at(b"root:b:old_b", 2);
+        dst.set_val_at(b"root:c:old_c", 3);
+        dst.set_val_at(b"root:d:old_d", 4);
+        dst.set_val_at(b"root:z:old_z", 26);
+
+        let mut wz = dst.write_zipper_at_path(b"root");
+        let mut rz = src.read_zipper_at_path(b"root");
+        wz.graft_masked_branches(&mut rz, child_mask, false);
+        drop(wz);
+        drop(rz);
+
+        assert_eq!(dst.get_val_at(b"root:a:old_a"), None);
+        assert_eq!(dst.get_val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(dst.get_val_at(b"root:a:nested:deep"), Some(&11));
+        assert_eq!(dst.get_val_at(b"root:b:old_b"), None);
+        assert_eq!(dst.get_val_at(b"root:c:old_c"), None);
+        assert_eq!(dst.get_val_at(b"root:c:new_c"), Some(&30));
+        assert_eq!(dst.get_val_at(b"root:d:old_d"), Some(&4));
+        assert_eq!(dst.get_val_at(b"root:z:old_z"), Some(&26));
+        assert_eq!(dst.get_val_at(b"root:e:unmasked"), None);
+    }
 
     crate::zipper::zipper_moving_tests::zipper_moving_tests!(write_zipper,
         |keys: &[&[u8]]| {
