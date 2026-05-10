@@ -1497,6 +1497,53 @@ where Storage: AsRef<[u8]>
         let value = read_varint_u64(&data[1..]).0;
         Some(value)
     }
+    /// Internal method to facilitate traversing to a path without needing to clone the zipper
+    fn get_value_at(&self, path: &[u8]) -> Option<u64> {
+        if self.invalid > 0 {
+            return None;
+        }
+
+        let mut path = path;
+        let mut cur_node = self.cur_node.clone();
+        let mut node_depth = self.stack.last()?.node_depth;
+
+        loop {
+            match &cur_node {
+                Node::Branch(node) => {
+                    if path.is_empty() {
+                        return node.value;
+                    }
+                    if !node.bytemask.test_bit(path[0]) {
+                        return None;
+                    }
+                    let first_child = node.first_child?;
+                    let idx = node.bytemask.index_of(path[0]) as usize;
+                    let (node, _, _) = self.tree.nth_node(first_child, idx);
+                    cur_node = node;
+                    node_depth = 0;
+                    path = &path[1..];
+                }
+                Node::Line(line) => {
+                    let line_path = self.tree.get_line(line.path);
+                    let rest_path = &line_path[node_depth..];
+                    if !starts_with(path, rest_path) {
+                        return None;
+                    }
+                    path = &path[rest_path.len()..];
+                    if path.is_empty() {
+                        if line.value.is_some() {
+                            return line.value;
+                        }
+                        cur_node = self.tree.get_node(line.child?).0;
+                        node_depth = 0;
+                        continue;
+                    }
+                    cur_node = self.tree.get_node(line.child?).0;
+                    node_depth = 0;
+                }
+            }
+        }
+    }
 
     fn ascend_invalid(&mut self, limit: Option<&mut usize>) -> bool {
         if self.invalid == 0 {
@@ -1656,8 +1703,7 @@ where Storage: AsRef<[u8]>
         self.get_value().map(|_x| &())
     }
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&()> {
-//GOAT
-        panic!()
+        self.get_value_at(path.as_ref()).map(|_x| &())
     }
 }
 
@@ -1665,21 +1711,12 @@ impl<'tree, Storage> ZipperValues<u64> for ACTZipper<'tree, Storage, u64>
 where Storage: AsRef<[u8]>
 {
     fn val(&self) -> Option<&u64> {
-        let value = self.get_value()?;
-        if self.tree.value.get() != value {
-            self.tree.value.set(value);
-        }
-        let ptr = self.tree.value.as_ptr();
-        // technically if someone borrows the value twice, they will hit UB
-        // since we provided a read-only reference to the value, and we ALSO
-        // can update it.
-        // all of this is done so that the value can be borrowed with the same
-        // lifetime as the tree.
-        Some(unsafe { &*ptr })
+        //GOAT, see soundness discussion in ZipperReadOnlyValues impl below
+        self.get_val()
     }
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&u64> {
-//GOAT
-        panic!()
+        //GOAT, see soundness discussion in ZipperReadOnlyValues impl below
+        self.get_val_at(path)
     }
 }
 
@@ -1708,8 +1745,7 @@ where Storage: AsRef<[u8]>
         self.get_value().map(|_x| &())
     }
     fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'tree ()> {
-//GOAT
-        panic!()
+        self.get_value_at(path.as_ref()).map(|_x| &())
     }
 }
 
@@ -1722,11 +1758,26 @@ where Storage: AsRef<[u8]>
             self.tree.value.set(value);
         }
         let ptr = self.tree.value.as_ptr();
+        // technically if someone borrows the value twice, they will hit UB
+        // since we provided a read-only reference to the value, and we ALSO
+        // can update it.
+        // all of this is done so that the value can be borrowed with the same
+        // lifetime as the tree.
+        //
+        //LP: GOAT, UNSOUND!!, this seems like a pretty horrible soundness hole
+        // For `val()` the simple fix is to move the temporary value Cell onto the zipper, but that doesn't
+        // address `get_val()`, `val_at()`, nor `get_val_at()`.  It seems like the only comprehensive fix is
+        // to split the ZipperValues trait into one that can return borrowed values and one that returns
+        // cloned values.  And ZipperReadOnlyValues simply could not be implemented on ACTZipper.
         Some(unsafe { &*ptr })
     }
     fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'tree u64> {
-//GOAT
-        panic!()
+        let value = self.get_value_at(path.as_ref())?;
+        if self.tree.value.get() != value {
+            self.tree.value.set(value);
+        }
+        let ptr = self.tree.value.as_ptr();
+        Some(unsafe { &*ptr })
     }
 }
 
