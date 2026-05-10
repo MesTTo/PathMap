@@ -186,6 +186,22 @@ impl<'prefix, Z>  PrefixZipper<'prefix, Z>
 }
 
 impl<'prefix, Z>  PrefixZipper<'prefix, Z> {
+    /// Private function to deal with `at` methods, that take paths relative to the zipper focus
+    #[inline]
+    fn adjust_lookup_path<'a>(&'a self, path: &'a [u8]) -> Option<&'a [u8]> {
+        match self.position {
+            PrefixPos::Source => Some(path),
+            PrefixPos::Prefix { valid } => {
+                let rest_prefix = &self.prefix[self.origin_depth + valid..];
+                if !starts_with(path, rest_prefix) {
+                    return None;
+                }
+                Some(&path[rest_prefix.len()..])
+            }
+            PrefixPos::PrefixOff { .. } => None,
+        }
+    }
+
     /// Returns the path that must be descended before the PrefixZipper's focus is at the root of the inner zipper, or
     /// `None` if the focus is no longer along the prefix path
     #[inline]
@@ -227,13 +243,8 @@ impl<'prefix, Z, V> ZipperValues<V> for PrefixZipper<'prefix, Z>
         self.source.val()
     }
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
-        if self.position.is_source() {
-            self.source.val_at(path)
-        } else {
-//GOAT, If path is a valid continuation of the prefix then adjust it appropriately and fall through to a call to `val_at`, otherwise return None
-//Make sure there is a test to exercise all 3 branches through this code
-            panic!()
-        }
+        let path = self.adjust_lookup_path(path.as_ref())?;
+        self.source.val_at(path)
     }
 }
 
@@ -243,19 +254,15 @@ impl<'prefix, 'source, Z, V> ZipperReadOnlyValues<'source, V>
         Z: ZipperReadOnlyValues<'source, V>
 {
     fn get_val(&self) -> Option<&'source V> {
+        //NOTE: This impl mirrors `val`
         if !self.position.is_source() {
             return None;
         }
         self.source.get_val()
     }
     fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'source V> {
-        if self.position.is_source() {
-            self.source.get_val_at(path)
-        } else {
-//GOAT, If path is a valid continuation of the prefix then adjust it appropriately and fall through to a call to `get_val_at`, otherwise return None
-//Make sure there is a test to exercise all 3 branches through this code
-            panic!()
-        }
+        let path = self.adjust_lookup_path(path.as_ref())?;
+        self.source.get_val_at(path)
     }
 }
 
