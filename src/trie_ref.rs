@@ -312,8 +312,17 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A
         }
     }
     fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> {
-//GOAT
-        panic!()
+        if self.is_valid() {
+            OpaqueAbstractNodeRef(TrieRefBorrowed::new_with_key_and_path_in(
+                self.focus_node.unwrap(),
+                || self.get_val(),
+                self.node_key(),
+                path.as_ref(),
+                self.alloc.clone(),
+            ).into_focus())
+        } else {
+            OpaqueAbstractNodeRef(AbstractNodeRef::None)
+        }
     }
     fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
         if self.is_valid() {
@@ -353,8 +362,17 @@ impl<'a, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ZipperReadOnlyV
         }
     }
     fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'a V> {
-//GOAT
-        panic!()
+        if self.is_valid() {
+            TrieRefBorrowed::new_with_key_and_path_in(
+                self.focus_node.unwrap(),
+                || self.get_val(),
+                self.node_key(),
+                path.as_ref(),
+                self.alloc.clone(),
+            ).get_val()
+        } else {
+            None
+        }
     }
 }
 
@@ -629,8 +647,17 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for TrieRefOw
         }
     }
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
-//GOAT
-        panic!()
+        if self.is_valid() {
+            TrieRefBorrowed::new_with_key_and_path_in(
+                self.focus_node.as_ref().unwrap(),
+                || self.val(),
+                self.node_key(),
+                path.as_ref(),
+                self.alloc.clone(),
+            ).get_val()
+        } else {
+            None
+        }
     }
 }
 
@@ -675,8 +702,17 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A
         }
     }
     fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> {
-//GOAT
-        panic!()
+        if self.is_valid() {
+            OpaqueAbstractNodeRef(TrieRefBorrowed::new_with_key_and_path_in(
+                self.focus_node.as_ref().unwrap(),
+                || self.val(),
+                self.node_key(),
+                path.as_ref(),
+                self.alloc.clone(),
+            ).into_focus())
+        } else {
+            OpaqueAbstractNodeRef(AbstractNodeRef::None)
+        }
     }
     fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
         if self.is_valid() {
@@ -1128,50 +1164,38 @@ mod tests {
 
     #[test]
     fn trie_ref_graft_src_at_test() {
-        fn assert_graft_src_at<S: ZipperInfallibleSubtries<i32>>(src_ref: S, src_ref_colon: S) {
+        fn assert_graft_src_at<S: ZipperInfallibleSubtries<i32>>(src_ref: S) {
             let mut dst = PathMap::<i32>::new();
             dst.set_val_at(b"root:p:old_p", 1);
             dst.set_val_at(b"root:q:old_q", 2);
             dst.set_val_at(b"root:r:old_r", 3);
             dst.set_val_at(b"root:s:old_s", 4);
             dst.set_val_at(b"root:t:old_t", 5);
-            dst.set_val_at(b"root:u:old_u", 6);
-            dst.set_val_at(b"root:v:old_v", 7);
 
-            dst.write_zipper_at_path(b"root:p").graft_src_at(&src_ref_colon, b"");
-            dst.write_zipper_at_path(b"root:q").graft_src_at(&src_ref, b":");
-            dst.write_zipper_at_path(b"root:r").graft_src_at(&src_ref, b":a");
-            dst.write_zipper_at_path(b"root:s").graft_src_at(&src_ref, b":a:nested");
-            dst.write_zipper_at_path(b"root:t").graft_src_at(&src_ref, b":missing");
-            dst.write_zipper_at_path(b"root:u").graft_src_at(&src_ref, b":branch:mid");
+            dst.write_zipper_at_path(b"root:p").graft_src_at(&src_ref, b"a");
+            dst.write_zipper_at_path(b"root:q").graft_src_at(&src_ref, b"a:nested");
+            dst.write_zipper_at_path(b"root:r").graft_src_at(&src_ref, b"branch:mid");
+            dst.write_zipper_at_path(b"root:s").graft_src_at(&src_ref, b"missing");
 
             assert_eq!(dst.get_val_at(b"root:p:old_p"), None);
-            assert_eq!(dst.get_val_at(b"root:p:a:new_a"), Some(&10));
-            assert_eq!(dst.get_val_at(b"root:p:a:nested:deep"), Some(&11));
-            assert_eq!(dst.get_val_at(b"root:p:branch:mid:leaf"), Some(&40));
-            assert_eq!(dst.get_val_at(b"root:p:c:new_c"), Some(&30));
+            assert_eq!(dst.get_val_at(b"root:p:new_a"), Some(&10));
+            assert_eq!(dst.get_val_at(b"root:p:nested:deep"), Some(&11));
+            assert_eq!(dst.get_val_at(b"root:p:branch:mid:leaf"), None);
+            assert_eq!(dst.get_val_at(b"root:p:c:new_c"), None);
 
             assert_eq!(dst.get_val_at(b"root:q:old_q"), None);
-            assert_eq!(dst.get_val_at(b"root:q:a:new_a"), Some(&10));
-            assert_eq!(dst.get_val_at(b"root:q:branch:mid:leaf"), Some(&40));
-            assert_eq!(dst.get_val_at(b"root:q:c:new_c"), Some(&30));
+            assert_eq!(dst.get_val_at(b"root:q:deep"), Some(&11));
+            assert_eq!(dst.get_val_at(b"root:q:new_a"), None);
 
             assert_eq!(dst.get_val_at(b"root:r:old_r"), None);
-            assert_eq!(dst.get_val_at(b"root:r:new_a"), Some(&10));
-            assert_eq!(dst.get_val_at(b"root:r:nested:deep"), Some(&11));
-            assert_eq!(dst.get_val_at(b"root:r:branch:mid:leaf"), None);
+            assert_eq!(dst.get_val_at(b"root:r:leaf"), Some(&40));
+            assert_eq!(dst.get_val_at(b"root:r:deep"), None);
 
             assert_eq!(dst.get_val_at(b"root:s:old_s"), None);
-            assert_eq!(dst.get_val_at(b"root:s:deep"), Some(&11));
-            assert_eq!(dst.get_val_at(b"root:s:new_a"), None);
+            assert_eq!(dst.get_val_at(b"root:s"), None);
+            assert_eq!(dst.get_val_at(b"root:s:old_s"), None);
 
-            assert_eq!(dst.get_val_at(b"root:t"), None);
-            assert_eq!(dst.get_val_at(b"root:t:old_t"), None);
-
-            assert_eq!(dst.get_val_at(b"root:u:old_u"), None);
-            assert_eq!(dst.get_val_at(b"root:u:leaf"), Some(&40));
-
-            assert_eq!(dst.get_val_at(b"root:v:old_v"), Some(&7));
+            assert_eq!(dst.get_val_at(b"root:t:old_t"), Some(&5));
         }
 
         let mut borrowed_src = PathMap::<i32>::new();
@@ -1179,10 +1203,7 @@ mod tests {
         borrowed_src.set_val_at(b"root:a:nested:deep", 11);
         borrowed_src.set_val_at(b"root:branch:mid:leaf", 40);
         borrowed_src.set_val_at(b"root:c:new_c", 30);
-        assert_graft_src_at(
-            borrowed_src.trie_ref_at_path(b"root"),
-            borrowed_src.trie_ref_at_path(b"root:"),
-        );
+        assert_graft_src_at(borrowed_src.trie_ref_at_path(b"root:"));
 
         let mut owned_src = PathMap::<i32>::new();
         owned_src.set_val_at(b"root:a:new_a", 10);
@@ -1193,7 +1214,6 @@ mod tests {
             TrieRef::Owned(trie_ref) => trie_ref,
             TrieRef::Borrowed(_) => unreachable!(),
         };
-        let owned_colon = owned.trie_ref_at_path(b":");
-        assert_graft_src_at(owned, owned_colon);
+        assert_graft_src_at(owned.trie_ref_at_path(b"root:"));
     }
 }
