@@ -3049,6 +3049,7 @@ impl<'a> SliceOrLen<'a> {
 #[cfg(test)]
 pub(crate) mod zipper_moving_tests {
     use crate::trie_map::*;
+    use crate::trie_node::MAX_NODE_KEY_BYTES;
     use super::*;
 
     /// `$ident` is a unique identifier for the zipper, so the generated tests don't collide
@@ -3205,6 +3206,14 @@ pub(crate) mod zipper_moving_tests {
                 fn [<$z_name _zipper_val_at_test>]() {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_VAL_AT_TEST_KEYS);
                     crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::zipper_val_at_test)
+                }
+
+                #[test]
+                fn [<$z_name _zipper_val_at_long_path_test>]() {
+                    let long_key = crate::zipper::zipper_moving_tests::zipper_val_at_long_path_test_key();
+                    let keys = [&long_key[..], b"zzz" as &[u8]];
+                    let mut temp_store = $read_keys(&keys);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::zipper_val_at_long_path_test)
                 }
             }
         }
@@ -3914,6 +3923,27 @@ pub(crate) mod zipper_moving_tests {
         assert!(!zipper.path_exists());
         assert_eq!(zipper.val_at(b""), None);
         assert_eq!(zipper.val_at(b"e"), None);
+    }
+
+    pub fn zipper_val_at_long_path_test_key() -> Vec<u8> {
+        let mut key = b"rom".to_vec();
+        key.extend((0..(MAX_NODE_KEY_BYTES * 2 + 17)).map(|i| b'a' + (i % 26) as u8));
+        key
+    }
+
+    pub fn zipper_val_at_long_path_test<Z: ZipperMoving + ZipperValues<()>>(mut zipper: Z) {
+        let long_key = zipper_val_at_long_path_test_key();
+        let relative_long_suffix = &long_key[3..];
+        let almost_full_suffix = &relative_long_suffix[..relative_long_suffix.len()-1];
+
+        assert_eq!(relative_long_suffix.len() > MAX_NODE_KEY_BYTES, true);
+        assert_eq!(zipper.val_at(&long_key), Some(&()));
+
+        zipper.descend_to(b"rom");
+        assert!(zipper.path_exists());
+        assert_eq!(zipper.val_at(relative_long_suffix), Some(&()));
+        assert_eq!(zipper.val_at(almost_full_suffix), None);
+        assert_eq!(zipper.val_at(b"zzz"), None);
     }
 
 }
