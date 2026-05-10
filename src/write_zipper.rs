@@ -344,6 +344,7 @@ impl<V: Clone + Send + Sync, Z, A: Allocator> ZipperWriting<V, A> for &mut Z whe
     fn graft<RZ: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &RZ) { (**self).graft(read_zipper) }
     fn graft_src_at<RZ: ZipperInfallibleSubtries<V, A>, K: AsRef<[u8]>>(&mut self, src: &RZ, path: K) { (**self).graft_src_at(src, path) }
     fn graft_map(&mut self, map: PathMap<V, A>) { (**self).graft_map(map) }
+    fn graft_masked_branches<RZ: ZipperInfallibleSubtries<V, A>>(&mut self, src: &RZ, child_mask: ByteMask, remove_unset: bool) { (**self).graft_masked_branches(src, child_mask, remove_unset) }
     fn graft_child_maps<I: IntoIterator<Item=PathMap<V, A>>>(&mut self, child_mask: ByteMask, maps: I, remove_unset: bool) { (**self).graft_child_maps(child_mask, maps, remove_unset) }
     fn join_into<RZ: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &RZ) -> AlgebraicStatus where V: Lattice { (**self).join_into(read_zipper) }
     fn join_map_into(&mut self, map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice { (**self).join_map_into(map) }
@@ -504,6 +505,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting
     fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) { self.z.graft(read_zipper) }
     fn graft_src_at<Z: ZipperInfallibleSubtries<V, A>, K: AsRef<[u8]>>(&mut self, src: &Z, path: K) { self.z.graft_src_at(src, path) }
     fn graft_map(&mut self, map: PathMap<V, A>) { self.z.graft_map(map) }
+    fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) { self.z.graft_masked_branches(src, child_mask, remove_unset) }
     fn graft_child_maps<I: IntoIterator<Item=PathMap<V, A>>>(&mut self, child_mask: ByteMask, maps: I, remove_unset: bool) { self.z.graft_child_maps(child_mask, maps, remove_unset) }
     fn join_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus where V: Lattice { self.z.join_into(read_zipper) }
     fn join_map_into(&mut self, map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice { self.z.join_map_into(map) }
@@ -665,6 +667,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting
     fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) { self.z.graft(read_zipper) }
     fn graft_src_at<Z: ZipperInfallibleSubtries<V, A>, K: AsRef<[u8]>>(&mut self, src: &Z, path: K) { self.z.graft_src_at(src, path) }
     fn graft_map(&mut self, map: PathMap<V, A>) { self.z.graft_map(map) }
+    fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) { self.z.graft_masked_branches(src, child_mask, remove_unset) }
     fn graft_child_maps<I: IntoIterator<Item=PathMap<V, A>>>(&mut self, child_mask: ByteMask, maps: I, remove_unset: bool) { self.z.graft_child_maps(child_mask, maps, remove_unset) }
     fn join_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus where V: Lattice { self.z.join_into(read_zipper) }
     fn join_map_into(&mut self, map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice { self.z.join_map_into(map) }
@@ -802,6 +805,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperWriting<V, A> for Write
     fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) { self.z.graft(read_zipper) }
     fn graft_src_at<Z: ZipperInfallibleSubtries<V, A>, K: AsRef<[u8]>>(&mut self, src: &Z, path: K) { self.z.graft_src_at(src, path) }
     fn graft_map(&mut self, map: PathMap<V, A>) { self.z.graft_map(map) }
+    fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) { self.z.graft_masked_branches(src, child_mask, remove_unset) }
     fn graft_child_maps<I: IntoIterator<Item=PathMap<V, A>>>(&mut self, child_mask: ByteMask, maps: I, remove_unset: bool) { self.z.graft_child_maps(child_mask, maps, remove_unset) }
     fn join_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus where V: Lattice { self.z.join_into(read_zipper) }
     fn join_map_into(&mut self, map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice { self.z.join_map_into(map) }
@@ -1474,6 +1478,19 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             Some(src_val) => self.set_val(src_val),
             None => self.remove_val(false)
         };
+    }
+    /// See [ZipperWriting::graft_masked_branches]
+    pub fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {
+//GOAT, replace with optimized version.
+        if remove_unset {
+            self.remove_branches(false);
+        }
+
+        for child_byte in child_mask.iter() {
+            self.descend_to_byte(child_byte);
+            self.graft_src_at(src, &[child_byte]);
+            self.ascend_byte();
+        }
     }
 
     /// Optimized implementation of [ZipperWriting::graft_child_maps] for WriteZipperCore
@@ -5376,6 +5393,39 @@ mod tests {
         assert_eq!(dst.get_val_at(b"root:d:old_d"), None);
         assert_eq!(dst.get_val_at(b"root:z:old_z"), None);
         assert_eq!(dst.get_val_at(b"root:e:unmasked"), Some(&50));
+    }
+
+    #[test]
+    fn write_zipper_graft_masked_branches_test3() {
+        // Force the specialized `resulting_child_count > 2` path, while still including a masked child
+        // that is missing from the source so we preserve the semantics of removing old destination data.
+        let mut src: PathMap<i32> = PathMap::new();
+        src.set_val_at(b"root:a:new_a", 10);
+        src.set_val_at(b"root:c:new_c", 30);
+        src.set_val_at(b"root:d:new_d", 40);
+
+        let child_mask = ByteMask::from_iter([b'a', b'b', b'c', b'd']);
+
+        let mut dst: PathMap<i32> = PathMap::new();
+        dst.set_val_at(b"root:a:old_a", 1);
+        dst.set_val_at(b"root:b:old_b", 2);
+        dst.set_val_at(b"root:c:old_c", 3);
+        dst.set_val_at(b"root:d:old_d", 4);
+        dst.set_val_at(b"root:z:old_z", 26);
+
+        let mut wz = dst.write_zipper_at_path(b"root:");
+        let rz = src.read_zipper_at_path(b"root:");
+        wz.graft_masked_branches(&rz, child_mask, false);
+        drop(wz);
+
+        assert_eq!(dst.get_val_at(b"root:a:old_a"), None);
+        assert_eq!(dst.get_val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(dst.get_val_at(b"root:b:old_b"), None);
+        assert_eq!(dst.get_val_at(b"root:c:old_c"), None);
+        assert_eq!(dst.get_val_at(b"root:c:new_c"), Some(&30));
+        assert_eq!(dst.get_val_at(b"root:d:old_d"), None);
+        assert_eq!(dst.get_val_at(b"root:d:new_d"), Some(&40));
+        assert_eq!(dst.get_val_at(b"root:z:old_z"), Some(&26));
     }
 
     crate::zipper::zipper_moving_tests::zipper_moving_tests!(write_zipper,
