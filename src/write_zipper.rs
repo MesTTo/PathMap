@@ -1336,8 +1336,13 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperValues::val_at]
     pub fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
-//GOAT
-        panic!()
+        TrieRefBorrowed::new_with_key_and_path_in(
+            self.focus_parent(),
+            || self.val(),
+            self.key.node_key(),
+            path.as_ref(),
+            self.alloc.clone(),
+        ).get_val()
     }
     /// See [ZipperWriting::get_val_mut]
     pub fn get_val_mut(&mut self) -> Option<&mut V> {
