@@ -125,8 +125,16 @@ impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, 
     }
 
     /// Internal function to implement [ZipperReadOnlySubtries::trie_ref_at_path] for all the types that need it
-    pub(crate) fn new_with_key_and_path_in<'paths>(mut node: &'a TrieNodeODRc<V, A>, root_val: Option<&'a V>, node_key: &'paths [u8], mut path: &'paths [u8], alloc: A) -> Self {
-
+    ///
+    /// The root value is computed lazily because it is only needed if the combined `node_key + path`
+    /// resolves to the current node root rather than to a non-empty key within that node.
+    pub(crate) fn new_with_key_and_path_in<'paths>(
+        mut node: &'a TrieNodeODRc<V, A>,
+        root_val_f: impl FnOnce() -> Option<&'a V>,
+        node_key: &'paths [u8],
+        mut path: &'paths [u8],
+        alloc: A,
+    ) -> Self {
         // A temporary buffer on the stack, if we need to assemble a combined key from both the `node_key` and `path`
         let mut temp_key_buf: [MaybeUninit<u8>; MAX_NODE_KEY_BYTES] = [MaybeUninit::uninit(); MAX_NODE_KEY_BYTES];
 
@@ -137,6 +145,10 @@ impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, 
         // descend one step
         if node_key_len > 0 && path_len > 0 {
             let next_node_path = unsafe {
+                // SAFETY: `temp_key_buf` has capacity for `MAX_NODE_KEY_BYTES` bytes. We copy exactly
+                // `node_key_len` bytes from `node_key`, which is a valid slice, then append at most the
+                // remaining buffer capacity from the valid slice `path`. Both destination ranges are
+                // within the stack buffer and do not overlap the sources.
                 let src_ptr = node_key.as_ptr();
                 let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>();
                 core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, node_key_len);
@@ -147,6 +159,9 @@ impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, 
                 core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, remaining_len);
 
                 let total_buf_len = node_key_len + remaining_len;
+                // SAFETY: The first `total_buf_len` bytes of `temp_key_buf` were initialized by the
+                // copies above, and `total_buf_len <= MAX_NODE_KEY_BYTES`, so this slice is valid for
+                // reads for the duration of this function.
                 core::slice::from_raw_parts(temp_key_buf.as_mut_ptr().cast::<u8>(), total_buf_len)
             };
 
@@ -163,8 +178,12 @@ impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, 
             }
         }
 
-        //Descend the rest of the way along the path
-        let (node, key, val) = node_along_path(node, path, root_val, true);
+        let (node, key, val) = if path.is_empty() {
+            (node, &[] as &[u8], root_val_f())
+        } else {
+            //Descend the rest of the way along the path
+            node_along_path(node, path, None, true)
+        };
 
         TrieRefBorrowed::new_with_node_and_path_in(node, val, key, alloc)
     }
@@ -331,9 +350,15 @@ impl<'a, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ZipperReadOnlyS
             let path = path.as_ref();
             let node_key = self.node_key();
             if node_key.len() > 0 {
-                Self::new_with_key_and_path_in(self.focus_node.unwrap(), None, node_key, path, self.alloc.clone())
+                Self::new_with_key_and_path_in(self.focus_node.unwrap(), || None, node_key, path, self.alloc.clone())
             } else {
-                Self::new_with_key_and_path_in(self.focus_node.unwrap(), self.get_val(), &[], path, self.alloc.clone())
+                Self::new_with_key_and_path_in(
+                    self.focus_node.unwrap(),
+                    || self.get_val(),
+                    &[],
+                    path,
+                    self.alloc.clone(),
+                )
             }
         } else {
             Self::new_invalid_in(self.alloc.clone())

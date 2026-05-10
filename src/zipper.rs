@@ -1090,7 +1090,7 @@ impl<'a, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ZipperReadOnlyS
     type TrieRefT = TrieRefBorrowed<'a, V, A>;
     fn trie_ref_at_path<K: AsRef<[u8]>>(&self, path: K) -> TrieRefBorrowed<'a, V, A> {
         let path = path.as_ref();
-        TrieRefBorrowed::new_with_key_and_path_in(self.z.focus_parent_borrowed(), self.get_val(), self.z.node_key(), path, self.z.alloc.clone())
+        TrieRefBorrowed::new_with_key_and_path_in(self.z.focus_parent_borrowed(), || self.get_val(), self.z.node_key(), path, self.z.alloc.clone())
     }
 }
 
@@ -1506,7 +1506,7 @@ pub(crate) mod read_zipper_core {
             PathMap::new_with_root_in(root_node, root_val, self.alloc.clone())
         }
         fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
-            TrieRefBorrowed::new_with_key_and_path_in(self.focus_parent_borrowed(), self.val(), self.node_key(), b"", self.alloc.clone()).into()
+            TrieRefBorrowed::new_with_key_and_path_in(self.focus_parent_borrowed(), || self.val(), self.node_key(), b"", self.alloc.clone()).into()
         }
         fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> {
             self.get_focus_at([])
@@ -2349,8 +2349,25 @@ pub(crate) mod read_zipper_core {
         /// the returned value might outlive the zipper.  We need to only expose this through methods
         /// that have tighter lifetime bounds, or on types that guarantee the root won't be owned
         pub(crate) unsafe fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'a V> {
-//GOAT
-            panic!()
+            let val = TrieRefBorrowed::new_with_key_and_path_in(
+                self.focus_parent(),
+                || {
+                    // SAFETY: `get_val_at` has the same lifetime contract as `get_val`. This closure is
+                    // only invoked when the target path resolves to the current focus itself, so using
+                    // `self.get_val()` here is equivalent to asking for the current focus value.
+                    unsafe { self.get_val() }
+                },
+                self.node_key(),
+                path.as_ref(),
+                self.alloc.clone(),
+            ).get_val();
+
+            // SAFETY: `val` points into the trie reachable from `self`. The only reason its inferred
+            // lifetime is shorter is that `focus_parent()` returns a reference tied to `&self`, even when
+            // the underlying trie root is owned by the zipper and is therefore guaranteed to stay alive
+            // for `'a`. This method is already `unsafe` for exactly that reason, and callers must uphold
+            // the documented requirement that the returned reference not outlive the backing trie storage.
+            unsafe { core::mem::transmute::<Option<&V>, Option<&'a V>>(val) }
         }
 
         /// See [ReadZipperCore::get_val] for explanation as to why this is unsafe
