@@ -672,6 +672,8 @@ mod tests {
     use crate::trie_map::PathMap;
     use crate::zipper::ZipperMoving;
     use crate::zipper::ZipperAbsolutePath;
+    use crate::zipper::ZipperReadOnlyValues;
+    use crate::zipper::ZipperValues;
     const PATHS1: &[(&[u8], u64)] = &[
         (b"0000", 0),
         (b"00000", 1),
@@ -683,6 +685,10 @@ mod tests {
         (b"000", 0),
         (b"00000", 0),
         (b"00111", 1),
+    ];
+    const PATHS3: &[(&[u8], u64)] = &[
+        (b"", 0),
+        (b"0000", 4),
     ];
 
     #[test]
@@ -726,5 +732,27 @@ mod tests {
         assert_eq!(rz.path(), b"");
         assert_eq!(rz.origin_path(), b"pre");
         assert_eq!(rz.ascend_until_branch(), false);
+    }
+
+    #[test]
+    fn prefix_zipper_val_at_test() {
+        let map = PathMap::from_iter(PATHS3.iter().map(|&x| x));
+        let mut rz = PrefixZipper::new(b"prefix", map.read_zipper());
+
+        //Validate that `val_at` and `get_val_at` do the right thing when the focus is in the wrapped zipper
+        rz.descend_to(b"prefix");
+        assert_eq!(rz.val_at(b"0000"), Some(&4));
+        assert_eq!(rz.get_val_at(b"0000"), Some(&4));
+
+        //Now make sure the right thing happens when we are coming from the prefix
+        rz.reset();
+        assert_eq!(rz.val_at(b"0000"), None);
+        assert_eq!(rz.get_val_at(b"0000"), None);
+        assert_eq!(rz.val_at(b"prefix0000"), Some(&4));
+        assert_eq!(rz.get_val_at(b"prefix0000"), Some(&4));
+        assert_eq!(rz.val_at(b"prefix"), Some(&0));
+        assert_eq!(rz.get_val_at(b"prefix"), Some(&0));
+        assert_eq!(rz.val_at(b"prefoo"), None);
+        assert_eq!(rz.get_val_at(b"prefoo"), None);
     }
 }
