@@ -1484,9 +1484,10 @@ pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator
 
     for child_byte in combined_mask.iter() {
         let (rec, val) = if REMOVE_UNSET {
-            let rec = src_node.get(child_byte).and_then(|cf| cf.rec()).cloned();
-            let val = src_node.get(child_byte).and_then(|cf| cf.val()).cloned();
-            (rec, val)
+            match src_node.get(child_byte) {
+                Some(cf) => (cf.rec().cloned(), cf.val().cloned()),
+                None => (None, None)
+            }
         } else {
             let old_cf = if old_mask.test_bit(child_byte) {
                 Some(old_values.next().unwrap())
@@ -1494,9 +1495,10 @@ pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator
                 None
             };
             if child_mask.test_bit(child_byte) {
-                let rec = src_node.get(child_byte).and_then(|cf| cf.rec()).cloned();
-                let val = src_node.get(child_byte).and_then(|cf| cf.val()).cloned();
-                (rec, val)
+                match src_node.get(child_byte) {
+                    Some(cf) => (cf.rec().cloned(), cf.val().cloned()),
+                    None => (None, None)
+                }
             } else {
                 match old_cf {
                     Some(cf) => cf.into_both(),
