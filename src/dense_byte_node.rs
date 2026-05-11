@@ -1462,6 +1462,51 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNodeDowncast<V, A> for ByteNode<C
     }
 }
 
+/// Used in the optimized implementation of `graft_masked_branches`
+pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>>(
+    dst_node: &mut ByteNode<Cf, A>,
+    src_node: &DenseByteNode<V, A>,
+    child_mask: ByteMask,
+    remove_unset: bool,
+) {
+    let old_mask = dst_node.mask;
+    let mut old_values = ValuesVec::default_in(dst_node.alloc.clone());
+    core::mem::swap(&mut old_values.v, &mut dst_node.values);
+
+    let mut new_values = ValuesVec::with_capacity_in(old_values.v.len() + child_mask.count_bits(), dst_node.alloc.clone());
+    let mut old_values = old_values.v.into_iter();
+    let mut new_mask = ByteMask::EMPTY;
+
+    for child_byte in ALL_BYTES {
+        let old_cf = if old_mask.test_bit(child_byte) {
+            Some(old_values.next().unwrap())
+        } else {
+            None
+        };
+        let (mut rec, mut val) = match old_cf {
+            Some(cf) => cf.into_both(),
+            None => (None, None)
+        };
+
+        if child_mask.test_bit(child_byte) {
+            rec = src_node.get(child_byte).and_then(|cf| cf.rec()).cloned();
+            val = src_node.get(child_byte).and_then(|cf| cf.val()).cloned();
+        } else if remove_unset {
+            rec = None;
+            val = None;
+        }
+
+        if rec.is_some() || val.is_some() {
+            new_mask.set_bit(child_byte);
+            new_values.v.push(Cf::new(rec, val));
+        }
+    }
+
+    debug_assert!(old_values.next().is_none());
+    dst_node.mask = new_mask;
+    dst_node.values = new_values.v;
+}
+
 /// returns the position of the next/previous active bit in x
 /// if there is no next/previous bit, returns the argument position
 /// assumes that pos is active in x

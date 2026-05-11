@@ -1481,15 +1481,40 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperWriting::graft_masked_branches]
     pub fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {
-//GOAT, replace with optimized version.
-        if remove_unset {
-            self.remove_branches(false);
-        }
 
-        for child_byte in child_mask.iter() {
-            self.descend_to_byte(child_byte);
-            self.graft_src_at(src, &[child_byte]);
-            self.ascend_byte();
+        match src.get_focus().try_as_tagged().and_then(|node| node.as_dense()) {
+            Some(src_node) => {
+                // Split the focus if we're in the middle of another node
+                let self_focus_node = match self.try_borrow_focus_mut() {
+                    Some(node) => node,
+                    None => {
+                        self.split_at_focus();
+                        self.try_borrow_focus_mut().unwrap()
+                    }
+                };
+
+                match self_focus_node.make_mut() {
+                    TaggedNodeRefMut::DenseByteNode(node) => crate::dense_byte_node::merge_branches_into_byte_node(node, src_node, child_mask, remove_unset),
+                    TaggedNodeRefMut::CellByteNode(node) => crate::dense_byte_node::merge_branches_into_byte_node(node, src_node, child_mask, remove_unset),
+                    TaggedNodeRefMut::LineListNode(node) => {
+                        // Upgrade the focus to a dense node, if it's currently a list node
+                        let replacement = node.convert_to_dense::<crate::dense_byte_node::OrdinaryCoFree<V, A>>(child_mask.count_bits() + 2);
+                        *self_focus_node = replacement;
+                        let node = self_focus_node.make_mut().into_dense().unwrap();
+                        crate::dense_byte_node::merge_branches_into_byte_node(node, src_node, child_mask, remove_unset)
+                    },
+                }
+            },
+            None => {
+                if remove_unset {
+                    self.remove_branches(false);
+                }
+                for child_byte in child_mask.iter() {
+                    self.descend_to_byte(child_byte);
+                    self.graft_src_at(src, &[child_byte]);
+                    self.ascend_byte();
+                }
+            }
         }
     }
 
@@ -5426,6 +5451,83 @@ mod tests {
         assert_eq!(dst.get_val_at(b"root:d:old_d"), None);
         assert_eq!(dst.get_val_at(b"root:d:new_d"), Some(&40));
         assert_eq!(dst.get_val_at(b"root:z:old_z"), Some(&26));
+    }
+
+    #[test]
+    fn write_zipper_graft_masked_branches_test4() {
+        // Upper bound 0: remove_unset=true with an empty mask.
+        let src: PathMap<i32> = PathMap::new();
+
+        let mut dst: PathMap<i32> = PathMap::new();
+        dst.set_val_at(b"root:a:old_a", 1);
+        dst.set_val_at(b"root:b:old_b", 2);
+
+        let mut wz = dst.write_zipper_at_path(b"root:");
+        let rz = src.read_zipper_at_path(b"root:");
+        wz.graft_masked_branches(&rz, ByteMask::EMPTY, true);
+        drop(wz);
+
+        assert_eq!(dst.get_val_at(b"root:a:old_a"), None);
+        assert_eq!(dst.get_val_at(b"root:b:old_b"), None);
+        let rz = dst.read_zipper_at_path(b"root:");
+        assert_eq!(rz.child_count(), 0);
+    }
+
+    #[test]
+    fn write_zipper_graft_masked_branches_test5() {
+        // Upper bound 2: remove_unset=false with one preserved child and one masked child.
+        let mut src: PathMap<i32> = PathMap::new();
+        src.set_val_at(b"root:a:new_a", 10);
+
+        let mut dst: PathMap<i32> = PathMap::new();
+        dst.set_val_at(b"root:a:old_a", 1);
+        dst.set_val_at(b"root:z:old_z", 26);
+
+        let mut wz = dst.write_zipper_at_path(b"root:");
+        let rz = src.read_zipper_at_path(b"root:");
+        wz.graft_masked_branches(&rz, ByteMask::from(b'a'), false);
+        drop(wz);
+
+        assert_eq!(dst.get_val_at(b"root:a:old_a"), None);
+        assert_eq!(dst.get_val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(dst.get_val_at(b"root:z:old_z"), Some(&26));
+    }
+
+    /// Focussed on child values associated with the branches
+    #[test]
+    fn write_zipper_graft_masked_branches_test6() {
+        let mut src: PathMap<i32> = PathMap::new();
+        src.set_val_at(b"abcdefg", 0);
+        src.set_val_at(b"hijklmnop", 1);
+        src.set_val_at(b"qrstuwvxyz", 2);
+        src.set_val_at(b"0", 3);
+        src.set_val_at(b"1", 4);
+        src.set_val_at(b"2", 5);
+        src.set_val_at(b"3", 6);
+        src.set_val_at(b"4", 7);
+        src.set_val_at(b"5", 8);
+        src.set_val_at(b"6789", 9);
+
+        let child_mask = ByteMask::from_iter([
+            b'a', b'h', b'q', b'0', b'1', b'2', b'3', b'4', b'5', b'6'
+        ]);
+
+        let mut dst: PathMap<i32> = PathMap::new();
+        let mut wz = dst.write_zipper();
+        let rz = src.read_zipper();
+        wz.graft_masked_branches(&rz, child_mask, false);
+        drop(wz);
+
+        assert_eq!(dst.get_val_at(b"abcdefg"), Some(&0));
+        assert_eq!(dst.get_val_at(b"hijklmnop"), Some(&1));
+        assert_eq!(dst.get_val_at(b"qrstuwvxyz"), Some(&2));
+        assert_eq!(dst.get_val_at(b"0"), Some(&3));
+        assert_eq!(dst.get_val_at(b"1"), Some(&4));
+        assert_eq!(dst.get_val_at(b"2"), Some(&5));
+        assert_eq!(dst.get_val_at(b"3"), Some(&6));
+        assert_eq!(dst.get_val_at(b"4"), Some(&7));
+        assert_eq!(dst.get_val_at(b"5"), Some(&8));
+        assert_eq!(dst.get_val_at(b"6789"), Some(&9));
     }
 
     crate::zipper::zipper_moving_tests::zipper_moving_tests!(write_zipper,
