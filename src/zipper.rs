@@ -548,7 +548,7 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> OpaqueAbstractNodeRef<'a, V, A> {
 pub struct OpaqueTrieNodeRef<'trie, V: Clone + Send + Sync, A: Allocator>(pub(crate) &'trie TrieNodeODRc<V, A>);
 
 /// Similar to [ZipperSubtries], but with the stronger guarantee that subtrie access will be constant-time and won't fail
-pub trait ZipperInfallibleSubtries<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: ZipperValues<V> {
+pub trait ZipperInfallibleSubtries<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: ZipperValues<V> + Zipper {
     /// Returns a new [PathMap] containing everything below the zipper's focus
     fn make_map(&self) -> PathMap<V, A>;
 

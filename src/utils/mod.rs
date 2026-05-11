@@ -120,7 +120,7 @@ impl ByteMask {
             // last partial word
             mask[end_word] = u64::MAX >> (63 - end_bit);
         }
-        
+
         ByteMask(mask)
     }
 

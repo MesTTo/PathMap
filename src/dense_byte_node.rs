@@ -1463,9 +1463,9 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNodeDowncast<V, A> for ByteNode<C
 }
 
 /// Used in the optimized implementation of `graft_masked_branches`
-pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>, const REMOVE_UNSET: bool>(
-    dst_node: &mut ByteNode<Cf, A>,
-    src_node: &DenseByteNode<V, A>,
+pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator, CfDst: CoFree<V=V, A=A>, CfSrc: CoFree<V=V, A=A>, const REMOVE_UNSET: bool>(
+    dst_node: &mut ByteNode<CfDst, A>,
+    src_node: &ByteNode<CfSrc, A>,
     child_mask: ByteMask
 ) {
     let old_mask = dst_node.mask;
@@ -1507,7 +1507,7 @@ pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator
             }
         };
         if rec.is_some() || val.is_some() {
-            new_values.v.push(Cf::new(rec, val));
+            new_values.v.push(CfDst::new(rec, val));
         } else {
             new_mask.clear_bit(child_byte);
         }

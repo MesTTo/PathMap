@@ -1479,12 +1479,33 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             None => self.remove_val(false)
         };
     }
+    /// Internal helper called by graft_masked_branches
+    fn merge_branches_into_focus<CfSrc: crate::dense_byte_node::CoFree<V=V, A=A>, const REMOVE_UNSET: bool>(
+        focus_node: &mut TrieNodeODRc<V, A>,
+        src_node: &crate::dense_byte_node::ByteNode<CfSrc, A>,
+        child_mask: ByteMask,
+    ) {
+        use crate::dense_byte_node::{merge_branches_into_byte_node, OrdinaryCoFree};
+
+        match focus_node.make_mut() {
+            TaggedNodeRefMut::DenseByteNode(node) => {
+                merge_branches_into_byte_node::<_, _, _, _, REMOVE_UNSET>(node, src_node, child_mask)
+            },
+            TaggedNodeRefMut::CellByteNode(node) => {
+                merge_branches_into_byte_node::<_, _, _, _, REMOVE_UNSET>(node, src_node, child_mask)
+            },
+            TaggedNodeRefMut::LineListNode(node) => {
+                let replacement = node.convert_to_dense::<OrdinaryCoFree<V, A>>(child_mask.count_bits() + 2);
+                *focus_node = replacement;
+                let node = focus_node.make_mut().into_dense().unwrap();
+                merge_branches_into_byte_node::<_, _, _, _, REMOVE_UNSET>(node, src_node, child_mask)
+            },
+        }
+    }
     /// See [ZipperWriting::graft_masked_branches]
     pub fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {
-        use crate::dense_byte_node::merge_branches_into_byte_node;
-
-        match src.get_focus().try_as_tagged().and_then(|node| node.as_dense()) {
-            Some(src_node) => {
+        match src.get_focus().try_as_tagged() {
+            Some(src_tagged) => {
                 // Split the focus if we're in the middle of another node
                 let self_focus_node = match self.try_borrow_focus_mut() {
                     Some(node) => node,
@@ -1493,43 +1514,56 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                         self.try_borrow_focus_mut().unwrap()
                     }
                 };
-
-                match self_focus_node.make_mut() {
-                    TaggedNodeRefMut::DenseByteNode(node) => {
+                match src_tagged {
+                    TaggedNodeRef::DenseByteNode(src_node) => {
                         if remove_unset {
-                            merge_branches_into_byte_node::<_, _, _, true>(node, src_node, child_mask)
+                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_node, child_mask);
                         } else {
-                            merge_branches_into_byte_node::<_, _, _, false>(node, src_node, child_mask)
+                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_node, child_mask);
                         }
                     },
-                    TaggedNodeRefMut::CellByteNode(node) => {
+                    TaggedNodeRef::CellByteNode(src_node) => {
                         if remove_unset {
-                            merge_branches_into_byte_node::<_, _, _, true>(node, src_node, child_mask)
+                            Self::merge_branches_into_focus::<crate::dense_byte_node::CellCoFree<V, A>, true>(self_focus_node, src_node, child_mask);
                         } else {
-                            merge_branches_into_byte_node::<_, _, _, false>(node, src_node, child_mask)
+                            Self::merge_branches_into_focus::<crate::dense_byte_node::CellCoFree<V, A>, false>(self_focus_node, src_node, child_mask);
                         }
                     },
-                    TaggedNodeRefMut::LineListNode(node) => {
-                        // Upgrade the focus to a dense node, if it's currently a list node
-                        let replacement = node.convert_to_dense::<crate::dense_byte_node::OrdinaryCoFree<V, A>>(child_mask.count_bits() + 2);
-                        *self_focus_node = replacement;
-                        let node = self_focus_node.make_mut().into_dense().unwrap();
+                    TaggedNodeRef::LineListNode(src_node) => {
+                        let mut src_node = src_node.clone();
+                        let src_dense = src_node.convert_to_dense::<crate::dense_byte_node::OrdinaryCoFree<V, A>>(3);
+                        let src_dense = src_dense.as_tagged().as_dense().unwrap();
                         if remove_unset {
-                            merge_branches_into_byte_node::<_, _, _, true>(node, src_node, child_mask)
+                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_dense, child_mask);
                         } else {
-                            merge_branches_into_byte_node::<_, _, _, false>(node, src_node, child_mask)
+                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_dense, child_mask);
+                        }
+                    },
+                    TaggedNodeRef::TinyRefNode(src_node) => {
+                        let mut src_node = src_node.into_full().unwrap();
+                        let src_dense = src_node.convert_to_dense::<crate::dense_byte_node::OrdinaryCoFree<V, A>>(3);
+                        let src_dense = src_dense.as_tagged().as_dense().unwrap();
+                        if remove_unset {
+                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_dense, child_mask);
+                        } else {
+                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_dense, child_mask);
+                        }
+                    },
+                    TaggedNodeRef::EmptyNode => {
+                        if remove_unset {
+                            self.remove_branches(false);
+                        } else {
+                            self.remove_unmasked_branches(child_mask.not(), false);
                         }
                     },
                 }
             },
             None => {
+                debug_assert_eq!(src.child_count(), 0);
                 if remove_unset {
                     self.remove_branches(false);
-                }
-                for child_byte in child_mask.iter() {
-                    self.descend_to_byte(child_byte);
-                    self.graft_src_at(src, &[child_byte]);
-                    self.ascend_byte();
+                } else {
+                    self.remove_unmasked_branches(child_mask.not(), false);
                 }
             }
         }
