@@ -1481,6 +1481,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperWriting::graft_masked_branches]
     pub fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {
+        use crate::dense_byte_node::merge_branches_into_byte_node;
 
         match src.get_focus().try_as_tagged().and_then(|node| node.as_dense()) {
             Some(src_node) => {
@@ -1494,14 +1495,30 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 };
 
                 match self_focus_node.make_mut() {
-                    TaggedNodeRefMut::DenseByteNode(node) => crate::dense_byte_node::merge_branches_into_byte_node(node, src_node, child_mask, remove_unset),
-                    TaggedNodeRefMut::CellByteNode(node) => crate::dense_byte_node::merge_branches_into_byte_node(node, src_node, child_mask, remove_unset),
+                    TaggedNodeRefMut::DenseByteNode(node) => {
+                        if remove_unset {
+                            merge_branches_into_byte_node::<_, _, _, true>(node, src_node, child_mask)
+                        } else {
+                            merge_branches_into_byte_node::<_, _, _, false>(node, src_node, child_mask)
+                        }
+                    },
+                    TaggedNodeRefMut::CellByteNode(node) => {
+                        if remove_unset {
+                            merge_branches_into_byte_node::<_, _, _, true>(node, src_node, child_mask)
+                        } else {
+                            merge_branches_into_byte_node::<_, _, _, false>(node, src_node, child_mask)
+                        }
+                    },
                     TaggedNodeRefMut::LineListNode(node) => {
                         // Upgrade the focus to a dense node, if it's currently a list node
                         let replacement = node.convert_to_dense::<crate::dense_byte_node::OrdinaryCoFree<V, A>>(child_mask.count_bits() + 2);
                         *self_focus_node = replacement;
                         let node = self_focus_node.make_mut().into_dense().unwrap();
-                        crate::dense_byte_node::merge_branches_into_byte_node(node, src_node, child_mask, remove_unset)
+                        if remove_unset {
+                            merge_branches_into_byte_node::<_, _, _, true>(node, src_node, child_mask)
+                        } else {
+                            merge_branches_into_byte_node::<_, _, _, false>(node, src_node, child_mask)
+                        }
                     },
                 }
             },
