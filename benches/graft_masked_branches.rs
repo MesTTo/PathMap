@@ -71,7 +71,8 @@ fn make_partial_source_case(masked_branch_count: usize) -> (PathMap<u32>, PathMa
         dst.set_val_at(&[child, 1], 10_001 + idx);
         dst.set_val_at(&[child, 2, 3], 10_002 + idx);
 
-        src.set_val_at(&[child], 20_000 + idx);
+        //Having both a value and onward branch forces an early upgrade from the PairNode to a ByteNode
+        // src.set_val_at(&[child], 20_000 + idx);
         src.set_val_at(&[child, 4], 20_001 + idx);
         src.set_val_at(&[child, 5, 6], 20_002 + idx);
         src.set_val_at(&[child, 7, 8, 9], 20_003 + idx);
