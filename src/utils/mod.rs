@@ -17,6 +17,10 @@ pub use fast_slice_utils::find_prefix_overlap;
 #[repr(transparent)]
 pub struct ByteMask(pub [u64; 4]);
 
+/// Alternate formatter for displaying a [`ByteMask`] as binary instead of as a set of byte indices.
+#[derive(Clone, Copy)]
+pub struct ByteMaskBinaryFmt(ByteMask);
+
 impl ByteMask {
     pub const EMPTY: ByteMask = Self([0u64; 4]);
     pub const FULL: ByteMask = Self([!0u64; 4]);
@@ -139,6 +143,12 @@ impl ByteMask {
     #[inline]
     pub fn range_iter(&self) -> ByteMaskRangeIter {
         ByteMaskRangeIter::from(self.0)
+    }
+
+    /// Returns a wrapper that renders this mask as 256 bits of binary text.
+    #[inline]
+    pub fn fmt_binary(&self) -> ByteMaskBinaryFmt {
+        ByteMaskBinaryFmt(self.clone())
     }
 
     /// Returns how many set bits precede the requested bit
@@ -296,6 +306,32 @@ impl ByteMask {
 impl core::fmt::Debug for ByteMask {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_set().entries(self.iter()).finish()
+    }
+}
+
+impl core::fmt::Debug for ByteMaskBinaryFmt {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for word in self.0.0.iter().rev() {
+            write!(f, "{word:064b}")?;
+        }
+        Ok(())
+    }
+}
+
+impl core::fmt::Display for ByteMaskBinaryFmt {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut bit_count = 0usize;
+        for word in self.0.0.iter().rev() {
+            for shift in (0..64).rev() {
+                let bit = (word >> shift) & 1;
+                write!(f, "{bit}")?;
+                bit_count += 1;
+                if bit_count < 256 && bit_count % 8 == 0 {
+                    write!(f, " ")?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 

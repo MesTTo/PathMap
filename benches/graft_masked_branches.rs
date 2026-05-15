@@ -1,4 +1,6 @@
 use divan::{Bencher, Divan};
+use rand::seq::SliceRandom;
+use rand::{SeedableRng, rngs::StdRng};
 
 use pathmap::PathMap;
 use pathmap::utils::ByteMask;
@@ -12,12 +14,52 @@ fn main() {
 
 const BRANCH_COUNTS: [usize; 11] = [1, 2, 3, 4, 6, 8, 15, 30, 60, 100, 200];
 
-fn make_case(masked_branch_count: usize) -> (PathMap<u32>, PathMap<u32>, ByteMask) {
-    let masked_children: Vec<u8> = (0..masked_branch_count).map(|idx| idx as u8).collect();
-    let extra_branch_count = (masked_branch_count / 2).max(2);
-    let extra_children: Vec<u8> = (masked_branch_count..(masked_branch_count + extra_branch_count))
-        .map(|idx| idx as u8)
-        .collect();
+#[derive(Clone, Copy, Debug)]
+enum MaskDistribution {
+    Contiguous,
+    PseudoRandom,
+}
+
+fn make_children(masked_branch_count: usize, distribution: MaskDistribution) -> (Vec<u8>, Vec<u8>) {
+    let extra_branch_count = ((masked_branch_count / 2).max(2)).min(256 - masked_branch_count);
+
+    match distribution {
+        MaskDistribution::Contiguous => {
+            let masked_children: Vec<u8> = (0..masked_branch_count).map(|idx| idx as u8).collect();
+            let extra_children: Vec<u8> = (masked_branch_count..(masked_branch_count + extra_branch_count))
+                .map(|idx| idx as u8)
+                .collect();
+            (masked_children, extra_children)
+        }
+        MaskDistribution::PseudoRandom => {
+            // Deterministic shuffle so benchmark inputs are reproducible without the regular
+            // spacing artifacts of a linear permutation prefix.
+            let mut permuted_bytes: Vec<u8> = (0u8..=255).collect();
+            let mut rng = StdRng::seed_from_u64(0x5eed_cafe_u64 ^ masked_branch_count as u64);
+            permuted_bytes.shuffle(&mut rng);
+            let masked_children = permuted_bytes[..masked_branch_count].to_vec();
+            let extra_children = permuted_bytes[masked_branch_count..masked_branch_count + extra_branch_count].to_vec();
+            (masked_children, extra_children)
+        }
+    }
+}
+
+fn debug_print_mask(_label: &str, _distribution: MaskDistribution, _child_mask: ByteMask) {
+    //NOTE: Uncomment this function body to inspect the masks
+    // let ranges: Vec<(u8, u8)> = _child_mask
+    //     .range_iter()
+    //     .map(|range| (*range.start(), *range.end()))
+    //     .collect();
+    // let ranges_cnt = ranges.len();
+    // println!(
+    //     "[graft_masked_branches bench] case={_label} distribution={_distribution:?} bits={} ranges={ranges_cnt} mask={}",
+    //     pathmap::utils::BitMask::count_bits(&_child_mask),
+    //     _child_mask.fmt_binary(),
+    // );
+}
+
+fn make_case(masked_branch_count: usize, distribution: MaskDistribution) -> (PathMap<u32>, PathMap<u32>, ByteMask) {
+    let (masked_children, extra_children) = make_children(masked_branch_count, distribution);
 
     let mut src = PathMap::new();
     let mut dst = PathMap::new();
@@ -48,15 +90,13 @@ fn make_case(masked_branch_count: usize) -> (PathMap<u32>, PathMap<u32>, ByteMas
         src.set_val_at(&[child, 14], 40_001 + idx);
     }
 
-    (src, dst, ByteMask::from_iter(masked_children))
+    let child_mask = ByteMask::from_iter(masked_children);
+    debug_print_mask("full_src", distribution, child_mask);
+    (src, dst, child_mask)
 }
 
-fn make_partial_source_case(masked_branch_count: usize) -> (PathMap<u32>, PathMap<u32>, ByteMask) {
-    let masked_children: Vec<u8> = (0..masked_branch_count).map(|idx| idx as u8).collect();
-    let extra_branch_count = (masked_branch_count / 2).max(2);
-    let extra_children: Vec<u8> = (masked_branch_count..(masked_branch_count + extra_branch_count))
-        .map(|idx| idx as u8)
-        .collect();
+fn make_partial_source_case(masked_branch_count: usize, distribution: MaskDistribution) -> (PathMap<u32>, PathMap<u32>, ByteMask) {
+    let (masked_children, extra_children) = make_children(masked_branch_count, distribution);
 
     let mut src = PathMap::new();
     let mut dst = PathMap::new();
@@ -85,20 +125,18 @@ fn make_partial_source_case(masked_branch_count: usize) -> (PathMap<u32>, PathMa
         dst.set_val_at(&[child, 12, 13], 30_002 + idx);
     }
 
-    (src, dst, ByteMask::from_iter(masked_children))
+    let child_mask = ByteMask::from_iter(masked_children);
+    debug_print_mask("part_src", distribution, child_mask);
+    (src, dst, child_mask)
 }
 
-/// `remove_unset = false`, `src` contains hundreds of branches, regardless of mask
-#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
-fn graft_masked_branches_keep_full_src(bencher: Bencher, masked_branch_count: usize) {
-    let (src_template, dst_template, child_mask) = make_case(masked_branch_count);
-
+fn run_graft_bench(bencher: Bencher, src_template: PathMap<u32>, dst_template: PathMap<u32>, child_mask: ByteMask, remove_unset: bool) {
     let out = bencher
         .with_inputs(|| (src_template.clone(), dst_template.clone()))
         .bench_local_values(|(src, mut dst)| {
             let mut wz = dst.write_zipper_at_path(b"");
             let rz = src.read_zipper_at_path(b"");
-            wz.graft_masked_branches(&rz, child_mask, false);
+            wz.graft_masked_branches(&rz, child_mask, remove_unset);
             drop(wz);
             dst
         });
@@ -106,62 +144,74 @@ fn graft_masked_branches_keep_full_src(bencher: Bencher, masked_branch_count: us
     divan::black_box_drop(out);
 }
 
-/// `remove_unset = true`, `src` contains hundreds of branches, regardless of mask
+/// - `remove_unset = false`
+/// - `src` contains hundreds of branches, regardless of mask
+/// - the mask bits are a contiguous range
 #[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
-fn graft_masked_branches_remove_full_src(bencher: Bencher, masked_branch_count: usize) {
-    let (src_template, dst_template, child_mask) = make_case(masked_branch_count);
-
-    let out = bencher
-        .with_inputs(|| (src_template.clone(), dst_template.clone()))
-        .bench_local_values(|(src, mut dst)| {
-            let mut wz = dst.write_zipper_at_path(b"");
-            let rz = src.read_zipper_at_path(b"");
-            wz.graft_masked_branches(&rz, child_mask, true);
-            drop(wz);
-            dst
-        });
-
-    divan::black_box_drop(out);
+fn graft_masked_branches_keep_full_src_contiguous(bencher: Bencher, masked_branch_count: usize) {
+    let (src_template, dst_template, child_mask) = make_case(masked_branch_count, MaskDistribution::Contiguous);
+    run_graft_bench(bencher, src_template, dst_template, child_mask, false);
 }
 
-/// `remove_unset = false`, `src` contains only the branches we're grafting
+/// - `remove_unset = false`
+/// - `src` contains hundreds of branches, regardless of mask
+/// - mask bits are distributed pseudorandomly
 #[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
-fn graft_masked_branches_keep_part_src(
-    bencher: Bencher,
-    masked_branch_count: usize,
-) {
-    let (src_template, dst_template, child_mask) = make_partial_source_case(masked_branch_count);
-
-    let out = bencher
-        .with_inputs(|| (src_template.clone(), dst_template.clone()))
-        .bench_local_values(|(src, mut dst)| {
-            let mut wz = dst.write_zipper_at_path(b"");
-            let rz = src.read_zipper_at_path(b"");
-            wz.graft_masked_branches(&rz, child_mask, false);
-            drop(wz);
-            dst
-        });
-
-    divan::black_box_drop(out);
+fn graft_masked_branches_keep_full_src_pseudorandom(bencher: Bencher, masked_branch_count: usize) {
+    let (src_template, dst_template, child_mask) = make_case(masked_branch_count, MaskDistribution::PseudoRandom);
+    run_graft_bench(bencher, src_template, dst_template, child_mask, false);
 }
 
-/// `remove_unset = true`, `src` contains only the branches we're grafting
+/// - `remove_unset = true`
+/// - `src` contains hundreds of branches, regardless of mask
+/// - the mask bits are a contiguous range
 #[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
-fn graft_masked_branches_remove_part_src(
-    bencher: Bencher,
-    masked_branch_count: usize,
-) {
-    let (src_template, dst_template, child_mask) = make_partial_source_case(masked_branch_count);
+fn graft_masked_branches_remove_full_src_contiguous(bencher: Bencher, masked_branch_count: usize) {
+    let (src_template, dst_template, child_mask) = make_case(masked_branch_count, MaskDistribution::Contiguous);
+    run_graft_bench(bencher, src_template, dst_template, child_mask, true);
+}
 
-    let out = bencher
-        .with_inputs(|| (src_template.clone(), dst_template.clone()))
-        .bench_local_values(|(src, mut dst)| {
-            let mut wz = dst.write_zipper_at_path(b"");
-            let rz = src.read_zipper_at_path(b"");
-            wz.graft_masked_branches(&rz, child_mask, true);
-            drop(wz);
-            dst
-        });
+/// - `remove_unset = true`
+/// - `src` contains hundreds of branches, regardless of mask
+/// - mask bits are distributed pseudorandomly
+#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+fn graft_masked_branches_remove_full_src_pseudorandom(bencher: Bencher, masked_branch_count: usize) {
+    let (src_template, dst_template, child_mask) = make_case(masked_branch_count, MaskDistribution::PseudoRandom);
+    run_graft_bench(bencher, src_template, dst_template, child_mask, true);
+}
 
-    divan::black_box_drop(out);
+/// - `remove_unset = false`
+/// - `src` contains only the branches we're grafting
+/// - the mask bits are a contiguous range
+#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+fn graft_masked_branches_keep_part_src_contiguous(bencher: Bencher, masked_branch_count: usize) {
+    let (src_template, dst_template, child_mask) = make_partial_source_case(masked_branch_count, MaskDistribution::Contiguous);
+    run_graft_bench(bencher, src_template, dst_template, child_mask, false);
+}
+
+/// - `remove_unset = false`
+/// - `src` contains only the branches we're grafting
+/// - mask bits are distributed pseudorandomly
+#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+fn graft_masked_branches_keep_part_src_pseudorandom(bencher: Bencher, masked_branch_count: usize) {
+    let (src_template, dst_template, child_mask) = make_partial_source_case(masked_branch_count, MaskDistribution::PseudoRandom);
+    run_graft_bench(bencher, src_template, dst_template, child_mask, false);
+}
+
+/// - `remove_unset = true`
+/// - `src` contains only the branches we're grafting,
+/// - the mask bits are a contiguous range
+#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+fn graft_masked_branches_remove_part_src_contiguous(bencher: Bencher, masked_branch_count: usize) {
+    let (src_template, dst_template, child_mask) = make_partial_source_case(masked_branch_count, MaskDistribution::Contiguous);
+    run_graft_bench(bencher, src_template, dst_template, child_mask, true);
+}
+
+/// - `remove_unset = true`
+/// - `src` contains only the branches we're grafting
+/// - mask bits are distributed pseudorandomly
+#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+fn graft_masked_branches_remove_part_src_pseudorandom(bencher: Bencher, masked_branch_count: usize) {
+    let (src_template, dst_template, child_mask) = make_partial_source_case(masked_branch_count, MaskDistribution::PseudoRandom);
+    run_graft_bench(bencher, src_template, dst_template, child_mask, true);
 }
