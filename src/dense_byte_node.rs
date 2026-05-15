@@ -1471,46 +1471,72 @@ pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator
     let old_mask = dst_node.mask;
     let mut old_values = ValuesVec::default_in(dst_node.alloc.clone());
     core::mem::swap(&mut old_values.v, &mut dst_node.values);
-
-    let combined_mask = if REMOVE_UNSET {
-        child_mask
-    } else {
-        child_mask | old_mask
-    };
-
-    let mut new_values = ValuesVec::with_capacity_in(combined_mask.count_bits(), dst_node.alloc.clone());
     let mut old_values = old_values.v.into_iter();
-    let mut new_mask = combined_mask;
+    let combined_mask = if REMOVE_UNSET { child_mask } else { child_mask | old_mask };
+    let mut new_values = ValuesVec::with_capacity_in(combined_mask.count_bits(), dst_node.alloc.clone());
+    let mut prev_end = 0;
+    let mut new_mask = ByteMask::EMPTY;
+    let mut old_values_consumed = 0usize;
 
-    for child_byte in combined_mask.iter() {
-        let (rec, val) = if REMOVE_UNSET {
-            match src_node.get(child_byte) {
-                Some(cf) => (cf.rec().cloned(), cf.val().cloned()),
-                None => (None, None)
-            }
-        } else {
-            let old_cf = if old_mask.test_bit(child_byte) {
-                Some(old_values.next().unwrap())
-            } else {
-                None
-            };
-            if child_mask.test_bit(child_byte) {
-                match src_node.get(child_byte) {
-                    Some(cf) => (cf.rec().cloned(), cf.val().cloned()),
-                    None => (None, None)
+    //Loop over each contiguous range in `child_mask`
+    for range in child_mask.range_iter() {
+        let range_start = *range.start();
+        let range_end = *range.end();
+
+        if !REMOVE_UNSET && prev_end < range_start as usize {
+            let gap_start = prev_end as u8;
+            let gap_mask = old_mask & ByteMask::from_range(gap_start..range_start);
+            let gap_len = gap_mask.count_bits();
+            if gap_len > 0 {
+                for _ in 0..gap_len {
+                    new_values.v.push(old_values.next().unwrap());
                 }
-            } else {
-                match old_cf {
-                    Some(cf) => cf.into_both(),
-                    None => (None, None)
-                }
+                old_values_consumed += gap_len;
+                new_mask = new_mask | gap_mask;
             }
-        };
-        if rec.is_some() || val.is_some() {
-            new_values.v.push(CfDst::new(rec, val));
-        } else {
-            new_mask.clear_bit(child_byte);
         }
+
+        if !REMOVE_UNSET {
+            let old_range_mask = old_mask & ByteMask::from_range(range_start..=range_end);
+            let old_range_len = old_range_mask.count_bits();
+            for _ in 0..old_range_len {
+                let _ = old_values.next().unwrap();
+            }
+            old_values_consumed += old_range_len;
+        }
+
+        let src_range_mask = src_node.mask & ByteMask::from_range(range_start..=range_end);
+        let mut src_ix = src_node.mask.index_of(range_start) as usize;
+        for child_byte in src_range_mask.iter() {
+            let cf = unsafe { src_node.values.get_unchecked(src_ix) };
+            src_ix += 1;
+
+            if cf.has_rec() || cf.has_val() {
+                new_values.v.push(CfDst::from_cf(cf.clone()));
+                new_mask.set_bit(child_byte);
+            }
+        }
+
+        prev_end = range_end as usize + 1;
+    }
+
+    if !REMOVE_UNSET && prev_end < 256 {
+        let tail_start = prev_end as u8;
+        let tail_mask = old_mask & ByteMask::from_range(tail_start..);
+        let tail_len = tail_mask.count_bits();
+        if tail_len > 0 {
+            debug_assert_eq!(old_values_consumed, old_mask.index_of(tail_start) as usize);
+            for _ in 0..tail_len {
+                new_values.v.push(old_values.next().unwrap());
+            }
+            old_values_consumed += tail_len;
+            new_mask = new_mask | tail_mask;
+        }
+    }
+
+    if !REMOVE_UNSET {
+        debug_assert_eq!(old_values_consumed, old_mask.count_bits());
+        debug_assert!(old_values.next().is_none());
     }
 
     dst_node.mask = new_mask;
