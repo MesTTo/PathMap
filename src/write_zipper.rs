@@ -1487,20 +1487,23 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     ) {
         use crate::dense_byte_node::{merge_branches_into_byte_node, OrdinaryCoFree};
 
-        match focus_node.make_mut() {
-            TaggedNodeRefMut::DenseByteNode(node) => {
+        let replacement = match focus_node.as_tagged() {
+            TaggedNodeRef::DenseByteNode(node) => {
                 merge_branches_into_byte_node::<_, _, _, _, REMOVE_UNSET>(node, src_node, child_mask)
             },
-            TaggedNodeRefMut::CellByteNode(node) => {
+            TaggedNodeRef::CellByteNode(node) => {
                 merge_branches_into_byte_node::<_, _, _, _, REMOVE_UNSET>(node, src_node, child_mask)
             },
-            TaggedNodeRefMut::LineListNode(node) => {
-                let replacement = node.convert_to_dense::<OrdinaryCoFree<V, A>>(child_mask.count_bits() + 2);
-                *focus_node = replacement;
-                let node = focus_node.make_mut().into_dense().unwrap();
+            TaggedNodeRef::LineListNode(node) => {
+                let mut line_node = node.clone();
+                let replacement = line_node.convert_to_dense::<OrdinaryCoFree<V, A>>(child_mask.count_bits() + 2);
+                let node = replacement.as_tagged().as_dense().unwrap();
                 merge_branches_into_byte_node::<_, _, _, _, REMOVE_UNSET>(node, src_node, child_mask)
             },
+            _ => unreachable!(),
         }
+        ;
+        *focus_node = replacement;
     }
     /// See [ZipperWriting::graft_masked_branches]
     pub fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {

@@ -1464,19 +1464,18 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNodeDowncast<V, A> for ByteNode<C
 
 /// Used in the optimized implementation of `graft_masked_branches`
 pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator, CfDst: CoFree<V=V, A=A>, CfSrc: CoFree<V=V, A=A>, const REMOVE_UNSET: bool>(
-    dst_node: &mut ByteNode<CfDst, A>,
+    dst_node: &ByteNode<CfDst, A>,
     src_node: &ByteNode<CfSrc, A>,
     child_mask: ByteMask
-) {
+) -> TrieNodeODRc<V, A>
+where
+    ByteNode<CfDst, A>: TrieNodeDowncast<V, A>,
+{
     let old_mask = dst_node.mask;
-    let mut old_values = ValuesVec::default_in(dst_node.alloc.clone());
-    core::mem::swap(&mut old_values.v, &mut dst_node.values);
-    let mut old_values = old_values.v.into_iter();
     let combined_mask = if REMOVE_UNSET { child_mask } else { child_mask | old_mask };
     let mut new_values = ValuesVec::with_capacity_in(combined_mask.count_bits(), dst_node.alloc.clone());
     let mut prev_end = 0;
     let mut new_mask = ByteMask::EMPTY;
-    let mut old_values_consumed = 0usize;
 
     //Loop over each contiguous range in `child_mask`
     for range in child_mask.range_iter() {
@@ -1488,21 +1487,12 @@ pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator
             let gap_mask = old_mask & ByteMask::from_range(gap_start..range_start);
             let gap_len = gap_mask.count_bits();
             if gap_len > 0 {
-                for _ in 0..gap_len {
-                    new_values.v.push(old_values.next().unwrap());
+                let gap_ix = old_mask.index_of(gap_start) as usize;
+                for cf in &dst_node.values[gap_ix..gap_ix + gap_len] {
+                    new_values.v.push(CfDst::from_cf(cf.clone()));
                 }
-                old_values_consumed += gap_len;
                 new_mask = new_mask | gap_mask;
             }
-        }
-
-        if !REMOVE_UNSET {
-            let old_range_mask = old_mask & ByteMask::from_range(range_start..=range_end);
-            let old_range_len = old_range_mask.count_bits();
-            for _ in 0..old_range_len {
-                let _ = old_values.next().unwrap();
-            }
-            old_values_consumed += old_range_len;
         }
 
         let src_range_mask = src_node.mask & ByteMask::from_range(range_start..=range_end);
@@ -1525,22 +1515,15 @@ pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator
         let tail_mask = old_mask & ByteMask::from_range(tail_start..);
         let tail_len = tail_mask.count_bits();
         if tail_len > 0 {
-            debug_assert_eq!(old_values_consumed, old_mask.index_of(tail_start) as usize);
-            for _ in 0..tail_len {
-                new_values.v.push(old_values.next().unwrap());
+            let tail_ix = old_mask.index_of(tail_start) as usize;
+            for cf in &dst_node.values[tail_ix..tail_ix + tail_len] {
+                new_values.v.push(CfDst::from_cf(cf.clone()));
             }
-            old_values_consumed += tail_len;
             new_mask = new_mask | tail_mask;
         }
     }
 
-    if !REMOVE_UNSET {
-        debug_assert_eq!(old_values_consumed, old_mask.count_bits());
-        debug_assert!(old_values.next().is_none());
-    }
-
-    dst_node.mask = new_mask;
-    dst_node.values = new_values.v;
+    TrieNodeODRc::new_in(ByteNode::new_with_fields_in(new_mask, new_values, dst_node.alloc.clone()), dst_node.alloc.clone())
 }
 
 /// returns the position of the next/previous active bit in x
