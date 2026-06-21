@@ -12,10 +12,10 @@
 #[cfg(feature = "jemalloc")]
 use tikv_jemallocator::Jemalloc;
 
-#[cfg(not(any(miri, target_arch="riscv64")))]
+#[cfg(not(any(kani, miri, target_arch="riscv64")))]
 use gxhash;
 
-#[cfg(any(miri, target_arch="riscv64"))]
+#[cfg(any(kani, miri, target_arch="riscv64"))]
 mod gxhash {
     // fallback
     // pub use xxhash_rust::xxh64::{Xxh64 as GxHasher};
@@ -56,8 +56,11 @@ mod gxhash {
     }
 
     pub use std::collections::HashMap;
+    #[allow(dead_code)]
     pub fn gxhash128(data: &[u8], _seed: i64) -> u128 { xxhash_rust::const_xxh3::xxh3_128(data) }
+    #[allow(dead_code)]
     pub trait HashMapExt{}
+    #[allow(dead_code)]
     pub trait HashSetExt{}
 }
 

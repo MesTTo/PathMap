@@ -14,6 +14,10 @@ exclude = ["target/", "benches/", "pathmap-book/", ".*", "fuzz/"]
 [package.metadata.docs.rs]
 rustc-args = ["-C", "target-feature=+aes,+sse2"]
 
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [lib]
 name = "pathmap"
 path = "src/lib.rs"
@@ -58,11 +62,11 @@ zipper_alg = [] # Enables experimental implementations of Zipper-based algebraic
 [target.'cfg(miri)'.dependencies]
 fast-slice-utils = { version = "0.1.2", features = ["miri_safe"] }
 
-[target.'cfg(not(any(miri,target_arch="riscv64")))'.dependencies]
+[target.'cfg(not(any(kani,miri,target_arch="riscv64")))'.dependencies]
 gxhash = {version="3.5"} # for dag_serialization, merkleization, and caching catamorphism
 
-[target.'cfg(any(miri,target_arch="riscv64"))'.dependencies]
-xxhash-rust = { version = "0.8.15", features = ["xxh64", "xxh3", "const_xxh3"] } # Replacement for gxhash running under miri
+[target.'cfg(any(kani,miri,target_arch="riscv64"))'.dependencies]
+xxhash-rust = { version = "0.8.15", features = ["xxh64", "xxh3", "const_xxh3"] } # Replacement for gxhash under verifier and non-SIMD builds
 
 [dev-dependencies]
 paste = "1.0"

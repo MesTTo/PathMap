@@ -77,6 +77,9 @@ use crate::trie_node::TrieNodeODRc;
 use crate::zipper;
 use crate::zipper::*;
 
+#[cfg(any(kani, miri, target_arch = "riscv64"))]
+use crate::gxhash::{self, HashMap};
+#[cfg(not(any(kani, miri, target_arch = "riscv64")))]
 use crate::gxhash::{self, HashMap, HashMapExt};
 
 /// Provides methods to perform a catamorphism on types that can reference or contain a trie
