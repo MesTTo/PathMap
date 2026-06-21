@@ -547,8 +547,20 @@ pub trait Lattice {
     /// Implements the intersection operation between two instances of a type in a partial lattice
     fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized;
 
-    //GOAT, we want a meet_into, that has the same semantics as join_into, e.g. mutating in-place.  I
-    // don't think there is any benefit to consuming `other`, however, so we can still take `other: &Self`
+    /// Implements the intersection operation between two instances of a type, modifying `self` in place.
+    fn meet_into(&mut self, other: &Self) -> AlgebraicStatus
+    where
+        Self: Sized + Clone + Default,
+    {
+        let result = self.pmeet(other);
+        in_place_default_impl(
+            result,
+            self,
+            other,
+            |s| *s = Self::default(),
+            |other| other.clone(),
+        )
+    }
 
     //GOAT, this should be temporarily deprecated until we work out the correct function prototype
     fn join_all<S: AsRef<Self>, Args: AsRef<[S]>>(xs: Args) -> AlgebraicResult<Self> where Self: Sized + Clone {
@@ -603,7 +615,26 @@ pub trait DistributiveLattice {
     /// Implements the partial subtract operation
     fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized;
 
-    //GOAT, We want a psubtract_from (subtract_into??) that operates on a `&mut self`
+    /// Subtracts `other` from `self` in place.
+    fn subtract_into(&mut self, other: &Self) -> AlgebraicStatus
+    where
+        Self: Sized + Default,
+    {
+        match self.psubtract(other) {
+            AlgebraicResult::None => {
+                *self = Self::default();
+                AlgebraicStatus::None
+            }
+            AlgebraicResult::Element(v) => {
+                *self = v;
+                AlgebraicStatus::Element
+            }
+            AlgebraicResult::Identity(mask) => {
+                debug_assert_eq!(mask, SELF_IDENT);
+                AlgebraicStatus::Identity
+            }
+        }
+    }
 }
 
 /// Implements subtract behavior on a reference to a [DistributiveLattice] type
@@ -703,6 +734,35 @@ impl<V: Lattice + Clone> Lattice for Option<V> {
             }
         }
     }
+    fn meet_into(&mut self, other: &Self) -> AlgebraicStatus {
+        match self {
+            None => AlgebraicStatus::None,
+            Some(l) => match other {
+                None => {
+                    *self = None;
+                    AlgebraicStatus::None
+                }
+                Some(r) => match l.pmeet(r) {
+                    AlgebraicResult::None => {
+                        *self = None;
+                        AlgebraicStatus::None
+                    }
+                    AlgebraicResult::Element(v) => {
+                        *l = v;
+                        AlgebraicStatus::Element
+                    }
+                    AlgebraicResult::Identity(mask) => {
+                        if mask & SELF_IDENT > 0 {
+                            AlgebraicStatus::Identity
+                        } else {
+                            *l = r.clone();
+                            AlgebraicStatus::Element
+                        }
+                    }
+                },
+            },
+        }
+    }
 }
 
 impl<V: DistributiveLattice + Clone> DistributiveLattice for Option<V> {
@@ -717,6 +777,28 @@ impl<V: DistributiveLattice + Clone> DistributiveLattice for Option<V> {
             }
         }
     }
+    fn subtract_into(&mut self, other: &Self) -> AlgebraicStatus {
+        match self {
+            None => AlgebraicStatus::None,
+            Some(s) => match other {
+                None => AlgebraicStatus::Identity,
+                Some(o) => match s.psubtract(o) {
+                    AlgebraicResult::None => {
+                        *self = None;
+                        AlgebraicStatus::None
+                    }
+                    AlgebraicResult::Element(v) => {
+                        *s = v;
+                        AlgebraicStatus::Element
+                    }
+                    AlgebraicResult::Identity(mask) => {
+                        debug_assert_eq!(mask, SELF_IDENT);
+                        AlgebraicStatus::Identity
+                    }
+                },
+            },
+        }
+    }
 }
 
 #[test]
@@ -728,6 +810,25 @@ fn option_subtract_test() {
     assert_eq!(Some(Some(())).psubtract(&Some(None)), AlgebraicResult::Identity(SELF_IDENT));
     assert_eq!(Some(Some(Some(()))).psubtract(&Some(Some(None))), AlgebraicResult::Identity(SELF_IDENT));
     assert_eq!(Some(Some(Some(()))).psubtract(&Some(Some(Some(())))), AlgebraicResult::None);
+}
+
+#[test]
+fn option_in_place_lattice_test() {
+    let mut meet = Some(true);
+    assert_eq!(meet.meet_into(&Some(false)), AlgebraicStatus::Element);
+    assert_eq!(meet, Some(false));
+    assert_eq!(meet.meet_into(&None), AlgebraicStatus::None);
+    assert_eq!(meet, None);
+
+    let mut subtract = Some(7_u64);
+    assert_eq!(
+        subtract.subtract_into(&Some(9_u64)),
+        AlgebraicStatus::Element
+    );
+    assert_eq!(subtract, Some(7));
+    assert_eq!(subtract.subtract_into(&None), AlgebraicStatus::Identity);
+    assert_eq!(subtract.subtract_into(&Some(7)), AlgebraicStatus::None);
+    assert_eq!(subtract, None);
 }
 
 // =-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-=
@@ -1013,6 +1114,9 @@ macro_rules! set_lattice {
                 }
                 $crate::ring::set_lattice_integrate_into_result(result, is_ident, is_counter_ident, self.len(), other.len())
             }
+            fn meet_into(&mut self, other: &Self) -> $crate::ring::AlgebraicStatus {
+                $crate::ring::set_lattice_meet_into(self, other)
+            }
         }
     }
 }
@@ -1085,6 +1189,50 @@ pub fn set_lattice_integrate_into_result<S: SetLattice>(
     }
 }
 
+/// Internal helper for the in-place [Lattice::meet_into] implementation emitted by [set_lattice].
+#[inline]
+#[doc(hidden)]
+pub fn set_lattice_meet_into<S>(self_set: &mut S, other: &S) -> AlgebraicStatus
+where
+    S: SetLattice,
+    S::V: Lattice,
+{
+    let mut removals = Vec::new();
+    let mut replacements = Vec::new();
+
+    for (key, self_val) in SetLattice::iter(self_set) {
+        match SetLattice::get(other, key) {
+            Some(other_val) => match self_val.pmeet(other_val) {
+                AlgebraicResult::None => removals.push(key.clone()),
+                AlgebraicResult::Element(new_val) => replacements.push((key.clone(), new_val)),
+                AlgebraicResult::Identity(mask) => {
+                    if mask & SELF_IDENT == 0 {
+                        debug_assert!(mask & COUNTER_IDENT > 0);
+                        replacements.push((key.clone(), other_val.clone()));
+                    }
+                }
+            },
+            None => removals.push(key.clone()),
+        }
+    }
+
+    let changed = !removals.is_empty() || !replacements.is_empty();
+    for key in removals {
+        SetLattice::remove(self_set, &key);
+    }
+    for (key, val) in replacements {
+        SetLattice::replace(self_set, &key, val);
+    }
+
+    if SetLattice::len(self_set) == 0 {
+        AlgebraicStatus::None
+    } else if changed {
+        AlgebraicStatus::Element
+    } else {
+        AlgebraicStatus::Identity
+    }
+}
+
 /// A macro to emit the [DistributiveLattice] implementation for a type that implements [SetLattice]
 #[macro_export]
 macro_rules! set_dist_lattice {
@@ -1116,6 +1264,87 @@ macro_rules! set_dist_lattice {
                     $crate::ring::AlgebraicResult::Element(result)
                 }
             }
+            fn subtract_into(&mut self, other: &Self) -> $crate::ring::AlgebraicStatus {
+                $crate::ring::set_lattice_subtract_into(self, other)
+            }
+        }
+    }
+}
+
+/// Internal helper for the in-place [DistributiveLattice::subtract_into] implementation emitted by [set_dist_lattice].
+#[inline]
+#[doc(hidden)]
+pub fn set_lattice_subtract_into<S>(self_set: &mut S, other: &S) -> AlgebraicStatus
+where
+    S: SetLattice,
+    S::V: DistributiveLattice,
+{
+    let mut removals = Vec::new();
+    let mut replacements = Vec::new();
+
+    if SetLattice::len(self_set) > SetLattice::len(other) {
+        for (key, other_val) in SetLattice::iter(other) {
+            if let Some(self_val) = SetLattice::get(self_set, key) {
+                set_lattice_subtract_into_element::<S>(
+                    &mut removals,
+                    &mut replacements,
+                    key,
+                    self_val,
+                    other_val,
+                );
+            }
+        }
+    } else {
+        for (key, self_val) in SetLattice::iter(self_set) {
+            if let Some(other_val) = SetLattice::get(other, key) {
+                set_lattice_subtract_into_element::<S>(
+                    &mut removals,
+                    &mut replacements,
+                    key,
+                    self_val,
+                    other_val,
+                );
+            }
+        }
+    }
+
+    let changed = !removals.is_empty() || !replacements.is_empty();
+    for key in removals {
+        SetLattice::remove(self_set, &key);
+    }
+    for (key, val) in replacements {
+        SetLattice::replace(self_set, &key, val);
+    }
+
+    if SetLattice::len(self_set) == 0 {
+        AlgebraicStatus::None
+    } else if changed {
+        SetLattice::shrink_to_fit(self_set);
+        AlgebraicStatus::Element
+    } else {
+        AlgebraicStatus::Identity
+    }
+}
+
+#[inline]
+fn set_lattice_subtract_into_element<S: SetLattice>(
+    removals: &mut Vec<S::K>,
+    replacements: &mut Vec<(S::K, S::V)>,
+    key: &S::K,
+    self_val: &S::V,
+    other_val: &S::V,
+) where
+    S::V: DistributiveLattice,
+{
+    match self_val.psubtract(other_val) {
+        AlgebraicResult::Element(new_val) => {
+            replacements.push((key.clone(), new_val));
+        }
+        AlgebraicResult::Identity(mask) => {
+            debug_assert_eq!(mask, SELF_IDENT);
+        }
+        AlgebraicResult::None => {
+            removals.push(key.clone());
         }
     }
 }
@@ -1193,9 +1422,9 @@ set_dist_lattice!(HashSet<K>);
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashSet, HashMap};
-    use crate::ring::Lattice;
-    use super::{AlgebraicResult, SetLattice, SELF_IDENT, COUNTER_IDENT};
+    use super::{AlgebraicResult, AlgebraicStatus, SetLattice, COUNTER_IDENT, SELF_IDENT};
+    use crate::ring::{DistributiveLattice, Lattice};
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn set_lattice_join_test1() {
@@ -1296,6 +1525,63 @@ mod tests {
         //Test mutual identity
         let meet_result = meet.pmeet(&meet);
         assert_eq!(meet_result, AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT));
+    }
+
+    #[test]
+    fn set_lattice_meet_into_test1() {
+        let mut a = HashSet::from(["A", "C", "D"]);
+        let b = HashSet::from(["B", "C", "D", "E"]);
+
+        assert_eq!(a.meet_into(&b), AlgebraicStatus::Element);
+        assert_eq!(a, HashSet::from(["C", "D"]));
+        assert_eq!(a.meet_into(&b), AlgebraicStatus::Identity);
+
+        let disjoint = HashSet::from(["Z"]);
+        assert_eq!(a.meet_into(&disjoint), AlgebraicStatus::None);
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn set_lattice_subtract_into_test1() {
+        let mut a = HashSet::from(["A", "B", "C"]);
+        let b = HashSet::from(["B", "D"]);
+
+        assert_eq!(a.subtract_into(&b), AlgebraicStatus::Element);
+        assert_eq!(a, HashSet::from(["A", "C"]));
+        assert_eq!(a.subtract_into(&b), AlgebraicStatus::Identity);
+
+        let a_clone = a.clone();
+        assert_eq!(a.subtract_into(&a_clone), AlgebraicStatus::None);
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn hash_map_subtract_test() {
+        fn set(xs: &[&'static str]) -> HashSet<&'static str> {
+            xs.iter().copied().collect()
+        }
+
+        let mut a = HashMap::new();
+        a.insert("A", set(&["1", "2"]));
+        a.insert("B", set(&["x"]));
+
+        let mut b = HashMap::new();
+        b.insert("A", set(&["2", "3"]));
+        b.insert("C", set(&["z"]));
+
+        let diff = a.psubtract(&b).unwrap([&a, &b]);
+        assert_eq!(diff.len(), 2);
+        assert_eq!(diff.get("A"), Some(&set(&["1"])));
+        assert_eq!(diff.get("B"), Some(&set(&["x"])));
+        assert_eq!(diff.get("C"), None);
+
+        let mut in_place = a.clone();
+        assert_eq!(in_place.subtract_into(&b), AlgebraicStatus::Element);
+        assert_eq!(in_place, diff);
+
+        let mut emptying = a.clone();
+        assert_eq!(emptying.subtract_into(&a), AlgebraicStatus::None);
+        assert!(emptying.is_empty());
     }
 
     /// Used in [set_lattice_join_test2] and [set_lattice_meet_test2]
@@ -1420,7 +1706,6 @@ mod tests {
     }
 }
 
-//GOAT, do a test for the HashMap impl of psubtract
 //GOAT, do an impl of SetLattice for Vec as an indexed set
 
 

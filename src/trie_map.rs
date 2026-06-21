@@ -741,6 +741,9 @@ impl<V: Clone + Lattice + Send + Sync + Unpin, A: Allocator> Lattice for PathMap
             AlgebraicResult::Element(Self::new_with_root_in(root_node.flatten(), root_val.flatten(), self.alloc.clone()))
         })
     }
+    fn meet_into(&mut self, other: &Self) -> AlgebraicStatus {
+        self.write_zipper().meet_into(&other.read_zipper(), true)
+    }
 }
 
 impl<V: Clone + Send + Sync + Unpin + DistributiveLattice, A: Allocator> DistributiveLattice for PathMap<V, A> {
@@ -762,6 +765,9 @@ impl<V: Clone + Send + Sync + Unpin + DistributiveLattice, A: Allocator> Distrib
         }, |root_node, root_val| {
             AlgebraicResult::Element(Self::new_with_root_in(root_node.flatten(), root_val.flatten(), self.alloc.clone()))
         })
+    }
+    fn subtract_into(&mut self, other: &Self) -> AlgebraicStatus {
+        self.write_zipper().subtract_into(&other.read_zipper(), true)
     }
 }
 
@@ -798,6 +804,7 @@ impl<V: Clone + Send + Sync + Unpin> Default for PathMap<V> {
 
 #[cfg(test)]
 mod tests {
+use crate::ring::{AlgebraicStatus, DistributiveLattice};
     use crate::trie_map::*;
     use crate::ring::Lattice;
 
@@ -1058,6 +1065,47 @@ mod tests {
             assert_eq!(rs[*i].as_bytes(), &path);
         }
         assert_eq!(a.val_count(), rs.len());
+    }
+
+    #[test]
+    fn map_meet_and_subtract_into_trait_overrides() {
+        let mut a = PathMap::<()>::new();
+        a.set_val_at([], ());
+        a.set_val_at("AA", ());
+        a.set_val_at("AB", ());
+
+        let mut b = PathMap::<()>::new();
+        b.set_val_at("AA", ());
+        b.set_val_at("BB", ());
+
+        let mut met = a.clone();
+        assert_eq!(Lattice::meet_into(&mut met, &b), AlgebraicStatus::Element);
+        assert_eq!(met.get_val_at([]), None);
+        assert_eq!(met.get_val_at("AA"), Some(&()));
+        assert_eq!(met.get_val_at("AB"), None);
+        assert_eq!(met.get_val_at("BB"), None);
+        assert_eq!(Lattice::meet_into(&mut met, &b), AlgebraicStatus::Identity);
+
+        let mut subtracted = a.clone();
+        assert_eq!(
+            DistributiveLattice::subtract_into(&mut subtracted, &b),
+            AlgebraicStatus::Element
+        );
+        assert_eq!(subtracted.get_val_at([]), Some(&()));
+        assert_eq!(subtracted.get_val_at("AA"), None);
+        assert_eq!(subtracted.get_val_at("AB"), Some(&()));
+        assert_eq!(subtracted.get_val_at("BB"), None);
+        assert_eq!(
+            DistributiveLattice::subtract_into(&mut subtracted, &b),
+            AlgebraicStatus::Identity
+        );
+
+        let mut emptying = a.clone();
+        assert_eq!(
+            DistributiveLattice::subtract_into(&mut emptying, &a),
+            AlgebraicStatus::None
+        );
+        assert!(emptying.is_empty());
     }
 
     #[cfg(feature = "old_cursor")]
