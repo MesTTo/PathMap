@@ -1,9 +1,19 @@
 
+[alias]
+perf-lints = "clippy --all-targets --all-features -- -A clippy::all -D clippy::perf"
+bench-scout = "bench --bench write_zipper_scout --features counters -- --sample-count 10"
+bench-node-layout = "bench --bench node_layout --features counters -- --sample-count 20"
+bench-cata-context = "bench --bench cata_context -- --sample-count 20"
+bloat-top = "bloat --release -n 20"
+llvm-lines-top = "llvm-lines --release"
+flamegraph-scout = "flamegraph --bench write_zipper_scout --features counters -- --sample-count 10"
+samply-scout = "samply --no-profile-inject --bench write_zipper_scout --features counters -- --sample-count 10"
+
 [build]
 
 [target.x86_64-unknown-linux-gnu]
 # rustflags = "-C target-cpu=native -C lto=fat -C embed-bitcode=yes -Z dylib-lto"
-rustflags = "-C target-cpu=native"
+rustflags = ["-C", "target-cpu=native"]
 
 # prerequisites:
 # sudo apt install qemu-user binutils-riscv64-linux-gnu gcc-riscv64-linux-gnu clang-22

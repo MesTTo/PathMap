@@ -46,8 +46,28 @@ Another consideration is whether we want a solution that extends beyond just cat
 
 ## Current Thinking
 
-* Eventually support a `logical_cached_cata` (name subject to debate) that provides a path arg to the closure, and the prefix that becomes part of the cached value's hash (option 2).
+* `PathScope` is the safe version of the old hybrid idea. The caller declares
+  `None`, `Suffix(n)`, or `Full`; the implementation passes only that declared
+  context to the closure and includes it in the cache key when needed. This
+  avoids asking users to report how many path bytes they used after seeing the
+  full path, which would make under-reporting a silent cache-corruption bug.
 
-* Update ACT format and zipper to support structural sharing.
+* A structure-aware cata can still be layered on top later. The current
+  contextual cached cata keeps the low-level byte residual API and makes the
+  cache invariant explicit: `W` is reusable at another occurrence of the same
+  residual only when the declared path context is equal.
+
+* `benches/cata_context.rs` measures the intended cost model over a shared
+  residual DAG: `Suffix(0)` keeps structural cache reuse, bounded suffix scopes
+  widen the cache key only as requested, and `Full` pays for absolute-prefix
+  sensitivity.
+
+* Update ACT format and zipper to support structural sharing. ACT should remain
+  the compact read-only format, but a v2 format should represent shared
+  residuals directly rather than requiring all logical sibling subtries to be
+  physically contiguous. Plausible encodings include per-child offsets into a
+  node arena or an out-of-line child table whose entries can point at already
+  serialized residuals. The important invariant is that a shared residual has
+  one physical representation and many incoming references.
 
 {{#include api_links.md}}

@@ -1,7 +1,6 @@
-
-use crate::alloc::{Allocator, GlobalAlloc};
-use crate::utils::ByteMask;
+use crate::alloc::{global_alloc, Allocator, GlobalAlloc};
 use crate::trie_node::*;
+use crate::utils::ByteMask;
 use crate::zipper::*;
 use zipper_priv::*;
 
@@ -15,12 +14,18 @@ pub struct ProductZipper<'factor_z, 'trie, V: Clone + Send + Sync, A: Allocator 
     /// which is conceptually the same as the end-point of each indexed factor
     factor_paths: Vec<usize>,
     /// We need to hang onto the zippers for the life of this object, so their trackers stay alive
-    source_zippers: Vec<Box<dyn ZipperSubtries<V, A> + 'factor_z>>
+    source_zippers: Vec<Box<dyn ZipperSubtries<V, A> + 'factor_z>>,
 }
 
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ProductZipper<'_, '_, V, A> {
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug
+    for ProductZipper<'_, '_, V, A>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let path = crate::utils::debug::render_debug_path(self.path(), crate::utils::debug::PathRenderMode::TryAscii).unwrap();
+        let path = crate::utils::debug::render_debug_path(
+            self.path(),
+            crate::utils::debug::PathRenderMode::TryAscii,
+        )
+        .unwrap();
         f.debug_struct("ProductZipper")
             .field("path", &path)
             .field("is_val", &self.is_val())
@@ -32,23 +37,27 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ProductZ
     }
 }
 
-impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipper<'factor_z, 'trie, V, A> {
+impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator>
+    ProductZipper<'factor_z, 'trie, V, A>
+{
     /// Creates a new `ProductZipper` from the provided zippers
     ///
-    /// Panics if any of the provided factor zippers return `false` from the [`ZipperSubtries::native_subtries`].
-    ///
-    /// WARNING: passing `other_zippers` that are not at node roots may lead to a panic.  This is
-    /// an implementation issue, but would be very difficult to fix and may not be worth fixing.
-    pub fn new<PrimaryZ, OtherZ, ZipperList>(mut primary_z: PrimaryZ, other_zippers: ZipperList) -> Self
-        where
+    /// Secondary factors that cannot expose a node-root [`TrieRef`] are materialized into owned
+    /// maps before use. This preserves correctness for focused or virtual residuals while keeping
+    /// the constant-time borrowed path for node-root factors.
+    pub fn new<PrimaryZ, OtherZ, ZipperList>(
+        mut primary_z: PrimaryZ,
+        other_zippers: ZipperList,
+    ) -> Self
+    where
         PrimaryZ: ZipperMoving + ZipperReadOnlySubtries<'trie, V, A> + 'factor_z,
         OtherZ: ZipperSubtries<V, A> + 'factor_z,
-        ZipperList: IntoIterator<Item=OtherZ>,
+        ZipperList: IntoIterator<Item = OtherZ>,
     {
         let other_z_iter = other_zippers.into_iter();
         let (mut secondaries, mut source_zippers) = match other_z_iter.size_hint() {
-            (_, Some(hint)) => (Vec::with_capacity(hint), Vec::with_capacity(hint+1)),
-            (_, None) => (Vec::new(), Vec::new())
+            (_, Some(hint)) => (Vec::with_capacity(hint), Vec::with_capacity(hint + 1)),
+            (_, None) => (Vec::new(), Vec::new()),
         };
 
         //Get the core out of the primary zipper
@@ -58,19 +67,23 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
 
         //Get TrieRefs for the remaining zippers
         for other_z in other_z_iter {
-            //SAFETY: We ensure the trie accessible from this TrieRef remains accessible by ensuring the zipper
-            // won't be dropped until the PZ is dropped
-            let trie_ref: TrieRef<'trie, V, A> = unsafe{ core::mem::transmute(other_z.trie_ref().unwrap()) };
+            let trie_ref = Self::secondary_trie_ref(&other_z);
             secondaries.push(trie_ref);
             source_zippers.push(Box::new(other_z));
         }
 
-        Self{z: core_z, factor_paths: Vec::with_capacity(secondaries.len()), secondaries, source_zippers}
+        Self {
+            z: core_z,
+            factor_paths: Vec::with_capacity(secondaries.len()),
+            secondaries,
+            source_zippers,
+        }
     }
     /// Creates a new `ProductZipper` from a single zipper, with the expectation that more zippers
     /// will be added using [new_factors](Self::new_factors)
     pub fn new_with_primary<PrimaryZ>(mut primary_z: PrimaryZ) -> Self
-        where PrimaryZ: ZipperMoving + ZipperReadOnlySubtries<'trie, V, A> + 'factor_z,
+    where
+        PrimaryZ: ZipperMoving + ZipperReadOnlySubtries<'trie, V, A> + 'factor_z,
     {
         let mut source_zippers = Vec::new();
 
@@ -79,27 +92,51 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
         let core_z = primary_z.take_core().unwrap();
         source_zippers.push(Box::new(primary_z) as Box<dyn ZipperSubtries<V, A>>);
 
-        Self{z: core_z, factor_paths: Vec::new(), secondaries: vec![], source_zippers}
+        Self {
+            z: core_z,
+            factor_paths: Vec::new(),
+            secondaries: vec![],
+            source_zippers,
+        }
     }
     /// Appends additional factors to a `ProductZipper`.  This is useful when dealing with
     /// factor zippers of different types
     ///
-    /// Panics the provided factor zipper returns `false` from the [`ZipperSubtries::native_subtries`].
-    ///
-    /// WARNING: the same warning as above applies about passing other zippers that aren't at node roots
+    /// Secondary factors that cannot expose a node-root [`TrieRef`] are materialized into owned
+    /// maps before use. This preserves correctness for focused or virtual residuals while keeping
+    /// the constant-time borrowed path for node-root factors.
     pub fn new_factors<OtherZ, ZipperList>(&mut self, other_zippers: ZipperList)
-        where
+    where
         OtherZ: ZipperSubtries<V, A> + 'factor_z,
-        ZipperList: IntoIterator<Item=OtherZ>,
+        ZipperList: IntoIterator<Item = OtherZ>,
     {
         let other_z_iter = other_zippers.into_iter();
         for other_z in other_z_iter {
-            //SAFETY: We ensure the trie accessible from this TrieRef remains accessible by ensuring the zipper
-            // won't be dropped until the PZ is dropped
-            let trie_ref: TrieRef<'trie, V, A> = unsafe{ core::mem::transmute(other_z.trie_ref().unwrap()) };
+            let trie_ref = Self::secondary_trie_ref(&other_z);
             self.secondaries.push(trie_ref);
             self.source_zippers.push(Box::new(other_z));
         }
+    }
+    fn secondary_trie_ref<OtherZ>(other_z: &OtherZ) -> TrieRef<'trie, V, A>
+    where
+        OtherZ: ZipperSubtries<V, A>,
+    {
+        if let Some(trie_ref) = other_z.trie_ref() {
+            let (_, partial_path, _) = trie_ref.borrow_raw_parts();
+            if partial_path.is_empty() {
+                // SAFETY: Borrowed TrieRefs remain valid because `ProductZipper` stores the source
+                // zipper for at least as long as the returned `TrieRef` is used. Owned TrieRefs are
+                // independent of this lifetime and are safe to widen here as well.
+                return unsafe { core::mem::transmute(trie_ref) };
+            }
+        }
+
+        let map = other_z.try_make_map().unwrap_or_else(|| {
+            panic!(
+                "ProductZipper secondary factor is not rooted at a concrete node and cannot be materialized"
+            )
+        });
+        TrieRef::from(map)
     }
     /// Reserves a path buffer of at least `len` bytes.  Will never shrink the path buffer
     /// NOTE, this doesn't offer any value over the standard `reserve_buffers` method which is now implemented
@@ -116,32 +153,34 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
     fn enroll_next_factor(&mut self) {
         //If there is a `_secondary_root_val`, it lands at the same path as the value where the
         // paths are joined.  And the value from the earlier zipper takes precedence
-        let (secondary_root, partial_path, _secondary_root_val) = self.secondaries[self.factor_paths.len()].borrow_raw_parts();
+        let (secondary_root, partial_path, _secondary_root_val) =
+            self.secondaries[self.factor_paths.len()].borrow_raw_parts();
 
         //SAFETY: We won't drop the `secondaries` vec until we're done with the stack of node references
-        let secondary_root: TaggedNodeRef<'trie, V, A> = unsafe{ core::mem::transmute(secondary_root) };
+        let secondary_root: TaggedNodeRef<'trie, V, A> =
+            unsafe { core::mem::transmute(secondary_root) };
 
-        //TODO! Dealing with hidden root path in a secondary factor is very nasty.  I'm going to punt
-        // on handling this until we move this feature out of the experimental stage.
-        //See "WARNING" in ProductZipper creation methods
+        // Secondary factors are normalized at construction. If the source factor had a hidden
+        // root path, it was materialized into an owned map before being stored here.
         assert_eq!(partial_path.len(), 0);
 
         self.z.deregularize();
         self.z.push_node(secondary_root);
         self.factor_paths.push(self.path().len());
+        #[cfg(feature = "counters")]
+        crate::counters::record_product_factor_entry();
     }
     /// Internal method to descend across the boundary between two factor zippers if the focus is on a value
     ///
     /// The ProductZipper's internal representation can be a bit tricky.  See the documentation on
-    /// `product_zipper_test4` for more discussion.
+    /// `product_zipper_test4` for the motivating example.
     #[inline]
     fn ensure_descend_next_factor(&mut self) {
         if self.factor_paths.len() < self.secondaries.len() && self.z.child_count() == 0 {
-
             //We don't want to push the same factor on the stack twice
             if let Some(factor_path_len) = self.factor_paths.last() {
                 if *factor_path_len == self.path().len() {
-                    return
+                    return;
                 }
             }
 
@@ -155,13 +194,15 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
             if self.z.path().len() < *factor_path_start {
                 self.factor_paths.pop();
             } else {
-                break
+                break;
             }
         }
     }
 }
 
-impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperMoving for ProductZipper<'_, 'trie, V, A> {
+impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperMoving
+    for ProductZipper<'_, 'trie, V, A>
+{
     fn at_root(&self) -> bool {
         self.path().len() == 0
     }
@@ -184,16 +225,18 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         while descended < k.len() {
             let this_step = self.z.descend_to_existing(&k[descended..]);
             if this_step == 0 {
-                break
+                break;
             }
             descended += this_step;
 
             if self.has_next_factor() {
-                if self.z.child_count() == 0 && self.factor_paths.last().map(|l| *l).unwrap_or(0) < self.path().len() {
+                if self.z.child_count() == 0
+                    && self.factor_paths.last().map(|l| *l).unwrap_or(0) < self.path().len()
+                {
                     self.enroll_next_factor();
                 }
             } else {
-                break
+                break;
             }
         }
         descended
@@ -210,7 +253,7 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         let descended = self.descend_to_existing(k);
         if descended != k.len() {
             self.z.descend_to(&k[descended..]);
-            return false
+            return false;
         }
         true
     }
@@ -220,7 +263,9 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         if self.z.child_count() == 0 {
             if self.has_next_factor() {
                 if self.z.path_exists() {
-                    debug_assert!(self.factor_paths.last().map(|l| *l).unwrap_or(0) < self.path().len());
+                    debug_assert!(
+                        self.factor_paths.last().map(|l| *l).unwrap_or(0) < self.path().len()
+                    );
                     self.enroll_next_factor();
                     if self.z.node_key().len() > 0 {
                         self.z.regularize();
@@ -234,7 +279,9 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         let descended = self.z.descend_to_existing_byte(k);
         if descended && self.z.child_count() == 0 {
             if self.has_next_factor() {
-                debug_assert!(self.factor_paths.last().map(|l| *l).unwrap_or(0) < self.path().len());
+                debug_assert!(
+                    self.factor_paths.last().map(|l| *l).unwrap_or(0) < self.path().len()
+                );
                 self.enroll_next_factor();
                 if self.z.node_key().len() > 0 {
                     self.z.regularize();
@@ -302,36 +349,56 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
     }
 }
 
-impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperIteration for ProductZipper<'_, 'trie, V, A> { } //Use the default impl for all methods
+impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperIteration
+    for ProductZipper<'_, 'trie, V, A>
+{
+} //Use the default impl for all methods
 
-impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperValues<V> for ProductZipper<'_, 'trie, V, A> {
+impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperValues<V>
+    for ProductZipper<'_, 'trie, V, A>
+{
     fn val(&self) -> Option<&V> {
-        unsafe{ self.z.get_val() }
+        unsafe { self.z.get_val() }
     }
 }
 
 /// A [`witness`](ZipperReadOnlyConditionalValues::witness) type used by [`ProductZipper`]
-pub struct ProductZipperWitness<V: Clone + Send + Sync, A: Allocator>((ReadZipperWitness<V, A>, Vec<TrieRefOwned<V, A>>));
+#[allow(
+    dead_code,
+    reason = "the witness owns refs to keep borrowed zipper nodes alive across conditional reads"
+)]
+pub struct ProductZipperWitness<V: Clone + Send + Sync, A: Allocator>(
+    (ReadZipperWitness<V, A>, Vec<TrieRefOwned<V, A>>),
+);
 
-impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperReadOnlyConditionalValues<'trie, V> for ProductZipper<'factor_z, 'trie, V, A> {
+impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie>
+    ZipperReadOnlyConditionalValues<'trie, V> for ProductZipper<'factor_z, 'trie, V, A>
+{
     type WitnessT = ProductZipperWitness<V, A>;
     fn witness<'w>(&self) -> Self::WitnessT {
         let primary_witness = self.z.witness();
-        let secondary_witnesses = self.secondaries.iter().filter_map(|trie_ref| {
-            match trie_ref {
+        let secondary_witnesses = self
+            .secondaries
+            .iter()
+            .filter_map(|trie_ref| match trie_ref {
                 TrieRef::Owned(trie_ref) => Some(trie_ref.clone()),
-                TrieRef::Borrowed(_) => None
-            }
-        }).collect();
+                TrieRef::Borrowed(_) => None,
+            })
+            .collect();
         ProductZipperWitness((primary_witness, secondary_witnesses))
     }
-    fn get_val_with_witness<'w>(&self, _witness: &'w Self::WitnessT) -> Option<&'w V> where 'trie: 'w {
+    fn get_val_with_witness<'w>(&self, _witness: &'w Self::WitnessT) -> Option<&'w V>
+    where
+        'trie: 'w,
+    {
         //SAFETY: We know the witnesses are keeping the nodes we're borrowing from alive
-        unsafe{ self.z.get_val() }
+        unsafe { self.z.get_val() }
     }
 }
 
-impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper for ProductZipper<'_, 'trie, V, A> {
+impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
+    for ProductZipper<'_, 'trie, V, A>
+{
     #[inline]
     fn path_exists(&self) -> bool {
         self.z.path_exists()
@@ -348,19 +415,37 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ProductZipper<'_, '_, V, A> {
-    fn shared_node_id(&self) -> Option<u64> { self.z.shared_node_id() }
-    fn is_shared(&self) -> bool { self.z.is_shared() }
+    fn shared_node_id(&self) -> Option<u64> {
+        self.z.shared_node_id()
+    }
+    fn is_shared(&self) -> bool {
+        self.z.is_shared()
+    }
 }
 
-impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperPathBuffer for ProductZipper<'_, 'trie, V, A> {
-    unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.origin_path_assert_len(len) } }
-    fn prepare_buffers(&mut self) { self.z.prepare_buffers() }
-    fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) { self.z.reserve_buffers(path_len, stack_depth) }
+impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperPathBuffer
+    for ProductZipper<'_, 'trie, V, A>
+{
+    unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
+        unsafe { self.z.origin_path_assert_len(len) }
+    }
+    fn prepare_buffers(&mut self) {
+        self.z.prepare_buffers()
+    }
+    fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) {
+        self.z.reserve_buffers(path_len, stack_depth)
+    }
 }
 
-impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperAbsolutePath for ProductZipper<'_, 'trie, V, A> {
-    fn origin_path(&self) -> &[u8] { self.z.origin_path() }
-    fn root_prefix_path(&self) -> &[u8] { self.z.root_prefix_path() }
+impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperAbsolutePath
+    for ProductZipper<'_, 'trie, V, A>
+{
+    fn origin_path(&self) -> &[u8] {
+        self.z.origin_path()
+    }
+    fn root_prefix_path(&self) -> &[u8] {
+        self.z.root_prefix_path()
+    }
 }
 
 /// A [Zipper] type that moves through a Cartesian product trie created by extending each path in a primary
@@ -372,28 +457,29 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
 ///
 /// NOTE: In the future, this generic type will be renamed to `ProductZipper`, and the existing
 /// [ProductZipper] will be renamed something else or removed entirely.
+#[derive(Clone)]
 pub struct ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
-    where
-        V: Clone + Send + Sync,
+where
+    V: Clone + Send + Sync,
 {
     factor_paths: Vec<usize>,
     primary: PrimaryZ,
     secondary: Vec<SecondaryZ>,
-    _marker: core::marker::PhantomData<&'trie V>
+    _marker: core::marker::PhantomData<&'trie V>,
 }
 
 impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
-    where
-        V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving,
-        SecondaryZ: ZipperMoving,
+where
+    V: Clone + Send + Sync,
+    PrimaryZ: ZipperMoving,
+    SecondaryZ: ZipperMoving,
 {
     /// Creates a new `ProductZipper` from the provided zippers
     pub fn new<ZipperList>(primary: PrimaryZ, other_zippers: ZipperList) -> Self
-        where
-            ZipperList: IntoIterator<Item=SecondaryZ>,
-            PrimaryZ: ZipperValues<V>,
-            SecondaryZ: ZipperValues<V>,
+    where
+        ZipperList: IntoIterator<Item = SecondaryZ>,
+        PrimaryZ: ZipperValues<V>,
+        SecondaryZ: ZipperValues<V>,
     {
         Self {
             factor_paths: Vec::new(),
@@ -442,6 +528,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ,
         let mut entered = false;
         if self.factor_paths.len() < self.secondary.len() && self.is_path_end() {
             self.factor_paths.push(len);
+            #[cfg(feature = "counters")]
+            crate::counters::record_product_factor_entry();
             entered = true;
         }
         entered
@@ -501,21 +589,25 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ,
 
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperAbsolutePath
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
-    where
-        V: Clone + Send + Sync,
-        PrimaryZ: ZipperAbsolutePath,
-        SecondaryZ: ZipperMoving,
+where
+    V: Clone + Send + Sync,
+    PrimaryZ: ZipperAbsolutePath,
+    SecondaryZ: ZipperMoving,
 {
-    fn origin_path(&self) -> &[u8] { self.primary.origin_path() }
-    fn root_prefix_path(&self) -> &[u8] { self.primary.root_prefix_path() }
+    fn origin_path(&self) -> &[u8] {
+        self.primary.origin_path()
+    }
+    fn root_prefix_path(&self) -> &[u8] {
+        self.primary.root_prefix_path()
+    }
 }
 
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperConcrete
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
-    where
-        V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperConcrete,
-        SecondaryZ: ZipperMoving + ZipperConcrete,
+where
+    V: Clone + Send + Sync,
+    PrimaryZ: ZipperMoving + ZipperConcrete,
+    SecondaryZ: ZipperMoving + ZipperConcrete,
 {
     fn shared_node_id(&self) -> Option<u64> {
         if let Some(idx) = self.factor_idx(true) {
@@ -535,22 +627,28 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperConcrete
 
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperPathBuffer
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
-    where
-        V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperPathBuffer,
-        SecondaryZ: ZipperMoving + ZipperPathBuffer,
+where
+    V: Clone + Send + Sync,
+    PrimaryZ: ZipperMoving + ZipperPathBuffer,
+    SecondaryZ: ZipperMoving + ZipperPathBuffer,
 {
-    unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.primary.origin_path_assert_len(len) } }
-    fn prepare_buffers(&mut self) { self.primary.prepare_buffers() }
-    fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) { self.primary.reserve_buffers(path_len, stack_depth) }
+    unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
+        unsafe { self.primary.origin_path_assert_len(len) }
+    }
+    fn prepare_buffers(&mut self) {
+        self.primary.prepare_buffers()
+    }
+    fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) {
+        self.primary.reserve_buffers(path_len, stack_depth)
+    }
 }
 
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperValues<V>
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
-    where
-        V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperValues<V>,
-        SecondaryZ: ZipperMoving + ZipperValues<V>,
+where
+    V: Clone + Send + Sync,
+    PrimaryZ: ZipperMoving + ZipperValues<V>,
+    SecondaryZ: ZipperMoving + ZipperValues<V>,
 {
     fn val(&self) -> Option<&V> {
         if let Some(idx) = self.factor_idx(true) {
@@ -563,10 +661,10 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperValues<V>
 
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperReadOnlyValues<'trie, V>
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
-    where
-        V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperReadOnlyValues<'trie, V>,
-        SecondaryZ: ZipperMoving + ZipperReadOnlyValues<'trie, V>,
+where
+    V: Clone + Send + Sync,
+    PrimaryZ: ZipperMoving + ZipperReadOnlyValues<'trie, V>,
+    SecondaryZ: ZipperMoving + ZipperReadOnlyValues<'trie, V>,
 {
     fn get_val(&self) -> Option<&'trie V> {
         if let Some(idx) = self.factor_idx(true) {
@@ -579,18 +677,25 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperReadOnlyValues<'trie, V>
 
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperReadOnlyConditionalValues<'trie, V>
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
-    where
-        V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperReadOnlyConditionalValues<'trie, V>,
-        SecondaryZ: ZipperMoving + ZipperReadOnlyConditionalValues<'trie, V>,
+where
+    V: Clone + Send + Sync,
+    PrimaryZ: ZipperMoving + ZipperReadOnlyConditionalValues<'trie, V>,
+    SecondaryZ: ZipperMoving + ZipperReadOnlyConditionalValues<'trie, V>,
 {
     type WitnessT = (PrimaryZ::WitnessT, Vec<SecondaryZ::WitnessT>);
     fn witness<'w>(&self) -> Self::WitnessT {
         let primary_witness = self.primary.witness();
-        let secondary_witnesses = self.secondary.iter().map(|secondary| secondary.witness()).collect();
+        let secondary_witnesses = self
+            .secondary
+            .iter()
+            .map(|secondary| secondary.witness())
+            .collect();
         (primary_witness, secondary_witnesses)
     }
-    fn get_val_with_witness<'w>(&self, witness: &'w Self::WitnessT) -> Option<&'w V> where 'trie: 'w {
+    fn get_val_with_witness<'w>(&self, witness: &'w Self::WitnessT) -> Option<&'w V>
+    where
+        'trie: 'w,
+    {
         if let Some(idx) = self.factor_idx(true) {
             self.secondary[idx].get_val_with_witness(&witness.1[idx])
         } else {
@@ -600,10 +705,10 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperReadOnlyConditionalValues<'trie, V>
 }
 
 impl<'trie, PrimaryZ, SecondaryZ, V> Zipper for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
-    where
-        V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + Zipper,
-        SecondaryZ: ZipperMoving + Zipper,
+where
+    V: Clone + Send + Sync,
+    PrimaryZ: ZipperMoving + Zipper,
+    SecondaryZ: ZipperMoving + Zipper,
 {
     fn path_exists(&self) -> bool {
         if let Some(idx) = self.factor_idx(true) {
@@ -636,10 +741,10 @@ impl<'trie, PrimaryZ, SecondaryZ, V> Zipper for ProductZipperG<'trie, PrimaryZ, 
 }
 
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
-    where
-        V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving,
-        SecondaryZ: ZipperMoving,
+where
+    V: Clone + Send + Sync,
+    PrimaryZ: ZipperMoving,
+    SecondaryZ: ZipperMoving,
 {
     fn at_root(&self) -> bool {
         self.path().is_empty()
@@ -683,7 +788,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
         let path = path.as_ref();
         let good = self.descend_to_existing(path);
         if good == path.len() {
-            return
+            return;
         }
         let rest = &path[good..];
         if let Some(idx) = self.factor_idx(false) {
@@ -726,7 +831,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
             };
             self.enter_factors();
             if self.is_val() {
-                break
+                break;
             }
         }
         moved
@@ -769,12 +874,37 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
 }
 
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperIteration
-for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
-    where
-        V: Clone + Send + Sync,
-        PrimaryZ: ZipperIteration,
-        SecondaryZ: ZipperIteration,
-{ } //Use the default impl for all methods
+    for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
+where
+    V: Clone + Send + Sync,
+    PrimaryZ: ZipperIteration,
+    SecondaryZ: ZipperIteration,
+{
+} //Use the default impl for all methods
+
+impl<'trie, PrimaryZ, SecondaryZ, V> ZipperSubtries<V, GlobalAlloc>
+    for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
+where
+    V: Clone + Send + Sync + Unpin,
+    PrimaryZ: ZipperMoving + ZipperValues<V> + Clone,
+    SecondaryZ: ZipperMoving + ZipperValues<V> + Clone,
+{
+    fn native_subtries(&self) -> bool {
+        false
+    }
+
+    fn try_make_map(&self) -> Option<crate::PathMap<V, GlobalAlloc>> {
+        Some(materialize_zipper(self.clone(), global_alloc()))
+    }
+
+    fn trie_ref(&self) -> Option<TrieRef<'_, V, GlobalAlloc>> {
+        None
+    }
+
+    fn alloc(&self) -> GlobalAlloc {
+        global_alloc()
+    }
+}
 
 impl_zipper_debug!(
     impl<V: Clone + Send + Sync + Unpin, PrimaryZ, SecondaryZ> core::fmt::Debug for ProductZipperG<'_, PrimaryZ, SecondaryZ, V>
@@ -782,7 +912,7 @@ impl_zipper_debug!(
 );
 
 /// Implemented on both [ProductZipper] types to provide abstraction across them
-pub trait ZipperProduct : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration {
+pub trait ZipperProduct: ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration {
     /// Returns the number of factors composing the `ProductZipper`
     ///
     /// The minimum returned value will be 1 because the primary factor is counted.
@@ -806,7 +936,9 @@ pub trait ZipperProduct : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIte
     fn path_indices(&self) -> &[usize];
 }
 
-impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ZipperProduct for ProductZipper<'_, 'trie, V, A> {
+impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ZipperProduct
+    for ProductZipper<'_, 'trie, V, A>
+{
     fn factor_count(&self) -> usize {
         self.secondaries.len() + 1
     }
@@ -819,8 +951,8 @@ impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ZipperProduct for Prod
                 } else {
                     factor_idx - 1
                 }
-            },
-            None => 0
+            }
+            None => 0,
         }
     }
     fn path_indices(&self) -> &[usize] {
@@ -828,9 +960,11 @@ impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ZipperProduct for Prod
     }
 }
 
-impl <'trie, PZ, SZ, V: crate::TrieValue> ZipperProduct for ProductZipperG<'trie, PZ, SZ, V> where
-    PZ : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration,
-    SZ : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration {
+impl<'trie, PZ, SZ, V: crate::TrieValue> ZipperProduct for ProductZipperG<'trie, PZ, SZ, V>
+where
+    PZ: ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration,
+    SZ: ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration,
+{
     fn focus_factor(&self) -> usize {
         self.factor_idx(true).map_or(0, |x| x + 1)
     }
@@ -844,16 +978,18 @@ impl <'trie, PZ, SZ, V: crate::TrieValue> ZipperProduct for ProductZipperG<'trie
 
 /// A simple wrapper that lifts a Zipper into a single-factor product zipper
 pub struct OneFactor<Z> {
-    z: Z
+    z: Z,
 }
 
-impl <Z : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration> OneFactor<Z> {
+impl<Z: ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration> OneFactor<Z> {
     pub fn new(z: Z) -> Self {
-        OneFactor{ z }
+        OneFactor { z }
     }
 }
 
-impl <Z : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration> ZipperProduct for OneFactor<Z> {
+impl<Z: ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration> ZipperProduct
+    for OneFactor<Z>
+{
     fn focus_factor(&self) -> usize {
         0
     }
@@ -865,30 +1001,388 @@ impl <Z : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration> ZipperPr
     }
 }
 
-impl <Z : Zipper> Zipper for OneFactor<Z> { zipper_impl_lens!(Zipper self => self.z); }
-impl <Z : ZipperAbsolutePath> ZipperAbsolutePath for OneFactor<Z> { zipper_impl_lens!(ZipperAbsolutePath self => self.z); }
-impl <Z : ZipperMoving> ZipperMoving for OneFactor<Z> { zipper_impl_lens!(ZipperMoving self => self.z); }
-impl <Z : ZipperIteration> ZipperIteration for OneFactor<Z> { zipper_impl_lens!(ZipperIteration self => self.z); }
-impl <V, Z : ZipperValues<V>> ZipperValues<V> for OneFactor<Z> { zipper_impl_lens!(ZipperValues self => self.z); }
-impl <V, Z : ZipperForking<V>> ZipperForking<V> for OneFactor<Z> { type ReadZipperT<'a> = Z::ReadZipperT<'a> where Z: 'a; zipper_impl_lens!(ZipperForking self => self.z); }
-impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperSubtries<V, A>> ZipperSubtries<V, A> for OneFactor<Z> { zipper_impl_lens!(ZipperSubtries self => self.z); }
-impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperInfallibleSubtries<V, A>> ZipperInfallibleSubtries<V, A> for OneFactor<Z> { zipper_impl_lens!(ZipperInfallibleSubtries self => self.z); }
-impl<'a, V: Clone + Send + Sync, Z> ZipperReadOnlyValues<'a, V> for OneFactor<Z> where Z: ZipperReadOnlyValues<'a, V>, Self: ZipperValues<V> { zipper_impl_lens!(ZipperReadOnlyValues self => self.z); }
-impl<'a, V: Clone + Send + Sync, Z> ZipperReadOnlyConditionalValues<'a, V> for OneFactor<Z> where Z: ZipperReadOnlyConditionalValues<'a, V>, Self: ZipperValues<V> { type WitnessT = Z::WitnessT; zipper_impl_lens!(ZipperReadOnlyConditionalValues self => self.z); }
-impl<'a, V, Z> ZipperReadOnlyIteration<'a, V> for OneFactor<Z> where Z: ZipperReadOnlyIteration<'a, V>, Self: ZipperReadOnlyValues<'a, V> + ZipperIteration { zipper_impl_lens!(ZipperReadOnlyIteration self => self.z); }
-impl<'a, V, Z> ZipperReadOnlyConditionalIteration<'a, V> for OneFactor<Z> where Z: ZipperReadOnlyConditionalIteration<'a, V>, Self: ZipperReadOnlyConditionalValues<'a, V, WitnessT = Z::WitnessT> + ZipperIteration { zipper_impl_lens!(ZipperReadOnlyConditionalIteration self => self.z); }
-impl<'a, V: Clone + Send + Sync + 'a, Z, A: Allocator + 'a> ZipperReadOnlySubtries<'a, V, A> for OneFactor<Z> where Z: ZipperReadOnlySubtries<'a, V, A>, Self: ZipperReadOnlyPriv<'a, V, A> + ZipperSubtries<V, A> { zipper_impl_lens!(ZipperReadOnlySubtries self => self.z); }
-impl<Z> ZipperConcrete for OneFactor<Z> where Z: ZipperConcrete { zipper_impl_lens!(ZipperConcrete self => self.z); }
-impl<Z> ZipperPathBuffer for OneFactor<Z> where Z: ZipperPathBuffer { zipper_impl_lens!(ZipperPathBuffer self => self.z); }
-
+impl<Z: Zipper> Zipper for OneFactor<Z> {
+    zipper_impl_lens!(Zipper self => self.z);
+}
+impl<Z: ZipperAbsolutePath> ZipperAbsolutePath for OneFactor<Z> {
+    zipper_impl_lens!(ZipperAbsolutePath self => self.z);
+}
+impl<Z: ZipperMoving> ZipperMoving for OneFactor<Z> {
+    zipper_impl_lens!(ZipperMoving self => self.z);
+}
+impl<Z: ZipperIteration> ZipperIteration for OneFactor<Z> {
+    zipper_impl_lens!(ZipperIteration self => self.z);
+}
+impl<V, Z: ZipperValues<V>> ZipperValues<V> for OneFactor<Z> {
+    zipper_impl_lens!(ZipperValues self => self.z);
+}
+impl<V, Z: ZipperForking<V>> ZipperForking<V> for OneFactor<Z> {
+    type ReadZipperT<'a>
+        = Z::ReadZipperT<'a>
+    where
+        Z: 'a;
+    zipper_impl_lens!(ZipperForking self => self.z);
+}
+impl<V: Clone + Send + Sync, A: Allocator, Z: ZipperSubtries<V, A>> ZipperSubtries<V, A>
+    for OneFactor<Z>
+{
+    zipper_impl_lens!(ZipperSubtries self => self.z);
+}
+impl<V: Clone + Send + Sync, A: Allocator, Z: ZipperInfallibleSubtries<V, A>>
+    ZipperInfallibleSubtries<V, A> for OneFactor<Z>
+{
+    zipper_impl_lens!(ZipperInfallibleSubtries self => self.z);
+}
+impl<'a, V: Clone + Send + Sync, Z> ZipperReadOnlyValues<'a, V> for OneFactor<Z>
+where
+    Z: ZipperReadOnlyValues<'a, V>,
+    Self: ZipperValues<V>,
+{
+    zipper_impl_lens!(ZipperReadOnlyValues self => self.z);
+}
+impl<'a, V: Clone + Send + Sync, Z> ZipperReadOnlyConditionalValues<'a, V> for OneFactor<Z>
+where
+    Z: ZipperReadOnlyConditionalValues<'a, V>,
+    Self: ZipperValues<V>,
+{
+    type WitnessT = Z::WitnessT;
+    zipper_impl_lens!(ZipperReadOnlyConditionalValues self => self.z);
+}
+impl<'a, V, Z> ZipperReadOnlyIteration<'a, V> for OneFactor<Z>
+where
+    Z: ZipperReadOnlyIteration<'a, V>,
+    Self: ZipperReadOnlyValues<'a, V> + ZipperIteration,
+{
+    zipper_impl_lens!(ZipperReadOnlyIteration self => self.z);
+}
+impl<'a, V, Z> ZipperReadOnlyConditionalIteration<'a, V> for OneFactor<Z>
+where
+    Z: ZipperReadOnlyConditionalIteration<'a, V>,
+    Self: ZipperReadOnlyConditionalValues<'a, V, WitnessT = Z::WitnessT> + ZipperIteration,
+{
+    zipper_impl_lens!(ZipperReadOnlyConditionalIteration self => self.z);
+}
+impl<'a, V: Clone + Send + Sync + 'a, Z, A: Allocator + 'a> ZipperReadOnlySubtries<'a, V, A>
+    for OneFactor<Z>
+where
+    Z: ZipperReadOnlySubtries<'a, V, A>,
+    Self: ZipperReadOnlyPriv<'a, V, A> + ZipperSubtries<V, A>,
+{
+    zipper_impl_lens!(ZipperReadOnlySubtries self => self.z);
+}
+impl<Z> ZipperConcrete for OneFactor<Z>
+where
+    Z: ZipperConcrete,
+{
+    zipper_impl_lens!(ZipperConcrete self => self.z);
+}
+impl<Z> ZipperPathBuffer for OneFactor<Z>
+where
+    Z: ZipperPathBuffer,
+{
+    zipper_impl_lens!(ZipperPathBuffer self => self.z);
+}
 
 #[cfg(test)]
 mod tests {
-    use fast_slice_utils::find_prefix_overlap;
+    use crate::morphisms::Catamorphism;
+    use crate::overlay_zipper::OverlayZipper;
     use crate::utils::ByteMask;
     use crate::zipper::*;
     use crate::PathMap;
-    use crate::morphisms::Catamorphism;
+    use fast_slice_utils::find_prefix_overlap;
+
+    fn assert_product_stitches_at_path_end<Z>(mut zipper: Z)
+    where
+        Z: ZipperProduct + ZipperValues<usize>,
+    {
+        assert_eq!(zipper.child_mask(), ByteMask::from_iter([b'a', b'q']));
+
+        zipper.descend_to_byte(b'a');
+        assert!(zipper.path_exists());
+        assert_eq!(zipper.val(), Some(&1));
+        assert_eq!(zipper.child_mask(), ByteMask::from_iter([b'b']));
+        assert_eq!(zipper.focus_factor(), 0);
+
+        zipper.descend_to_byte(b'b');
+        assert!(zipper.path_exists());
+        assert_eq!(zipper.val(), Some(&2));
+        assert_eq!(zipper.child_mask(), ByteMask::from_iter([b'x']));
+        assert_eq!(zipper.focus_factor(), 0);
+
+        zipper.descend_to_byte(b'x');
+        assert!(zipper.path_exists());
+        assert_eq!(zipper.val(), Some(&10));
+        assert_eq!(zipper.child_mask(), ByteMask::EMPTY);
+        assert_eq!(zipper.focus_factor(), 1);
+
+        zipper.reset();
+        zipper.descend_to_byte(b'q');
+        assert!(zipper.path_exists());
+        assert_eq!(zipper.val(), None);
+        assert_eq!(zipper.child_mask(), ByteMask::from_iter([b'x']));
+        assert_eq!(zipper.focus_factor(), 0);
+    }
+
+    fn collect_observed_pathspace<Z, V>(zipper: &mut Z, paths: &mut Vec<(Vec<u8>, Option<V>)>)
+    where
+        Z: ZipperMoving + ZipperValues<V>,
+        V: Clone,
+    {
+        if zipper.path_exists() {
+            paths.push((zipper.path().to_vec(), zipper.val().cloned()));
+        }
+
+        let child_count = zipper.child_count();
+        for child_idx in 0..child_count {
+            assert!(zipper.descend_indexed_byte(child_idx));
+            collect_observed_pathspace(zipper, paths);
+            assert!(zipper.ascend_byte());
+        }
+    }
+
+    fn observed_pathspace<Z, V>(zipper: &mut Z) -> Vec<(Vec<u8>, Option<V>)>
+    where
+        Z: ZipperMoving + ZipperValues<V>,
+        V: Clone + Ord,
+    {
+        let mut paths = Vec::new();
+        collect_observed_pathspace(zipper, &mut paths);
+        paths.sort();
+        paths
+    }
+
+    fn terminal_existing_paths<V>(map: &PathMap<V>) -> Vec<Vec<u8>>
+    where
+        V: Clone + Send + Sync + Unpin,
+    {
+        fn collect<Z>(zipper: &mut Z, terminals: &mut Vec<Vec<u8>>)
+        where
+            Z: ZipperMoving,
+        {
+            if zipper.path_exists() && !zipper.path().is_empty() && zipper.child_count() == 0 {
+                terminals.push(zipper.path().to_vec());
+                return;
+            }
+
+            let child_count = zipper.child_count();
+            for child_idx in 0..child_count {
+                assert!(zipper.descend_indexed_byte(child_idx));
+                collect(zipper, terminals);
+                assert!(zipper.ascend_byte());
+            }
+        }
+
+        let mut zipper = map.read_zipper();
+        let mut terminals = Vec::new();
+        collect(&mut zipper, &mut terminals);
+        terminals
+    }
+
+    fn expected_terminal_product<V>(primary: &PathMap<V>, secondary: &PathMap<V>) -> PathMap<V>
+    where
+        V: Clone + Send + Sync + Unpin + Ord,
+    {
+        let mut expected = primary.clone();
+        let mut secondary_paths = observed_pathspace(&mut secondary.read_zipper());
+        secondary_paths.retain(|(path, _)| !path.is_empty());
+
+        for prefix in terminal_existing_paths(primary) {
+            for (suffix, val) in &secondary_paths {
+                let mut path = prefix.clone();
+                path.extend_from_slice(suffix);
+                match val {
+                    Some(val) => {
+                        expected.set_val_at(path, val.clone());
+                    }
+                    None => {
+                        expected.create_path(path);
+                    }
+                };
+            }
+        }
+
+        expected
+    }
+
+    fn assert_same_observed_pathspace<Z, V>(expected: &PathMap<V>, actual: &mut Z)
+    where
+        Z: ZipperMoving + ZipperValues<V>,
+        V: Clone + Send + Sync + Unpin + Ord + core::fmt::Debug,
+    {
+        let mut expected_zipper = expected.read_zipper();
+        assert_eq!(
+            observed_pathspace(actual),
+            observed_pathspace(&mut expected_zipper)
+        );
+    }
+
+    #[test]
+    fn product_zippers_stitch_at_path_end_not_valued_prefix() {
+        let mut primary = PathMap::<usize>::new();
+        primary.set_val_at(b"a", 1);
+        primary.set_val_at(b"ab", 2);
+        primary.create_path(b"q");
+
+        let mut secondary = PathMap::<usize>::new();
+        secondary.set_val_at(b"x", 10);
+
+        assert_product_stitches_at_path_end(ProductZipper::new(
+            primary.read_zipper(),
+            [secondary.read_zipper()],
+        ));
+        assert_product_stitches_at_path_end(ProductZipperG::new(
+            primary.read_zipper(),
+            [secondary.read_zipper()],
+        ));
+    }
+
+    #[test]
+    fn dpa_product_zippers_match_terminal_path_product_model() {
+        let mut primary = PathMap::<usize>::new();
+        primary.set_val_at(b"", 0);
+        primary.set_val_at(b"a", 1);
+        primary.set_val_at(b"ab", 2);
+        primary.create_path(b"q");
+        primary.set_val_at(b"r", 3);
+
+        let mut secondary = PathMap::<usize>::new();
+        secondary.set_val_at(b"", 100);
+        secondary.set_val_at(b"x", 10);
+        secondary.create_path(b"dangling");
+        secondary.set_val_at(b"branch:y", 20);
+
+        let expected = expected_terminal_product(&primary, &secondary);
+
+        let mut concrete = ProductZipper::new(primary.read_zipper(), [secondary.read_zipper()]);
+        assert_same_observed_pathspace(&expected, &mut concrete);
+
+        let mut generic = ProductZipperG::new(primary.read_zipper(), [secondary.read_zipper()]);
+        assert_same_observed_pathspace(&expected, &mut generic);
+    }
+
+    #[test]
+    fn product_zipper_supports_focused_secondary_residuals() {
+        let mut primary = PathMap::<usize>::new();
+        primary.set_val_at(b"p", 1);
+
+        let mut secondary = PathMap::<usize>::new();
+        secondary.set_val_at(b"suffix", 10);
+
+        let focused_secondary_map = secondary.read_zipper_at_path(b"su").make_map();
+        assert_eq!(
+            observed_pathspace(&mut focused_secondary_map.read_zipper()),
+            vec![
+                (b"".to_vec(), None),
+                (b"f".to_vec(), None),
+                (b"ff".to_vec(), None),
+                (b"ffi".to_vec(), None),
+                (b"ffix".to_vec(), Some(10)),
+            ]
+        );
+        let expected = expected_terminal_product(&primary, &focused_secondary_map);
+
+        let mut concrete = ProductZipper::new(
+            primary.read_zipper(),
+            [secondary.read_zipper_at_path(b"su")],
+        );
+        assert_same_observed_pathspace(&expected, &mut concrete);
+
+        let mut generic = ProductZipperG::new(
+            primary.read_zipper(),
+            [secondary.read_zipper_at_path(b"su")],
+        );
+        assert_same_observed_pathspace(&expected, &mut generic);
+    }
+
+    #[test]
+    fn product_zipper_supports_virtual_secondary_residuals() {
+        let mut primary = PathMap::<usize>::new();
+        primary.set_val_at(b"p", 1);
+
+        let mut left = PathMap::<usize>::new();
+        let mut right = PathMap::<usize>::new();
+        for i in 0..128 {
+            left.set_val_at(format!("overlay:left:{i:08x}").as_bytes(), i);
+            right.set_val_at(format!("overlay:right:{i:08x}").as_bytes(), i + 128);
+        }
+        left.create_path(b"left:dangling");
+        right.create_path(b"right:dangling");
+
+        let joined_secondary = left.join(&right);
+        let expected = expected_terminal_product(&primary, &joined_secondary);
+        let overlay = OverlayZipper::new(left.read_zipper(), right.read_zipper());
+
+        assert!(!overlay.native_subtries());
+        let mut concrete = ProductZipper::new(primary.read_zipper(), [overlay]);
+        assert_same_observed_pathspace(&expected, &mut concrete);
+    }
+
+    #[test]
+    fn product_zipper_generic_try_make_map_materializes_terminal_product_model() {
+        let mut primary = PathMap::<usize>::new();
+        primary.set_val_at(b"a", 1);
+        primary.create_path(b"q");
+
+        let mut secondary = PathMap::<usize>::new();
+        secondary.set_val_at(b"x", 10);
+        secondary.create_path(b"dangling");
+
+        let expected = expected_terminal_product(&primary, &secondary);
+        let zipper = ProductZipperG::new(primary.read_zipper(), [secondary.read_zipper()]);
+
+        assert!(!zipper.native_subtries());
+        let materialized = zipper
+            .try_make_map()
+            .expect("generic product zipper should materialize by observation");
+        let mut materialized_zipper = materialized.read_zipper();
+        assert_same_observed_pathspace(&expected, &mut materialized_zipper);
+    }
+
+    #[cfg(feature = "counters")]
+    #[test]
+    fn product_zippers_count_lazy_factor_entries() {
+        use crate::counters::{reset_virtual_zipper_counters, virtual_zipper_counters};
+
+        fn assert_lazy_factor_entries<Z>(mut zipper: Z)
+        where
+            Z: ZipperMoving,
+        {
+            assert_eq!(virtual_zipper_counters().product_factor_entries, 0);
+            assert_eq!(zipper.child_count(), 1);
+            assert_eq!(virtual_zipper_counters().product_factor_entries, 0);
+
+            zipper.descend_to_byte(b'a');
+            assert_eq!(virtual_zipper_counters().product_factor_entries, 0);
+            zipper.descend_to_byte(b'b');
+            assert_eq!(virtual_zipper_counters().product_factor_entries, 0);
+            zipper.descend_to_byte(b'c');
+            assert_eq!(virtual_zipper_counters().product_factor_entries, 1);
+
+            zipper.descend_to_byte(b'd');
+            assert_eq!(virtual_zipper_counters().product_factor_entries, 1);
+            zipper.descend_to_byte(b'e');
+            assert_eq!(virtual_zipper_counters().product_factor_entries, 1);
+        }
+
+        let _guard = crate::counters::counter_test_guard();
+        let mut primary = PathMap::<()>::new();
+        primary.insert(b"abc", ());
+        let mut secondary = PathMap::<()>::new();
+        secondary.insert(b"de", ());
+
+        reset_virtual_zipper_counters();
+        assert_lazy_factor_entries(ProductZipper::new(
+            primary.read_zipper(),
+            [secondary.read_zipper()],
+        ));
+
+        reset_virtual_zipper_counters();
+        assert_lazy_factor_entries(ProductZipperG::new(
+            primary.read_zipper(),
+            [secondary.read_zipper()],
+        ));
+    }
 
     macro_rules! impl_product_zipper_tests {
         ($mod:ident, $ProductZipper:ident, $convert:ident) => {
@@ -898,720 +1392,831 @@ mod tests {
             // --- START OF MACRO GENERATED MOD ---
             pub mod $mod {
                 use super::*;
-    /// Tests a very simple two-level product zipper
-    #[test]
-    fn product_zipper_test1() {
-        let keys = [b"AAa", b"AAb", b"AAc"];
-        let keys2 = [b"DDd", b"EEe", b"FFf"];
-        let map = PathMap::from_iter(keys.into_iter().enumerate().map(|(i, v)| (v, i as u64)));
-        let map2 = PathMap::from_iter(keys2.into_iter().enumerate().map(|(i, v)| (v, (i + 1000) as u64)));
-        $convert!(*map);
-        $convert!(*map2);
-
-        let rz = map.$read_zipper_u64();
-        let mut pz = $ProductZipper::new(rz, [map2.$read_zipper_u64()]);
-
-        //Descend within the first factor
-        pz.descend_to(b"AA");
-        assert!(pz.path_exists());
-        assert_eq!(pz.path(), b"AA");
-        assert_eq!(pz.val(), None);
-        assert_eq!(pz.child_count(), 3);
-        pz.descend_to(b"a");
-        assert!(pz.path_exists());
-        assert_eq!(pz.path(), b"AAa");
-        assert_eq!(pz.val(), Some(&0));
-        assert_eq!(pz.child_count(), 3);
-
-        //Step to the next factor
-        pz.descend_to(b"DD");
-        assert!(pz.path_exists());
-        assert_eq!(pz.path(), b"AAaDD");
-        assert_eq!(pz.val(), None);
-        assert_eq!(pz.child_count(), 1);
-        pz.descend_to(b"d");
-        assert!(pz.path_exists());
-        assert_eq!(pz.path(), b"AAaDDd");
-        assert_eq!(pz.val(), Some(&1000));
-        assert_eq!(pz.child_count(), 0);
-        pz.descend_to(b"GGg");
-        assert!(!pz.path_exists());
-        assert_eq!(pz.path(), b"AAaDDdGGg");
-        assert_eq!(pz.val(), None);
-        assert_eq!(pz.child_count(), 0);
-
-        //Test Reset, if the zipper was in another factor
-        pz.reset();
-        assert_eq!(pz.path(), b"");
-        pz.descend_to(b"AA");
-        assert!(pz.path_exists());
-        assert_eq!(pz.path(), b"AA");
-        assert_eq!(pz.val(), None);
-        assert_eq!(pz.child_count(), 3);
-
-        //Try to descend to a non-existent path that would be within the first factor
-        pz.descend_to(b"aBBb");
-        assert!(!pz.path_exists());
-        assert_eq!(pz.path(), b"AAaBBb");
-        assert_eq!(pz.val(), None);
-        assert_eq!(pz.child_count(), 0);
-
-        //Now descend to the second factor in one jump
-        pz.reset();
-        pz.descend_to(b"AAaDD");
-        assert!(pz.path_exists());
-        assert_eq!(pz.path(), b"AAaDD");
-        assert_eq!(pz.val(), None);
-        assert_eq!(pz.child_count(), 1);
-        pz.reset();
-        pz.descend_to(b"AAaDDd");
-        assert!(pz.path_exists());
-        assert_eq!(pz.path(), b"AAaDDd");
-        assert_eq!(pz.val(), Some(&1000));
-        assert_eq!(pz.child_count(), 0);
-        pz.descend_to(b"GG");
-        assert!(!pz.path_exists());
-        assert_eq!(pz.path(), b"AAaDDdGG");
-        assert_eq!(pz.val(), None);
-        assert_eq!(pz.child_count(), 0);
-
-        //Make sure we can ascend out of a secondary factor; in this sub-test we'll hit the path middles
-        assert!(pz.ascend(1));
-        assert_eq!(pz.val(), None);
-        assert_eq!(pz.path(), b"AAaDDdG");
-        assert_eq!(pz.child_count(), 0);
-        assert!(pz.ascend(3));
-        assert_eq!(pz.path(), b"AAaD");
-        assert_eq!(pz.val(), None);
-        assert_eq!(pz.child_count(), 1);
-        assert!(pz.ascend(2));
-        assert_eq!(pz.path(), b"AA");
-        assert_eq!(pz.val(), None);
-        assert_eq!(pz.child_count(), 3);
-        assert!(!pz.ascend(3));
-        assert_eq!(pz.path(), b"");
-        assert_eq!(pz.val(), None);
-        assert_eq!(pz.child_count(), 1);
-        assert!(pz.at_root());
-
-        pz.descend_to(b"AAaDDdGG");
-        assert!(!pz.path_exists());
-        assert_eq!(pz.path(), b"AAaDDdGG");
-        assert_eq!(pz.val(), None);
-        assert_eq!(pz.child_count(), 0);
-
-        //Now try to hit the path transition points
-        assert!(pz.ascend(2));
-        assert_eq!(pz.path(), b"AAaDDd");
-        assert_eq!(pz.val(), Some(&1000));
-        assert_eq!(pz.child_count(), 0);
-        assert!(pz.ascend(3));
-        assert_eq!(pz.path(), b"AAa");
-        assert_eq!(pz.val(), Some(&0));
-        assert_eq!(pz.child_count(), 3);
-        assert!(pz.ascend(3));
-        assert_eq!(pz.path(), b"");
-        assert_eq!(pz.val(), None);
-        assert_eq!(pz.child_count(), 1);
-        assert!(pz.at_root());
-    }
-
-    /// Tests a 3-level product zipper, with a catamorphism, and no funny-business in the tries
-    ///
-    ///TODO: Port this test away from the deprecated `SplitCata` / `SplitCataJumping` API
-    #[test]
-    fn product_zipper_test2() {
-        let lpaths = ["abcdefghijklmnopqrstuvwxyz".as_bytes(), "arrow".as_bytes(), "x".as_bytes()];
-        let rpaths = ["ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(), "a".as_bytes(), "bow".as_bytes()];
-        let epaths = ["foo".as_bytes(), "pho".as_bytes()];
-        let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
-        let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
-        let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
-        $convert!(l);
-        $convert!(r);
-        $convert!(e);
-        let p = $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
-
-        let mut map_cnt = 0;
-        let mut collapse_cnt = 0;
-        #[allow(deprecated)]
-        p.into_cata_side_effect(crate::morphisms::SplitCata::new(
-            |_, _p| {
-                // println!("Map  {}", String::from_utf8_lossy(_p));
-                map_cnt += 1;
-            },
-            |_, _, _p| {
-                // println!("Col *{}", String::from_utf8_lossy(_p));
-                collapse_cnt += 1
-            },
-            |_, _, _| ()));
-
-        // println!("{map_cnt} {collapse_cnt}");
-        assert_eq!(map_cnt, 18);
-        assert_eq!(collapse_cnt, 12);
-    }
-
-    /// Same as `product_zipper_test2` but with tries that contain values along the paths
-    ///
-    ///TODO: Port this test away from the deprecated `SplitCata` / `SplitCataJumping` API
-    #[test]
-    fn product_zipper_test3() {
-        let lpaths = ["abcdefghijklmnopqrstuvwxyz".as_bytes(), "arrow".as_bytes(), "x".as_bytes(), "arr".as_bytes()];
-        let rpaths = ["ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(), "a".as_bytes(), "bow".as_bytes(), "bo".as_bytes()];
-        let epaths = ["foo".as_bytes(), "pho".as_bytes(), "f".as_bytes()];
-        let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
-        let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
-        let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
-        $convert!(l);
-        $convert!(r);
-        $convert!(e);
-        let p = $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
-
-        let mut map_cnt = 0;
-        let mut collapse_cnt = 0;
-        #[allow(deprecated)]
-        p.into_cata_side_effect(crate::morphisms::SplitCata::new(
-            |_, _p| {
-                // println!("Map  {}", String::from_utf8_lossy(_p));
-                map_cnt += 1;
-            },
-            |_, _, _p| {
-                // println!("Col *{}", String::from_utf8_lossy(_p));
-                collapse_cnt += 1
-            },
-            |_, _, _| ()));
-
-        // println!("{map_cnt} {collapse_cnt}");
-        assert_eq!(map_cnt, 18);
-        assert_eq!(collapse_cnt, 25);
-    }
-
-    /// Narrows in on some tricky behavior surrounding values at factor transitions.  The issue is that the
-    /// same path can be represented with more than one regularized form.  In the test below, the path:
-    /// `abcdefghijklmnopqrstuvwxyzbo` falls on the transition point (value) in the second factor, signaling
-    /// a step to the third factor.
-    ///
-    /// However, the regularization behavior means that the zipper's `focus_node` will be regularized to point
-    /// to the 'w' in "bow".  This doesn't actually represent the 'w', but rather represents "the node that
-    /// follows 'o', which just happens to be 'w'".  On ascent, however, the `focus_node` will be the base
-    /// of the third factor, e.g. the {'f', 'p'} node.
-    ///
-    /// These are both valid configurations for the zipper and the user-facing methods should behave the same
-    /// regardless of the config.
-    ///
-    /// NOTE: This logic is the same regardless of node type, but using `all_dense_nodes` will shake out any
-    /// problems more aggressively.
-    #[test]
-    fn product_zipper_test4() {
-        let lpaths = ["abcdefghijklmnopqrstuvwxyz".as_bytes(), "arrow".as_bytes(), "x".as_bytes(), "arr".as_bytes()];
-        let rpaths = ["ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(), "a".as_bytes(), "bow".as_bytes(), "bo".as_bytes()];
-        let epaths = ["foo".as_bytes(), "pho".as_bytes(), "f".as_bytes()];
-        let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
-        let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
-        let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
-        $convert!(l);
-        $convert!(r);
-        $convert!(e);
-        let mut p = $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
-
-        p.descend_to("abcdefghijklmnopqrstuvwxyzbow");
-        assert!(p.is_val());
-        assert_eq!(p.child_count(), 2);
-        assert_eq!(p.child_mask(), ByteMask::from_iter([b'p', b'f']));
-
-        p.descend_first_byte();
-        p.ascend_byte();
-        assert!(p.is_val());
-        assert_eq!(p.child_count(), 2);
-        assert_eq!(p.child_mask(), ByteMask::from_iter([b'p', b'f']));
-    }
-
-    #[test]
-    fn product_zipper_test5() {
-        let lpaths = ["abcdefghijklmnopqrstuvwxyz".as_bytes(), "arrow".as_bytes(), "x".as_bytes(), "arr".as_bytes()];
-        let rpaths = ["ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(), "a".as_bytes(), "bow".as_bytes(), "bo".as_bytes()];
-        let epaths = ["foo".as_bytes(), "pho".as_bytes(), "f".as_bytes()];
-        let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
-        let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
-        let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
-        $convert!(l);
-        $convert!(r);
-        $convert!(e);
-
-        {
-            let mut p = $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
-            p.descend_to("abcdefghijklmnopqrstuvwxyzbowfo");
-            assert!(p.path_exists());
-            assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowfo");
-            assert!(p.descend_first_byte());
-            assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowfoo");
-        }
-        {
-            let mut p = $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
-            p.descend_to("abcdefghijklmnopqrstuvwxyzbowf");
-            assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowf");
-            assert!(p.is_val());
-            p.descend_to("oo");
-            assert!(p.path_exists());
-            assert!(p.is_val());
-        }
-        {
-            let mut p = $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
-            p.descend_to("abcdefghijklmnopqrstuvwxyzbowfo");
-            assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowfo");
-            assert!(p.ascend_byte());
-            assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowf");
-            assert!(p.ascend_byte());
-            assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbow");
-            p.descend_to_byte(b'p');
-            assert!(p.path_exists());
-            assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowp");
-            p.descend_to_byte(b'h');
-            assert!(p.path_exists());
-            assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowph");
-            p.descend_to_byte(b'o');
-            assert!(p.path_exists());
-            assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowpho");
-            assert!(p.is_val());
-            assert!(p.ascend_until());
-            assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbow");
-            assert!(p.ascend(3));
-            assert_eq!(vec![b'A', b'a', b'b'], p.child_mask().iter().collect::<Vec<_>>());
-            p.descend_to("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
-            assert!(p.path_exists());
-            assert_eq!(vec![b'f', b'p'], p.child_mask().iter().collect::<Vec<_>>())
-        }
-    }
-
-    #[test]
-    fn product_zipper_test6() {
-        let lpaths = ["abcdefghijklmnopqrstuvwxyz".as_bytes(), "arrow".as_bytes(), "x".as_bytes(), "arr".as_bytes()];
-        let rpaths = ["ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(), "a".as_bytes(), "bow".as_bytes(), "bo".as_bytes()];
-        let epaths = ["foo".as_bytes(), "pho".as_bytes(), "f".as_bytes()];
-        let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
-        let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
-        let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
-        $convert!(l);
-        $convert!(r);
-        $convert!(e);
-
-        {
-            let mut p = $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
-            p.descend_to("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
-            assert!(!p.path_exists());
-            // println!("p {}", std::str::from_utf8(p.path()).unwrap());
-            assert!(!p.ascend(27));
-        }
-    }
-
-    /// Hits an additional bug where an intermediate value might be stepped over by one `descend_to`
-    /// but used as a marker to move to the product zipper by the other `descend...` methods 
-    #[test]
-    fn product_zipper_test7() {
-        let apaths = ["arr".as_bytes(), "arrow".as_bytes(), "arrowhead".as_bytes()];
-        let bpaths = ["bo".as_bytes(), "bow".as_bytes(), "bowie".as_bytes()];
-        let cpaths = ["cl".as_bytes(), "club".as_bytes(), "clubhouse".as_bytes()];
-        let a = PathMap::from_iter(apaths.iter().map(|x| (x, ())));
-        let b = PathMap::from_iter(bpaths.iter().map(|x| (x, ())));
-        let c = PathMap::from_iter(cpaths.iter().map(|x| (x, ())));
-        $convert!(a);
-        $convert!(b);
-        $convert!(c);
-        let mut p1 = $ProductZipper::new(a.read_zipper(), [b.read_zipper(), c.read_zipper()]);
-        let mut p2 = $ProductZipper::new(a.read_zipper(), [b.read_zipper(), c.read_zipper()]);
-
-        // Reference
-        for _ in 0..23 {
-            p1.descend_first_byte();
-        }
-        assert_eq!(p1.path_exists(), true);
-        assert_eq!(p1.path(), b"arrowheadbowieclubhouse");
-        assert!(p1.is_val());
-
-        // Validate that I can do the same thing with descend_to()
-        p2.descend_to(b"arrowheadbowieclubhouse");
-        assert_eq!(p2.path_exists(), true);
-        assert_eq!(p2.path(), b"arrowheadbowieclubhouse");
-        assert!(p2.is_val());
-
-        // Validate that I can back up, and re-descend
-        {
-            p2.ascend(20);
-            assert_eq!(p2.path(), b"arr");
-            assert_eq!(p2.path_exists(), true);
-            assert!(p2.is_val());
-
-            p2.descend_to(b"owheadbowieclub");
-            assert_eq!(p2.path(), b"arrowheadbowieclub");
-            assert_eq!(p2.path_exists(), true);
-            assert!(p2.is_val());
-        }
-
-        //Now descend to a non-existent path off of the first factor, and re-ascend to
-        // an existing path
-        {
-            p2.reset();
-            // "arrowbow" should't exist because the path continues from "arrowhead"
-            p2.descend_to(b"arrowbow");
-            assert_eq!(p2.path(), b"arrowbow");
-            assert_eq!(p2.path_exists(), false);
-
-            // "arrowbowclub" should't exist because we started in a trie that doesn't exist
-            p2.descend_to(b"club");
-            assert_eq!(p2.path(), b"arrowbowclub");
-            assert_eq!(p2.path_exists(), false);
-
-            p2.ascend(9);
-            assert_eq!(p2.path(), b"arr");
-            assert_eq!(p2.path_exists(), true);
-            assert!(p2.is_val());
-
-            p2.descend_to(b"owheadbowieclub");
-            assert_eq!(p2.path(), b"arrowheadbowieclub");
-            assert_eq!(p2.path_exists(), true);
-            assert!(p2.is_val());
-        }
-
-        //Now descend to a non-existent path off of the second factor, and re-ascend to
-        // get back to an existing path
-        {
-            p2.reset();
-            // "arrowheadbowclub" should't exist because the path continues from "bowie"
-            p2.descend_to(b"arrowheadbowclub");
-            assert_eq!(p2.path(), b"arrowheadbowclub");
-            assert_eq!(p2.path_exists(), false);
-
-            p2.ascend(5);
-            assert_eq!(p2.path(), b"arrowheadbo");
-            assert_eq!(p2.path_exists(), true);
-            assert!(p2.is_val());
-
-            p2.descend_to(b"wieclub");
-            assert_eq!(p2.path(), b"arrowheadbowieclub");
-            assert_eq!(p2.path_exists(), true);
-            assert!(p2.is_val());
-        }
-    }
-
-    #[test]
-    fn product_zipper_test8() {
-        let lpaths = ["abcdefghijklmnopqrstuvwxyz".as_bytes(), "arr".as_bytes(), "arrow".as_bytes(), "x".as_bytes()];
-        let rpaths = ["ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(), "a".as_bytes(), "bo".as_bytes(), "bow".as_bytes(), "bat".as_bytes(), "bit".as_bytes()];
-        let epaths = ["foo".as_bytes(), "pho".as_bytes(), "f".as_bytes()];
-        let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
-        let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
-        let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
-        $convert!(l);
-        $convert!(r);
-        $convert!(e);
-
-        let new_pz = || $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
-
-        let mut moving_pz = new_pz();
-        let cata_pz = new_pz();
-        cata_pz.into_cata_side_effect(|_, _, _, path| {
-            // println!("{}", String::from_utf8_lossy(path));
-            let overlap = find_prefix_overlap(path, moving_pz.path());
-            if overlap < moving_pz.path().len() {
-                moving_pz.ascend(moving_pz.path().len() - overlap);
-            }
-            if moving_pz.path().len() < path.len() {
-                moving_pz.descend_to(&path[moving_pz.path().len()..]);
-                assert!(moving_pz.path_exists());
-            }
-            assert_eq!(moving_pz.path(), path);
-
-            let mut fresh_pz = new_pz();
-            fresh_pz.descend_to(path);
-
-            assert_eq!(moving_pz.path(), fresh_pz.path());
-            assert_eq!(moving_pz.path_exists(), fresh_pz.path_exists());
-            assert_eq!(moving_pz.val(), fresh_pz.val());
-            assert_eq!(moving_pz.child_count(), fresh_pz.child_count());
-            assert_eq!(moving_pz.child_mask(), fresh_pz.child_mask());
-        })
-    }
-
-    /// Tests the ProductZipper's implementation of `to_next_k_path` or `to_next_sibling_byte`, stepping across factors
-    #[test]
-    fn product_zipper_test9() {
-        let paths = [
-            vec![3, 196, 50, 193, 52],
-            vec![3, 196, 50, 194, 49, 54],
-            vec![3, 196, 50, 194, 49, 55],
-        ];
-        let map: PathMap<()> = paths.iter().map(|path| (path, ())).collect();
-        $convert!(map);
-        let mut z = $ProductZipper::new(map.read_zipper(), [map.read_zipper(), map.read_zipper()]);
-
-        z.descend_to([3, 196, 50, 193, 52, 3, 196, 50, 194, 49, 54]);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.to_next_k_path(2), true);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.child_mask(), ByteMask::from_iter([3]));
-    }
-
-    /// Reproduce a bug in ProductZipperG, where continuing to descend past a non-existent
-    /// path somehow leads to re-entering the next factor
-    #[test]
-    fn product_zipper_testa() {
-        let paths = [
-            vec![3, 196, 101, 100, 103, 101, 193, 49, 194, 49, 56],
-            vec![3, 196, 101, 100, 103, 101, 193, 49, 194, 50, 48],
-        ];
-        let map: PathMap<()> = paths.iter().map(|path| (path, ())).collect();
-        $convert!(map);
-        let mut z = $ProductZipper::new(map.read_zipper(), [map.read_zipper(), map.read_zipper()]);
-
-        assert_eq!(z.path_exists(), true);
-        z.descend_to_byte(3);
-        assert_eq!(z.path_exists(), true);
-        z.descend_to_byte(196);
-        assert_eq!(z.path_exists(), true);
-        z.descend_to([101, 100, 103, 101]);
-        assert_eq!(z.path_exists(), true);
-        z.descend_to_byte(193);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.path(), [3, 196, 101, 100, 103, 101, 193]);
-        z.descend_to_byte(194);
-        assert_eq!(z.path(), [3, 196, 101, 100, 103, 101, 193, 194]);
-        assert_eq!(z.path_exists(), false);
-        z.descend_to_byte(3);
-        assert_eq!(z.path(), [3, 196, 101, 100, 103, 101, 193, 194, 3]);
-        assert_eq!(z.path_exists(), false);
-    }
-
-    /// Test focussed heavily on `descend_to_byte`, with tests for stitching at dangling paths
-    #[test]
-    fn product_zipper_testb() {
-        let paths = [
-            vec![3, 196, 101, 49],
-            vec![3, 196, 101, 50],
-        ];
-        let mut map = PathMap::<()>::new();
-        paths.into_iter().for_each(|path| { map.create_path(path); });
-        map.insert([3, 196], ());
-        map.insert([3, 196, 101, 49], ());
-        $convert!(map);
-        let mut z = $ProductZipper::new(map.read_zipper(), [map.read_zipper(), map.read_zipper()]);
-
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.child_count(), 1);
-        assert_eq!(z.child_mask(), ByteMask::from_iter([3u8]));
-        assert_eq!(z.is_val(), false);
-
-        z.descend_to_byte(3);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.child_count(), 1);
-        assert_eq!(z.child_mask(), ByteMask::from_iter([196u8]));
-        assert_eq!(z.is_val(), false);
-
-        z.descend_to_byte(196);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.child_count(), 1);
-        assert_eq!(z.child_mask(), ByteMask::from_iter([101u8]));
-        assert_eq!(z.is_val(), true);
-
-        z.descend_to_byte(101);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.child_count(), 2);
-        assert_eq!(z.child_mask(), ByteMask::from_iter([49u8, 50]));
-        assert_eq!(z.is_val(), false);
-
-        z.descend_to_byte(50);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.child_count(), 1);
-        assert_eq!(z.child_mask(), ByteMask::from_iter([3u8]));
-        assert_eq!(z.is_val(), false);
-
-        z.descend_to_byte(3);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.child_count(), 1);
-        assert_eq!(z.child_mask(), ByteMask::from_iter([196u8]));
-        assert_eq!(z.is_val(), false);
-
-        z.descend_to_byte(196);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.is_val(), true);
-        assert_eq!(z.child_count(), 1);
-        assert_eq!(z.child_mask(), ByteMask::from_iter([101u8]));
-
-        z.descend_to_byte(101);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.child_count(), 2);
-        assert_eq!(z.child_mask(), ByteMask::from_iter([49u8, 50]));
-        assert_eq!(z.is_val(), false);
-
-        z.descend_to_byte(49);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.child_count(), 1);
-        assert_eq!(z.child_mask(), ByteMask::from_iter([3u8]));
-        assert_eq!(z.is_val(), true);
-
-        z.descend_to_byte(3);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.child_count(), 1);
-        assert_eq!(z.child_mask(), ByteMask::from_iter([196u8]));
-        assert_eq!(z.is_val(), false);
-
-        z.descend_to_byte(196);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.child_count(), 1);
-        assert_eq!(z.child_mask(), ByteMask::from_iter([101u8]));
-        assert_eq!(z.is_val(), true);
-
-        z.descend_to_byte(101);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.child_count(), 2);
-        assert_eq!(z.child_mask(), ByteMask::from_iter([49u8, 50]));
-        assert_eq!(z.is_val(), false);
-
-        z.descend_to_byte(50);
-        assert_eq!(z.path_exists(), true);
-        assert_eq!(z.child_count(), 0);
-        assert_eq!(z.child_mask(), ByteMask::EMPTY);
-        assert_eq!(z.is_val(), false);
-
-        z.descend_to_byte(3);
-        assert_eq!(z.path_exists(), false);
-        assert_eq!(z.child_count(), 0);
-        assert_eq!(z.child_mask(), ByteMask::EMPTY);
-        assert_eq!(z.is_val(), false);
-    }
-
-    /// Hits some of the `descend_to_byte` stitch transitions, in the context where we'll have a ByteNode
-    #[test]
-    fn product_zipper_testc() {
-        let pm: PathMap<()> = [
-            (&[1, 192], ()),
-            (&[4, 196], ()),
-            (&[193, 102], ())
-        ].into_iter().collect();
-
-        let mut pz = $ProductZipper::new(pm.read_zipper(), [pm.read_zipper()]);
-
-        pz.descend_to_byte(1);
-        pz.descend_to_byte(192);
-        assert_eq!(pz.child_count(), 3);
-        assert_eq!(pz.child_mask(), ByteMask::from_iter([1u8, 4, 193]));
-    }
-
-    /// This test assembles a map with a single dangling path, and stitches multiple of them
-    /// together into a PZ, so the resulting virtual trie is just one long path with repetitions.
-    ///
-    /// We then validate that `ascend`, `ascend_until`, `ascend_until_branch`, etc. all do the right
-    /// thing traversing across multiple factors, not stopping spuriously at the factor stitch points.
-    ///
-    /// Also we test `descend_until` in this case, because the correct behavior should be to
-    /// seamlessly descend, flowing across multiple factor zippers in one call
-    #[test]
-    fn product_zipper_testd() {
-        let snip = b"-=**=-";
-        let repeats = 5;
-        let mut map = PathMap::<()>::new();
-        map.create_path(snip);
-
-        let factors: Vec<_> = (0..repeats-1).into_iter().map(|_| map.read_zipper()).collect();
-        let mut pz = $ProductZipper::new(map.read_zipper(), factors);
-
-        let mut full_path = snip.to_vec();
-        for _ in 0..repeats-1 {
-            full_path.extend(snip);
-        }
-
-        // descend_to is already well tested, but we're using it to set up the conditions for the ascend tests
-        pz.descend_to(&full_path);
-        assert_eq!(pz.path(), full_path);
-        assert_eq!(pz.path_exists(), true);
-        assert_eq!(pz.child_count(), 0);
-        assert_eq!(pz.is_val(), false);
-
-        // test ascend
-        assert_eq!(pz.ascend(snip.len() * (repeats-1)), true);
-        assert_eq!(pz.path(), snip);
-        assert_eq!(pz.path_exists(), true);
-        assert_eq!(pz.child_count(), 1);
-        assert_eq!(pz.is_val(), false);
-
-        // test ascend_until
-        pz.reset();
-        pz.descend_to(&full_path);
-        assert_eq!(pz.ascend_until(), true);
-        assert_eq!(pz.path(), []);
-        assert_eq!(pz.path_exists(), true);
-        assert_eq!(pz.child_count(), 1);
-        assert_eq!(pz.is_val(), false);
-
-        // test ascend_until_branch
-        pz.descend_to(&full_path);
-        assert_eq!(pz.ascend_until_branch(), true);
-        assert_eq!(pz.path(), []);
-        assert_eq!(pz.path_exists(), true);
-        assert_eq!(pz.child_count(), 1);
-        assert_eq!(pz.is_val(), false);
-
-        // test descend_until
-        assert_eq!(pz.descend_until(), true);
-        assert_eq!(pz.path(), full_path);
-        assert_eq!(pz.path_exists(), true);
-        assert_eq!(pz.child_count(), 0);
-        assert_eq!(pz.is_val(), false);
-    }
-
-    #[test]
-    fn product_zipper_inspection_test() {
-        let lpaths = ["abcdefghijklmnopqrstuvwxyz".as_bytes(), "arr".as_bytes(), "arrow".as_bytes(), "x".as_bytes()];
-        let rpaths = ["ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(), "a".as_bytes(), "bo".as_bytes(), "bow".as_bytes(), "bat".as_bytes(), "bit".as_bytes()];
-        let epaths = ["foo".as_bytes(), "pho".as_bytes(), "f".as_bytes()];
-        let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
-        let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
-        let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
-        $convert!(l);
-        $convert!(r);
-        $convert!(e);
-        let mut pz = $ProductZipper::new(l.read_zipper_at_borrowed_path(b"abcdefghijklm"), [r.read_zipper(), e.read_zipper()]);
-
-        assert_eq!(pz.factor_count(), 3);
-        assert_eq!(pz.focus_factor(), 0);
-        assert_eq!(pz.path_indices().len(), 0);
-        assert_eq!(pz.path(), b"");
-        assert_eq!(pz.origin_path(), b"abcdefghijklm");
-
-        pz.descend_to(b"nopqrstuvwxyz");
-        assert!(pz.path_exists());
-
-        assert_eq!(pz.focus_factor(), 0);
-        assert_eq!(pz.path(), b"nopqrstuvwxyz");
-        assert_eq!(pz.origin_path(), b"abcdefghijklmnopqrstuvwxyz");
-
-        pz.descend_to(b"AB");
-        assert!(pz.path_exists());
-
-        assert_eq!(pz.focus_factor(), 1);
-        assert_eq!(pz.path_indices()[0], 13);
-        assert_eq!(pz.path().len(), 15);
-        assert_eq!(pz.path(), b"nopqrstuvwxyzAB");
-        assert_eq!(pz.origin_path(), b"abcdefghijklmnopqrstuvwxyzAB");
-
-        pz.reset();
-        assert_eq!(pz.child_mask(), ByteMask::from_iter([b'n']));
-        pz.descend_to(b"nopqrstuvwxyzbowph");
-        assert!(pz.path_exists());
-        assert_eq!(pz.focus_factor(), 2);
-        assert_eq!(pz.path_indices()[0], 13);
-        assert_eq!(pz.path_indices()[1], 16);
-        assert_eq!(pz.path(), b"nopqrstuvwxyzbowph");
-    }
+                /// Tests a very simple two-level product zipper
+                #[test]
+                fn product_zipper_test1() {
+                    let keys = [b"AAa", b"AAb", b"AAc"];
+                    let keys2 = [b"DDd", b"EEe", b"FFf"];
+                    let map = PathMap::from_iter(
+                        keys.into_iter().enumerate().map(|(i, v)| (v, i as u64)),
+                    );
+                    let map2 = PathMap::from_iter(
+                        keys2
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, v)| (v, (i + 1000) as u64)),
+                    );
+                    $convert!(*map);
+                    $convert!(*map2);
+
+                    let rz = map.$read_zipper_u64();
+                    let mut pz = $ProductZipper::new(rz, [map2.$read_zipper_u64()]);
+
+                    //Descend within the first factor
+                    pz.descend_to(b"AA");
+                    assert!(pz.path_exists());
+                    assert_eq!(pz.path(), b"AA");
+                    assert_eq!(pz.val(), None);
+                    assert_eq!(pz.child_count(), 3);
+                    pz.descend_to(b"a");
+                    assert!(pz.path_exists());
+                    assert_eq!(pz.path(), b"AAa");
+                    assert_eq!(pz.val(), Some(&0));
+                    assert_eq!(pz.child_count(), 3);
+
+                    //Step to the next factor
+                    pz.descend_to(b"DD");
+                    assert!(pz.path_exists());
+                    assert_eq!(pz.path(), b"AAaDD");
+                    assert_eq!(pz.val(), None);
+                    assert_eq!(pz.child_count(), 1);
+                    pz.descend_to(b"d");
+                    assert!(pz.path_exists());
+                    assert_eq!(pz.path(), b"AAaDDd");
+                    assert_eq!(pz.val(), Some(&1000));
+                    assert_eq!(pz.child_count(), 0);
+                    pz.descend_to(b"GGg");
+                    assert!(!pz.path_exists());
+                    assert_eq!(pz.path(), b"AAaDDdGGg");
+                    assert_eq!(pz.val(), None);
+                    assert_eq!(pz.child_count(), 0);
+
+                    //Test Reset, if the zipper was in another factor
+                    pz.reset();
+                    assert_eq!(pz.path(), b"");
+                    pz.descend_to(b"AA");
+                    assert!(pz.path_exists());
+                    assert_eq!(pz.path(), b"AA");
+                    assert_eq!(pz.val(), None);
+                    assert_eq!(pz.child_count(), 3);
+
+                    //Try to descend to a non-existent path that would be within the first factor
+                    pz.descend_to(b"aBBb");
+                    assert!(!pz.path_exists());
+                    assert_eq!(pz.path(), b"AAaBBb");
+                    assert_eq!(pz.val(), None);
+                    assert_eq!(pz.child_count(), 0);
+
+                    //Now descend to the second factor in one jump
+                    pz.reset();
+                    pz.descend_to(b"AAaDD");
+                    assert!(pz.path_exists());
+                    assert_eq!(pz.path(), b"AAaDD");
+                    assert_eq!(pz.val(), None);
+                    assert_eq!(pz.child_count(), 1);
+                    pz.reset();
+                    pz.descend_to(b"AAaDDd");
+                    assert!(pz.path_exists());
+                    assert_eq!(pz.path(), b"AAaDDd");
+                    assert_eq!(pz.val(), Some(&1000));
+                    assert_eq!(pz.child_count(), 0);
+                    pz.descend_to(b"GG");
+                    assert!(!pz.path_exists());
+                    assert_eq!(pz.path(), b"AAaDDdGG");
+                    assert_eq!(pz.val(), None);
+                    assert_eq!(pz.child_count(), 0);
+
+                    //Make sure we can ascend out of a secondary factor; in this sub-test we'll hit the path middles
+                    assert!(pz.ascend(1));
+                    assert_eq!(pz.val(), None);
+                    assert_eq!(pz.path(), b"AAaDDdG");
+                    assert_eq!(pz.child_count(), 0);
+                    assert!(pz.ascend(3));
+                    assert_eq!(pz.path(), b"AAaD");
+                    assert_eq!(pz.val(), None);
+                    assert_eq!(pz.child_count(), 1);
+                    assert!(pz.ascend(2));
+                    assert_eq!(pz.path(), b"AA");
+                    assert_eq!(pz.val(), None);
+                    assert_eq!(pz.child_count(), 3);
+                    assert!(!pz.ascend(3));
+                    assert_eq!(pz.path(), b"");
+                    assert_eq!(pz.val(), None);
+                    assert_eq!(pz.child_count(), 1);
+                    assert!(pz.at_root());
+
+                    pz.descend_to(b"AAaDDdGG");
+                    assert!(!pz.path_exists());
+                    assert_eq!(pz.path(), b"AAaDDdGG");
+                    assert_eq!(pz.val(), None);
+                    assert_eq!(pz.child_count(), 0);
+
+                    //Now try to hit the path transition points
+                    assert!(pz.ascend(2));
+                    assert_eq!(pz.path(), b"AAaDDd");
+                    assert_eq!(pz.val(), Some(&1000));
+                    assert_eq!(pz.child_count(), 0);
+                    assert!(pz.ascend(3));
+                    assert_eq!(pz.path(), b"AAa");
+                    assert_eq!(pz.val(), Some(&0));
+                    assert_eq!(pz.child_count(), 3);
+                    assert!(pz.ascend(3));
+                    assert_eq!(pz.path(), b"");
+                    assert_eq!(pz.val(), None);
+                    assert_eq!(pz.child_count(), 1);
+                    assert!(pz.at_root());
+                }
+
+                /// Tests a 3-level product zipper, with a catamorphism, and no funny-business in the tries
+                #[test]
+                fn product_zipper_test2() {
+                    let lpaths = [
+                        "abcdefghijklmnopqrstuvwxyz".as_bytes(),
+                        "arrow".as_bytes(),
+                        "x".as_bytes(),
+                    ];
+                    let rpaths = [
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(),
+                        "a".as_bytes(),
+                        "bow".as_bytes(),
+                    ];
+                    let epaths = ["foo".as_bytes(), "pho".as_bytes()];
+                    let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
+                    let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
+                    let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
+                    $convert!(l);
+                    $convert!(r);
+                    $convert!(e);
+                    let p =
+                        $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
+
+                    let mut map_cnt = 0;
+                    let mut collapse_cnt = 0;
+                    p.into_cata_side_effect(|_mask, children: &mut [()], val, _path| {
+                        if children.is_empty() {
+                            if val.is_some() {
+                                // println!("Map  {}", String::from_utf8_lossy(_path));
+                                map_cnt += 1;
+                            }
+                        } else if val.is_some() {
+                            // println!("Col *{}", String::from_utf8_lossy(_path));
+                            collapse_cnt += 1;
+                        }
+                    });
+
+                    // println!("{map_cnt} {collapse_cnt}");
+                    assert_eq!(map_cnt, 18);
+                    assert_eq!(collapse_cnt, 12);
+                }
+
+                /// Same as `product_zipper_test2` but with tries that contain values along the paths
+                #[test]
+                fn product_zipper_test3() {
+                    let lpaths = [
+                        "abcdefghijklmnopqrstuvwxyz".as_bytes(),
+                        "arrow".as_bytes(),
+                        "x".as_bytes(),
+                        "arr".as_bytes(),
+                    ];
+                    let rpaths = [
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(),
+                        "a".as_bytes(),
+                        "bow".as_bytes(),
+                        "bo".as_bytes(),
+                    ];
+                    let epaths = ["foo".as_bytes(), "pho".as_bytes(), "f".as_bytes()];
+                    let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
+                    let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
+                    let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
+                    $convert!(l);
+                    $convert!(r);
+                    $convert!(e);
+                    let p =
+                        $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
+
+                    let mut map_cnt = 0;
+                    let mut collapse_cnt = 0;
+                    p.into_cata_side_effect(|_mask, children: &mut [()], val, _path| {
+                        if children.is_empty() {
+                            if val.is_some() {
+                                // println!("Map  {}", String::from_utf8_lossy(_path));
+                                map_cnt += 1;
+                            }
+                        } else if val.is_some() {
+                            // println!("Col *{}", String::from_utf8_lossy(_path));
+                            collapse_cnt += 1;
+                        }
+                    });
+
+                    // println!("{map_cnt} {collapse_cnt}");
+                    assert_eq!(map_cnt, 18);
+                    assert_eq!(collapse_cnt, 25);
+                }
+
+                /// Narrows in on some tricky behavior surrounding values at factor transitions.  The issue is that the
+                /// same path can be represented with more than one regularized form.  In the test below, the path:
+                /// `abcdefghijklmnopqrstuvwxyzbo` falls on the transition point (value) in the second factor, signaling
+                /// a step to the third factor.
+                ///
+                /// However, the regularization behavior means that the zipper's `focus_node` will be regularized to point
+                /// to the 'w' in "bow".  This doesn't actually represent the 'w', but rather represents "the node that
+                /// follows 'o', which just happens to be 'w'".  On ascent, however, the `focus_node` will be the base
+                /// of the third factor, e.g. the {'f', 'p'} node.
+                ///
+                /// These are both valid configurations for the zipper and the user-facing methods should behave the same
+                /// regardless of the config.
+                ///
+                /// NOTE: This logic is the same regardless of node type, but using `all_dense_nodes` will shake out any
+                /// problems more aggressively.
+                #[test]
+                fn product_zipper_test4() {
+                    let lpaths = [
+                        "abcdefghijklmnopqrstuvwxyz".as_bytes(),
+                        "arrow".as_bytes(),
+                        "x".as_bytes(),
+                        "arr".as_bytes(),
+                    ];
+                    let rpaths = [
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(),
+                        "a".as_bytes(),
+                        "bow".as_bytes(),
+                        "bo".as_bytes(),
+                    ];
+                    let epaths = ["foo".as_bytes(), "pho".as_bytes(), "f".as_bytes()];
+                    let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
+                    let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
+                    let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
+                    $convert!(l);
+                    $convert!(r);
+                    $convert!(e);
+                    let mut p =
+                        $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
+
+                    p.descend_to("abcdefghijklmnopqrstuvwxyzbow");
+                    assert!(p.is_val());
+                    assert_eq!(p.child_count(), 2);
+                    assert_eq!(p.child_mask(), ByteMask::from_iter([b'p', b'f']));
+
+                    p.descend_first_byte();
+                    p.ascend_byte();
+                    assert!(p.is_val());
+                    assert_eq!(p.child_count(), 2);
+                    assert_eq!(p.child_mask(), ByteMask::from_iter([b'p', b'f']));
+                }
+
+                #[test]
+                fn product_zipper_test5() {
+                    let lpaths = [
+                        "abcdefghijklmnopqrstuvwxyz".as_bytes(),
+                        "arrow".as_bytes(),
+                        "x".as_bytes(),
+                        "arr".as_bytes(),
+                    ];
+                    let rpaths = [
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(),
+                        "a".as_bytes(),
+                        "bow".as_bytes(),
+                        "bo".as_bytes(),
+                    ];
+                    let epaths = ["foo".as_bytes(), "pho".as_bytes(), "f".as_bytes()];
+                    let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
+                    let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
+                    let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
+                    $convert!(l);
+                    $convert!(r);
+                    $convert!(e);
+
+                    {
+                        let mut p = $ProductZipper::new(
+                            l.read_zipper(),
+                            [r.read_zipper(), e.read_zipper()],
+                        );
+                        p.descend_to("abcdefghijklmnopqrstuvwxyzbowfo");
+                        assert!(p.path_exists());
+                        assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowfo");
+                        assert!(p.descend_first_byte());
+                        assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowfoo");
+                    }
+                    {
+                        let mut p = $ProductZipper::new(
+                            l.read_zipper(),
+                            [r.read_zipper(), e.read_zipper()],
+                        );
+                        p.descend_to("abcdefghijklmnopqrstuvwxyzbowf");
+                        assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowf");
+                        assert!(p.is_val());
+                        p.descend_to("oo");
+                        assert!(p.path_exists());
+                        assert!(p.is_val());
+                    }
+                    {
+                        let mut p = $ProductZipper::new(
+                            l.read_zipper(),
+                            [r.read_zipper(), e.read_zipper()],
+                        );
+                        p.descend_to("abcdefghijklmnopqrstuvwxyzbowfo");
+                        assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowfo");
+                        assert!(p.ascend_byte());
+                        assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowf");
+                        assert!(p.ascend_byte());
+                        assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbow");
+                        p.descend_to_byte(b'p');
+                        assert!(p.path_exists());
+                        assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowp");
+                        p.descend_to_byte(b'h');
+                        assert!(p.path_exists());
+                        assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowph");
+                        p.descend_to_byte(b'o');
+                        assert!(p.path_exists());
+                        assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowpho");
+                        assert!(p.is_val());
+                        assert!(p.ascend_until());
+                        assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbow");
+                        assert!(p.ascend(3));
+                        assert_eq!(
+                            vec![b'A', b'a', b'b'],
+                            p.child_mask().iter().collect::<Vec<_>>()
+                        );
+                        p.descend_to("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+                        assert!(p.path_exists());
+                        assert_eq!(vec![b'f', b'p'], p.child_mask().iter().collect::<Vec<_>>())
+                    }
+                }
+
+                #[test]
+                fn product_zipper_test6() {
+                    let lpaths = [
+                        "abcdefghijklmnopqrstuvwxyz".as_bytes(),
+                        "arrow".as_bytes(),
+                        "x".as_bytes(),
+                        "arr".as_bytes(),
+                    ];
+                    let rpaths = [
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(),
+                        "a".as_bytes(),
+                        "bow".as_bytes(),
+                        "bo".as_bytes(),
+                    ];
+                    let epaths = ["foo".as_bytes(), "pho".as_bytes(), "f".as_bytes()];
+                    let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
+                    let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
+                    let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
+                    $convert!(l);
+                    $convert!(r);
+                    $convert!(e);
+
+                    {
+                        let mut p = $ProductZipper::new(
+                            l.read_zipper(),
+                            [r.read_zipper(), e.read_zipper()],
+                        );
+                        p.descend_to("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+                        assert!(!p.path_exists());
+                        // println!("p {}", std::str::from_utf8(p.path()).unwrap());
+                        assert!(!p.ascend(27));
+                    }
+                }
+
+                /// Hits an additional bug where an intermediate value might be stepped over by one `descend_to`
+                /// but used as a marker to move to the product zipper by the other `descend...` methods
+                #[test]
+                fn product_zipper_test7() {
+                    let apaths = ["arr".as_bytes(), "arrow".as_bytes(), "arrowhead".as_bytes()];
+                    let bpaths = ["bo".as_bytes(), "bow".as_bytes(), "bowie".as_bytes()];
+                    let cpaths = ["cl".as_bytes(), "club".as_bytes(), "clubhouse".as_bytes()];
+                    let a = PathMap::from_iter(apaths.iter().map(|x| (x, ())));
+                    let b = PathMap::from_iter(bpaths.iter().map(|x| (x, ())));
+                    let c = PathMap::from_iter(cpaths.iter().map(|x| (x, ())));
+                    $convert!(a);
+                    $convert!(b);
+                    $convert!(c);
+                    let mut p1 =
+                        $ProductZipper::new(a.read_zipper(), [b.read_zipper(), c.read_zipper()]);
+                    let mut p2 =
+                        $ProductZipper::new(a.read_zipper(), [b.read_zipper(), c.read_zipper()]);
+
+                    // Reference
+                    for _ in 0..23 {
+                        p1.descend_first_byte();
+                    }
+                    assert_eq!(p1.path_exists(), true);
+                    assert_eq!(p1.path(), b"arrowheadbowieclubhouse");
+                    assert!(p1.is_val());
+
+                    // Validate that I can do the same thing with descend_to()
+                    p2.descend_to(b"arrowheadbowieclubhouse");
+                    assert_eq!(p2.path_exists(), true);
+                    assert_eq!(p2.path(), b"arrowheadbowieclubhouse");
+                    assert!(p2.is_val());
+
+                    // Validate that I can back up, and re-descend
+                    {
+                        p2.ascend(20);
+                        assert_eq!(p2.path(), b"arr");
+                        assert_eq!(p2.path_exists(), true);
+                        assert!(p2.is_val());
+
+                        p2.descend_to(b"owheadbowieclub");
+                        assert_eq!(p2.path(), b"arrowheadbowieclub");
+                        assert_eq!(p2.path_exists(), true);
+                        assert!(p2.is_val());
+                    }
+
+                    //Now descend to a non-existent path off of the first factor, and re-ascend to
+                    // an existing path
+                    {
+                        p2.reset();
+                        // "arrowbow" should't exist because the path continues from "arrowhead"
+                        p2.descend_to(b"arrowbow");
+                        assert_eq!(p2.path(), b"arrowbow");
+                        assert_eq!(p2.path_exists(), false);
+
+                        // "arrowbowclub" should't exist because we started in a trie that doesn't exist
+                        p2.descend_to(b"club");
+                        assert_eq!(p2.path(), b"arrowbowclub");
+                        assert_eq!(p2.path_exists(), false);
+
+                        p2.ascend(9);
+                        assert_eq!(p2.path(), b"arr");
+                        assert_eq!(p2.path_exists(), true);
+                        assert!(p2.is_val());
+
+                        p2.descend_to(b"owheadbowieclub");
+                        assert_eq!(p2.path(), b"arrowheadbowieclub");
+                        assert_eq!(p2.path_exists(), true);
+                        assert!(p2.is_val());
+                    }
+
+                    //Now descend to a non-existent path off of the second factor, and re-ascend to
+                    // get back to an existing path
+                    {
+                        p2.reset();
+                        // "arrowheadbowclub" should't exist because the path continues from "bowie"
+                        p2.descend_to(b"arrowheadbowclub");
+                        assert_eq!(p2.path(), b"arrowheadbowclub");
+                        assert_eq!(p2.path_exists(), false);
+
+                        p2.ascend(5);
+                        assert_eq!(p2.path(), b"arrowheadbo");
+                        assert_eq!(p2.path_exists(), true);
+                        assert!(p2.is_val());
+
+                        p2.descend_to(b"wieclub");
+                        assert_eq!(p2.path(), b"arrowheadbowieclub");
+                        assert_eq!(p2.path_exists(), true);
+                        assert!(p2.is_val());
+                    }
+                }
+
+                #[test]
+                fn product_zipper_test8() {
+                    let lpaths = [
+                        "abcdefghijklmnopqrstuvwxyz".as_bytes(),
+                        "arr".as_bytes(),
+                        "arrow".as_bytes(),
+                        "x".as_bytes(),
+                    ];
+                    let rpaths = [
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(),
+                        "a".as_bytes(),
+                        "bo".as_bytes(),
+                        "bow".as_bytes(),
+                        "bat".as_bytes(),
+                        "bit".as_bytes(),
+                    ];
+                    let epaths = ["foo".as_bytes(), "pho".as_bytes(), "f".as_bytes()];
+                    let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
+                    let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
+                    let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
+                    $convert!(l);
+                    $convert!(r);
+                    $convert!(e);
+
+                    let new_pz =
+                        || $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
+
+                    let mut moving_pz = new_pz();
+                    let cata_pz = new_pz();
+                    cata_pz.into_cata_side_effect(|_, _, _, path| {
+                        // println!("{}", String::from_utf8_lossy(path));
+                        let overlap = find_prefix_overlap(path, moving_pz.path());
+                        if overlap < moving_pz.path().len() {
+                            moving_pz.ascend(moving_pz.path().len() - overlap);
+                        }
+                        if moving_pz.path().len() < path.len() {
+                            moving_pz.descend_to(&path[moving_pz.path().len()..]);
+                            assert!(moving_pz.path_exists());
+                        }
+                        assert_eq!(moving_pz.path(), path);
+
+                        let mut fresh_pz = new_pz();
+                        fresh_pz.descend_to(path);
+
+                        assert_eq!(moving_pz.path(), fresh_pz.path());
+                        assert_eq!(moving_pz.path_exists(), fresh_pz.path_exists());
+                        assert_eq!(moving_pz.val(), fresh_pz.val());
+                        assert_eq!(moving_pz.child_count(), fresh_pz.child_count());
+                        assert_eq!(moving_pz.child_mask(), fresh_pz.child_mask());
+                    })
+                }
+
+                /// Tests the ProductZipper's implementation of `to_next_k_path` or `to_next_sibling_byte`, stepping across factors
+                #[test]
+                fn product_zipper_test9() {
+                    let paths = [
+                        vec![3, 196, 50, 193, 52],
+                        vec![3, 196, 50, 194, 49, 54],
+                        vec![3, 196, 50, 194, 49, 55],
+                    ];
+                    let map: PathMap<()> = paths.iter().map(|path| (path, ())).collect();
+                    $convert!(map);
+                    let mut z = $ProductZipper::new(
+                        map.read_zipper(),
+                        [map.read_zipper(), map.read_zipper()],
+                    );
+
+                    z.descend_to([3, 196, 50, 193, 52, 3, 196, 50, 194, 49, 54]);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.to_next_k_path(2), true);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.child_mask(), ByteMask::from_iter([3]));
+                }
+
+                /// Reproduce a bug in ProductZipperG, where continuing to descend past a non-existent
+                /// path somehow leads to re-entering the next factor
+                #[test]
+                fn product_zipper_testa() {
+                    let paths = [
+                        vec![3, 196, 101, 100, 103, 101, 193, 49, 194, 49, 56],
+                        vec![3, 196, 101, 100, 103, 101, 193, 49, 194, 50, 48],
+                    ];
+                    let map: PathMap<()> = paths.iter().map(|path| (path, ())).collect();
+                    $convert!(map);
+                    let mut z = $ProductZipper::new(
+                        map.read_zipper(),
+                        [map.read_zipper(), map.read_zipper()],
+                    );
+
+                    assert_eq!(z.path_exists(), true);
+                    z.descend_to_byte(3);
+                    assert_eq!(z.path_exists(), true);
+                    z.descend_to_byte(196);
+                    assert_eq!(z.path_exists(), true);
+                    z.descend_to([101, 100, 103, 101]);
+                    assert_eq!(z.path_exists(), true);
+                    z.descend_to_byte(193);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.path(), [3, 196, 101, 100, 103, 101, 193]);
+                    z.descend_to_byte(194);
+                    assert_eq!(z.path(), [3, 196, 101, 100, 103, 101, 193, 194]);
+                    assert_eq!(z.path_exists(), false);
+                    z.descend_to_byte(3);
+                    assert_eq!(z.path(), [3, 196, 101, 100, 103, 101, 193, 194, 3]);
+                    assert_eq!(z.path_exists(), false);
+                }
+
+                /// Test focussed heavily on `descend_to_byte`, with tests for stitching at dangling paths
+                #[test]
+                fn product_zipper_testb() {
+                    let paths = [vec![3, 196, 101, 49], vec![3, 196, 101, 50]];
+                    let mut map = PathMap::<()>::new();
+                    paths.into_iter().for_each(|path| {
+                        map.create_path(path);
+                    });
+                    map.insert([3, 196], ());
+                    map.insert([3, 196, 101, 49], ());
+                    $convert!(map);
+                    let mut z = $ProductZipper::new(
+                        map.read_zipper(),
+                        [map.read_zipper(), map.read_zipper()],
+                    );
+
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.child_count(), 1);
+                    assert_eq!(z.child_mask(), ByteMask::from_iter([3u8]));
+                    assert_eq!(z.is_val(), false);
+
+                    z.descend_to_byte(3);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.child_count(), 1);
+                    assert_eq!(z.child_mask(), ByteMask::from_iter([196u8]));
+                    assert_eq!(z.is_val(), false);
+
+                    z.descend_to_byte(196);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.child_count(), 1);
+                    assert_eq!(z.child_mask(), ByteMask::from_iter([101u8]));
+                    assert_eq!(z.is_val(), true);
+
+                    z.descend_to_byte(101);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.child_count(), 2);
+                    assert_eq!(z.child_mask(), ByteMask::from_iter([49u8, 50]));
+                    assert_eq!(z.is_val(), false);
+
+                    z.descend_to_byte(50);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.child_count(), 1);
+                    assert_eq!(z.child_mask(), ByteMask::from_iter([3u8]));
+                    assert_eq!(z.is_val(), false);
+
+                    z.descend_to_byte(3);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.child_count(), 1);
+                    assert_eq!(z.child_mask(), ByteMask::from_iter([196u8]));
+                    assert_eq!(z.is_val(), false);
+
+                    z.descend_to_byte(196);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.is_val(), true);
+                    assert_eq!(z.child_count(), 1);
+                    assert_eq!(z.child_mask(), ByteMask::from_iter([101u8]));
+
+                    z.descend_to_byte(101);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.child_count(), 2);
+                    assert_eq!(z.child_mask(), ByteMask::from_iter([49u8, 50]));
+                    assert_eq!(z.is_val(), false);
+
+                    z.descend_to_byte(49);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.child_count(), 1);
+                    assert_eq!(z.child_mask(), ByteMask::from_iter([3u8]));
+                    assert_eq!(z.is_val(), true);
+
+                    z.descend_to_byte(3);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.child_count(), 1);
+                    assert_eq!(z.child_mask(), ByteMask::from_iter([196u8]));
+                    assert_eq!(z.is_val(), false);
+
+                    z.descend_to_byte(196);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.child_count(), 1);
+                    assert_eq!(z.child_mask(), ByteMask::from_iter([101u8]));
+                    assert_eq!(z.is_val(), true);
+
+                    z.descend_to_byte(101);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.child_count(), 2);
+                    assert_eq!(z.child_mask(), ByteMask::from_iter([49u8, 50]));
+                    assert_eq!(z.is_val(), false);
+
+                    z.descend_to_byte(50);
+                    assert_eq!(z.path_exists(), true);
+                    assert_eq!(z.child_count(), 0);
+                    assert_eq!(z.child_mask(), ByteMask::EMPTY);
+                    assert_eq!(z.is_val(), false);
+
+                    z.descend_to_byte(3);
+                    assert_eq!(z.path_exists(), false);
+                    assert_eq!(z.child_count(), 0);
+                    assert_eq!(z.child_mask(), ByteMask::EMPTY);
+                    assert_eq!(z.is_val(), false);
+                }
+
+                /// Hits some of the `descend_to_byte` stitch transitions, in the context where we'll have a ByteNode
+                #[test]
+                fn product_zipper_testc() {
+                    let pm: PathMap<()> = [(&[1, 192], ()), (&[4, 196], ()), (&[193, 102], ())]
+                        .into_iter()
+                        .collect();
+
+                    let mut pz = $ProductZipper::new(pm.read_zipper(), [pm.read_zipper()]);
+
+                    pz.descend_to_byte(1);
+                    pz.descend_to_byte(192);
+                    assert_eq!(pz.child_count(), 3);
+                    assert_eq!(pz.child_mask(), ByteMask::from_iter([1u8, 4, 193]));
+                }
+
+                /// This test assembles a map with a single dangling path, and stitches multiple of them
+                /// together into a PZ, so the resulting virtual trie is just one long path with repetitions.
+                ///
+                /// We then validate that `ascend`, `ascend_until`, `ascend_until_branch`, etc. all do the right
+                /// thing traversing across multiple factors, not stopping spuriously at the factor stitch points.
+                ///
+                /// Also we test `descend_until` in this case, because the correct behavior should be to
+                /// seamlessly descend, flowing across multiple factor zippers in one call
+                #[test]
+                fn product_zipper_testd() {
+                    let snip = b"-=**=-";
+                    let repeats = 5;
+                    let mut map = PathMap::<()>::new();
+                    map.create_path(snip);
+
+                    let factors: Vec<_> = (0..repeats - 1)
+                        .into_iter()
+                        .map(|_| map.read_zipper())
+                        .collect();
+                    let mut pz = $ProductZipper::new(map.read_zipper(), factors);
+
+                    let mut full_path = snip.to_vec();
+                    for _ in 0..repeats - 1 {
+                        full_path.extend(snip);
+                    }
+
+                    // descend_to is already well tested, but we're using it to set up the conditions for the ascend tests
+                    pz.descend_to(&full_path);
+                    assert_eq!(pz.path(), full_path);
+                    assert_eq!(pz.path_exists(), true);
+                    assert_eq!(pz.child_count(), 0);
+                    assert_eq!(pz.is_val(), false);
+
+                    // test ascend
+                    assert_eq!(pz.ascend(snip.len() * (repeats - 1)), true);
+                    assert_eq!(pz.path(), snip);
+                    assert_eq!(pz.path_exists(), true);
+                    assert_eq!(pz.child_count(), 1);
+                    assert_eq!(pz.is_val(), false);
+
+                    // test ascend_until
+                    pz.reset();
+                    pz.descend_to(&full_path);
+                    assert_eq!(pz.ascend_until(), true);
+                    assert_eq!(pz.path(), b"");
+                    assert_eq!(pz.path_exists(), true);
+                    assert_eq!(pz.child_count(), 1);
+                    assert_eq!(pz.is_val(), false);
+
+                    // test ascend_until_branch
+                    pz.descend_to(&full_path);
+                    assert_eq!(pz.ascend_until_branch(), true);
+                    assert_eq!(pz.path(), b"");
+                    assert_eq!(pz.path_exists(), true);
+                    assert_eq!(pz.child_count(), 1);
+                    assert_eq!(pz.is_val(), false);
+
+                    // test descend_until
+                    assert_eq!(pz.descend_until(), true);
+                    assert_eq!(pz.path(), full_path);
+                    assert_eq!(pz.path_exists(), true);
+                    assert_eq!(pz.child_count(), 0);
+                    assert_eq!(pz.is_val(), false);
+                }
+
+                #[test]
+                fn product_zipper_inspection_test() {
+                    let lpaths = [
+                        "abcdefghijklmnopqrstuvwxyz".as_bytes(),
+                        "arr".as_bytes(),
+                        "arrow".as_bytes(),
+                        "x".as_bytes(),
+                    ];
+                    let rpaths = [
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ".as_bytes(),
+                        "a".as_bytes(),
+                        "bo".as_bytes(),
+                        "bow".as_bytes(),
+                        "bat".as_bytes(),
+                        "bit".as_bytes(),
+                    ];
+                    let epaths = ["foo".as_bytes(), "pho".as_bytes(), "f".as_bytes()];
+                    let l = PathMap::from_iter(lpaths.iter().map(|x| (x, ())));
+                    let r = PathMap::from_iter(rpaths.iter().map(|x| (x, ())));
+                    let e = PathMap::from_iter(epaths.iter().map(|x| (x, ())));
+                    $convert!(l);
+                    $convert!(r);
+                    $convert!(e);
+                    let mut pz = $ProductZipper::new(
+                        l.read_zipper_at_borrowed_path(b"abcdefghijklm"),
+                        [r.read_zipper(), e.read_zipper()],
+                    );
+
+                    assert_eq!(pz.factor_count(), 3);
+                    assert_eq!(pz.focus_factor(), 0);
+                    assert_eq!(pz.path_indices().len(), 0);
+                    assert_eq!(pz.path(), b"");
+                    assert_eq!(pz.origin_path(), b"abcdefghijklm");
+
+                    pz.descend_to(b"nopqrstuvwxyz");
+                    assert!(pz.path_exists());
+
+                    assert_eq!(pz.focus_factor(), 0);
+                    assert_eq!(pz.path(), b"nopqrstuvwxyz");
+                    assert_eq!(pz.origin_path(), b"abcdefghijklmnopqrstuvwxyz");
+
+                    pz.descend_to(b"AB");
+                    assert!(pz.path_exists());
+
+                    assert_eq!(pz.focus_factor(), 1);
+                    assert_eq!(pz.path_indices()[0], 13);
+                    assert_eq!(pz.path().len(), 15);
+                    assert_eq!(pz.path(), b"nopqrstuvwxyzAB");
+                    assert_eq!(pz.origin_path(), b"abcdefghijklmnopqrstuvwxyzAB");
+
+                    pz.reset();
+                    assert_eq!(pz.child_mask(), ByteMask::from_iter([b'n']));
+                    pz.descend_to(b"nopqrstuvwxyzbowph");
+                    assert!(pz.path_exists());
+                    assert_eq!(pz.focus_factor(), 2);
+                    assert_eq!(pz.path_indices()[0], 13);
+                    assert_eq!(pz.path_indices()[1], 16);
+                    assert_eq!(pz.path(), b"nopqrstuvwxyzbowph");
+                }
             }
             // --- END OF MACRO GENERATED MOD ---
         };
     }
 
-    macro_rules! noop { ($x:ident) => {}; (*$x:ident) => {}; }
+    macro_rules! noop {
+        ($x:ident) => {};
+        (*$x:ident) => {};
+    }
     impl_product_zipper_tests!(pz_concrete, ProductZipper, noop);
     impl_product_zipper_tests!(pz_generic, ProductZipperG, noop);
 
-    #[cfg(feature="arena_compact")]
+    #[cfg(feature = "arena_compact")]
     macro_rules! to_act {
         (*$x:ident) => {
             to_act!($x, |x| *x);
@@ -1624,48 +2229,64 @@ mod tests {
         };
     }
 
-    #[cfg(feature="arena_compact")]
+    #[cfg(feature = "arena_compact")]
     impl_product_zipper_tests!(pz_generic_act, ProductZipperG, to_act, read_zipper_u64);
 
-    crate::zipper::zipper_moving_tests::zipper_moving_tests!(product_zipper,
+    crate::zipper::zipper_moving_tests::zipper_moving_tests!(
+        product_zipper,
         |keys: &[&[u8]]| {
             let mut btm = PathMap::new();
-            keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
+            keys.iter().for_each(|k| {
+                btm.set_val_at(k, ());
+            });
             btm
         },
         |btm: &mut PathMap<()>, path: &[u8]| -> _ {
             ProductZipper::new::<_, TrieRef<()>, _>(btm.read_zipper_at_path(path), [])
-    });
+        }
+    );
 
-    crate::zipper::zipper_iteration_tests::zipper_iteration_tests!(product_zipper,
+    crate::zipper::zipper_iteration_tests::zipper_iteration_tests!(
+        product_zipper,
         |keys: &[&[u8]]| {
             let mut btm = PathMap::new();
-            keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
+            keys.iter().for_each(|k| {
+                btm.set_val_at(k, ());
+            });
             btm
         },
         |btm: &mut PathMap<()>, path: &[u8]| -> _ {
             ProductZipper::new::<_, TrieRef<()>, _>(btm.read_zipper_at_path(path), [])
-    });
+        }
+    );
 
-    crate::zipper::zipper_moving_tests::zipper_moving_tests!(product_zipper_generic,
+    crate::zipper::zipper_moving_tests::zipper_moving_tests!(
+        product_zipper_generic,
         |keys: &[&[u8]]| {
             let mut btm = PathMap::new();
-            keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
+            keys.iter().for_each(|k| {
+                btm.set_val_at(k, ());
+            });
             btm
         },
         |btm: &mut PathMap<()>, path: &[u8]| -> _ {
             ProductZipperG::new::<[ReadZipperUntracked<()>; 0]>(btm.read_zipper_at_path(path), [])
-    });
+        }
+    );
 
-    crate::zipper::zipper_iteration_tests::zipper_iteration_tests!(product_zipper_generic,
+    crate::zipper::zipper_iteration_tests::zipper_iteration_tests!(
+        product_zipper_generic,
         |keys: &[&[u8]]| {
             let mut btm = PathMap::new();
-            keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
+            keys.iter().for_each(|k| {
+                btm.set_val_at(k, ());
+            });
             btm
         },
         |btm: &mut PathMap<()>, path: &[u8]| -> _ {
             ProductZipperG::new::<[ReadZipperUntracked<()>; 0]>(btm.read_zipper_at_path(path), [])
-    });
+        }
+    );
 }
 
 //POSSIBLE FUTURE DIRECTION:

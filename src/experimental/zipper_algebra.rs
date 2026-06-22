@@ -1,7 +1,7 @@
 use crate::{
     alloc::{Allocator, GlobalAlloc},
     ring::{AlgebraicResult, COUNTER_IDENT, DistributiveLattice, Lattice, SELF_IDENT},
-    utils::ByteMask,
+    utils::{BitMask, ByteMask},
     zipper::*,
 };
 
@@ -27,7 +27,7 @@ pub use zipper_algebra_poly::ZipperMergeF;
 /// without visiting unrelated regions.
 ///
 /// Each method delegates to a corresponding free function ([`zipper_join`],
-/// [`zipper_meet`], [`zipper_subtract`]), preserving their performance
+/// [`zipper_meet`], [`zipper_subtract`]), preserving their traversal
 /// characteristics and semantics.
 ///
 /// # Semantics
@@ -1154,7 +1154,7 @@ where
 // - The function is fully monomorphized over `Z` and `N` and uses a bitmask (`active`)
 //   to track participating zippers.
 // - Small frontiers (`k ≤ 4`) are dispatched to specialized implementations
-//   for improved performance.
+//   for better generated code.
 // - Requires `N ≤ 64`.
 fn zipper_merge_n_mono<P, V, Z, Out, A, const N: usize>(zs: &mut [Z; N], active: u64, out: &mut Out)
 where
@@ -1228,23 +1228,23 @@ where
     ) -> R {
         debug_assert!(bits.count_ones() as usize >= K);
 
-        // collect raw pointers first (safe)
-        let mut ptrs: [*mut T; K] = [std::ptr::null_mut(); K];
-
+        // Extract the K distinct active indices from the bitmask, then take K
+        // disjoint &mut into the slice with the safe checked API. The previous
+        // version built raw pointers via `xs.as_mut_ptr().add(idx)` inside the
+        // loop, but each `as_mut_ptr()` re-borrowed `xs` and invalidated the
+        // pointers from earlier iterations under Stacked Borrows (a real UB Miri
+        // flags). `get_disjoint_mut` proves distinctness + in-bounds and hands
+        // back the disjoint references; for small K its check is negligible.
+        let mut indices = [0usize; K];
         let mut i = 0;
         while i < K {
-            let idx = bits.trailing_zeros() as usize;
+            indices[i] = bits.trailing_zeros() as usize;
             bits &= bits - 1;
-            ptrs[i] = unsafe { xs.as_mut_ptr().add(idx) };
             i += 1;
         }
-
-        // SAFETY:
-        // - indices are distinct (bitmask)
-        // - derived from same slice
-
-        // should be zero-cost after inlining
-        let refs = unsafe { ptrs.map(|p| &mut *p) };
+        let refs = xs
+            .get_disjoint_mut(indices)
+            .expect("active bitmask indices are distinct and in bounds");
 
         f(refs)
     }
@@ -1462,6 +1462,234 @@ where
         out.ascend_byte();
         k -= 1;
     }
+}
+
+/// Merges a disjunctive-normal-form expression of zipper factors into `out`.
+///
+/// Each entry in `clauses` is one conjunctive clause. Factors within a clause
+/// are combined with meet semantics; the clause results are then joined across
+/// clauses. Empty clauses are treated as empty finite clauses rather than as a
+/// universal path space.
+///
+/// This is the zipper-level equivalent of:
+///
+/// ```text
+/// (a0 /\ a1 /\ ...) \/ (b0 /\ b1 /\ ...) \/ ...
+/// ```
+///
+/// `M` is the number of disjunctive clauses and must be in `1..=64`.
+pub fn zipper_merge_dnf<V, Z, Out, A, const M: usize>(clauses: &mut [&mut [Z]; M], out: &mut Out)
+where
+    V: Lattice + Clone + Send + Sync + Unpin,
+    A: Allocator,
+    Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    #[inline(always)]
+    fn active_bits<const M: usize>(active: u64) -> impl Iterator<Item = usize> {
+        (0..M).filter(move |i| (active >> i) & 1 != 0)
+    }
+
+    fn only_active<'a, Z, const M: usize>(
+        clauses: &'a [&mut [Z]; M],
+        active: u64,
+    ) -> impl Iterator<Item = (usize, &'a [Z])> {
+        active_bits::<M>(active).map(|i| (i, &clauses[i][..]))
+    }
+
+    #[inline(always)]
+    fn first_active_mut<'a, 'b, Z, const M: usize>(
+        clauses: &'a mut [&'b mut [Z]; M],
+        active: u64,
+    ) -> &'a mut [Z] {
+        debug_assert_ne!(active, 0);
+        let i0 = active.trailing_zeros() as usize;
+        &mut *clauses[i0]
+    }
+
+    #[inline(always)]
+    fn for_each_bit(mut bits: u64, mut f: impl FnMut(usize)) {
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            f(i);
+        }
+    }
+
+    #[inline(always)]
+    fn clause_mask<Z>(zs: &[Z]) -> ByteMask
+    where
+        Z: Zipper,
+    {
+        if zs.is_empty() {
+            return ByteMask::EMPTY;
+        }
+
+        zs.iter()
+            .try_fold(ByteMask::FULL, |mut mask, z| {
+                mask &= z.child_mask();
+                if mask.is_empty_mask() {
+                    None
+                } else {
+                    Some(mask)
+                }
+            })
+            .unwrap_or(ByteMask::EMPTY)
+    }
+
+    #[inline(always)]
+    fn clause_value<V, Z>(zs: &[Z]) -> Option<V>
+    where
+        V: Lattice + Clone,
+        Z: ZipperValues<V>,
+    {
+        Meet::combine_n(zs.iter().map(|z| z.val()))
+    }
+
+    fn active_clauses_value<V, Z, const M: usize>(clauses: &[&mut [Z]; M], active: u64) -> Option<V>
+    where
+        V: Lattice + Clone,
+        Z: ZipperValues<V>,
+    {
+        let mut acc = None;
+        for (_, zs) in only_active(clauses, active) {
+            let clause = clause_value(zs);
+            acc = Join::combine_acc(acc, clause.as_ref());
+        }
+        acc
+    }
+
+    #[inline(always)]
+    fn compute_masks<Z, const M: usize>(
+        clauses: &[&mut [Z]; M],
+        active: u64,
+        clause_masks: &mut [ByteMask; M],
+    ) -> ByteMask
+    where
+        Z: Zipper,
+    {
+        let mut global = ByteMask::EMPTY;
+
+        for (i, zs) in only_active(clauses, active) {
+            let mask = clause_mask(zs);
+            clause_masks[i] = mask;
+            global |= mask;
+        }
+
+        global
+    }
+
+    fn zipper_merge_dnf_branch<V, Z, Out, A, const M: usize>(
+        clauses: &mut [&mut [Z]; M],
+        active: u64,
+        out: &mut Out,
+    ) where
+        V: Lattice + Clone + Send + Sync + Unpin,
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        debug_assert!(active >> M == 0);
+
+        if active.count_ones() == 1 {
+            let single_clause = first_active_mut(clauses, active);
+            match single_clause {
+                [z0] => {
+                    if let Some(value) = z0.val() {
+                        out.set_val(value.clone());
+                    }
+                    Meet::on_id(z0, out);
+                    return;
+                }
+                [z0, z1] => {
+                    zipper_meet(z0, z1, out);
+                    return;
+                }
+                [z0, z1, z2] => {
+                    zipper_meet3(z0, z1, z2, out);
+                    return;
+                }
+                [z0, z1, z2, z3] => {
+                    zipper_merge4::<Meet, V, Z, Z, Z, Z, Out, A>(z0, z1, z2, z3, out);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        let mut clause_masks = [ByteMask::EMPTY; M];
+        let mut depth = 0;
+
+        if let Some(value) = active_clauses_value(clauses, active) {
+            out.set_val(value);
+        }
+
+        let mut global = compute_masks(clauses, active, &mut clause_masks);
+        let mut next = global.indexed_bit::<true>(0);
+
+        'descend: loop {
+            while let Some(byte) = next {
+                out.descend_to_byte(byte);
+
+                let mut sub_active = 0u64;
+                for_each_bit(active, |i| {
+                    if clause_masks[i].test_bit(byte) {
+                        sub_active |= 1 << i;
+                        for z in clauses[i].iter_mut() {
+                            z.descend_to_byte(byte);
+                        }
+                    }
+                });
+
+                if sub_active == active {
+                    depth += 1;
+
+                    if let Some(value) = active_clauses_value(clauses, active) {
+                        out.set_val(value);
+                    }
+
+                    global = compute_masks(clauses, active, &mut clause_masks);
+                    next = global.indexed_bit::<true>(0);
+                    continue 'descend;
+                }
+
+                zipper_merge_dnf_branch(clauses, sub_active, out);
+
+                for_each_bit(sub_active, |i| {
+                    for z in clauses[i].iter_mut() {
+                        z.ascend_byte();
+                    }
+                });
+                out.ascend_byte();
+
+                next = global.next_bit(byte);
+            }
+
+            if depth == 0 {
+                break;
+            }
+
+            let byte_from = first_active_mut(clauses, active)
+                .first()
+                .and_then(|z| z.path().last().copied())
+                .expect("non-empty path at depth > 0");
+
+            for_each_bit(active, |i| {
+                for z in clauses[i].iter_mut() {
+                    z.ascend_byte();
+                }
+            });
+            out.ascend_byte();
+
+            depth -= 1;
+            global = compute_masks(clauses, active, &mut clause_masks);
+            next = global.next_bit(byte_from);
+        }
+    }
+
+    assert!(M > 0 && M <= 64);
+    let active = if M == 64 { u64::MAX } else { (1u64 << M) - 1 };
+    zipper_merge_dnf_branch(clauses, active, out);
 }
 
 // ==================== JOIN ====================
@@ -2067,6 +2295,7 @@ mod zipper_algebra_poly {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         PathMap,
         zipper::{
@@ -2080,6 +2309,37 @@ mod tests {
     type TernaryTest = (Paths, Paths, Paths);
     type NaryTest = [Paths; N];
     const N: usize = 6;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct PolicyValue(u8);
+
+    impl Lattice for PolicyValue {
+        fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> {
+            if self == other {
+                AlgebraicResult::None
+            } else {
+                AlgebraicResult::Element(PolicyValue(self.0.max(other.0)))
+            }
+        }
+
+        fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> {
+            if self == other {
+                AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)
+            } else {
+                AlgebraicResult::None
+            }
+        }
+    }
+
+    impl DistributiveLattice for PolicyValue {
+        fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> {
+            if self.0 > other.0 {
+                AlgebraicResult::Element(PolicyValue(self.0 - other.0))
+            } else {
+                AlgebraicResult::None
+            }
+        }
+    }
 
     fn mk_binary_test(test: &BinaryTest) -> (PathMap<u64>, PathMap<u64>) {
         (PathMap::from_iter(test.0), PathMap::from_iter(test.1))
@@ -2197,6 +2457,134 @@ mod tests {
             result_copy.is_empty(),
             "Paths unaccounted for are present in the result: {result_copy:#?}"
         );
+    }
+
+    fn assert_same_map<V>(expected: &PathMap<V>, result: PathMap<V>)
+    where
+        V: Clone + Send + Sync + Unpin + Eq + core::fmt::Debug,
+    {
+        let mut result_copy = result.clone();
+        let mut expected_zipper = expected.read_zipper();
+
+        while expected_zipper.to_next_val() {
+            let expected_path = expected_zipper.path().to_vec();
+            let expected_val = expected_zipper
+                .val()
+                .expect("to_next_val should stop at a value")
+                .clone();
+            let actual_val = result.get_val_at(&expected_path).cloned();
+
+            assert_eq!(
+                actual_val,
+                Some(expected_val),
+                "Value at {expected_path:#?}"
+            );
+
+            result_copy.remove_val_at(&expected_path, true);
+        }
+
+        assert!(
+            result_copy.is_empty(),
+            "Paths unaccounted for are present in the result: {result_copy:#?}"
+        );
+    }
+
+    mod dnf {
+        use super::*;
+
+        const SMALL_TRIE_1: Paths = &[(&[0, 1, 2], 1), (&[0, 1, 3], 2)];
+        const SMALL_TRIE_2: Paths = &[(&[0, 1], 1), (&[0, 2], 2), (&[2, 3], 4), (&[3], 3)];
+        const SMALL_TRIE_3: Paths = &[(&[0, 1, 2], 1), (&[0, 1, 3], 2), (&[0, 1, 4], 3)];
+        const EMPTY_TRIE: Paths = &[];
+
+        #[test]
+        fn zipper_merge_dnf_matches_single_clause_meet() {
+            let trie1 = PathMap::from_iter(SMALL_TRIE_1);
+            let trie2 = PathMap::from_iter(SMALL_TRIE_2);
+            let trie3 = PathMap::from_iter(SMALL_TRIE_3);
+            let mut z1 = trie1.read_zipper();
+            let mut z2 = trie2.read_zipper();
+            let mut z3 = trie3.read_zipper();
+            let mut result = PathMap::new();
+
+            zipper_merge_dnf(
+                &mut [&mut [&mut z1, &mut z2, &mut z3]],
+                &mut result.write_zipper(),
+            );
+
+            assert_same_map(&trie1.meet(&trie2).meet(&trie3), result);
+        }
+
+        #[test]
+        fn zipper_merge_dnf_matches_singleton_clause_join() {
+            let trie1 = PathMap::from_iter(SMALL_TRIE_1);
+            let trie2 = PathMap::from_iter(SMALL_TRIE_2);
+            let trie3 = PathMap::from_iter(SMALL_TRIE_3);
+            let mut z1 = trie1.read_zipper();
+            let mut z2 = trie2.read_zipper();
+            let mut z3 = trie3.read_zipper();
+            let mut result = PathMap::new();
+
+            zipper_merge_dnf(
+                &mut [&mut [&mut z1], &mut [&mut z2], &mut [&mut z3]],
+                &mut result.write_zipper(),
+            );
+
+            assert_same_map(&trie1.join(&trie2).join(&trie3), result);
+        }
+
+        #[test]
+        fn zipper_merge_dnf_matches_overlapping_clauses() {
+            let trie1 = PathMap::from_iter(SMALL_TRIE_1);
+            let trie2 = PathMap::from_iter(SMALL_TRIE_2);
+            let trie3 = PathMap::from_iter(SMALL_TRIE_3);
+            let mut z2 = trie2.read_zipper();
+            let mut z3 = trie3.read_zipper();
+            let mut result = PathMap::new();
+
+            zipper_merge_dnf(
+                &mut [
+                    &mut [&mut trie1.read_zipper(), &mut z2],
+                    &mut [&mut trie1.read_zipper(), &mut z3],
+                ],
+                &mut result.write_zipper(),
+            );
+
+            assert_same_map(&trie1.meet(&trie2.join(&trie3)), result);
+        }
+
+        #[test]
+        fn zipper_merge_dnf_treats_empty_clause_as_empty_finite_clause() {
+            let trie1 = PathMap::from_iter(SMALL_TRIE_1);
+            let empty = PathMap::from_iter(EMPTY_TRIE);
+            let mut z1 = trie1.read_zipper();
+            let mut result = PathMap::new();
+
+            zipper_merge_dnf(
+                &mut [&mut [], &mut [&mut z1], &mut [&mut empty.read_zipper()]],
+                &mut result.write_zipper(),
+            );
+
+            assert_same_map(&trie1, result);
+        }
+    }
+
+    fn cell_root_map<V>(map: PathMap<V>) -> PathMap<V>
+    where
+        V: Clone + Send + Sync + Unpin,
+    {
+        let (root, root_val) = map.into_root();
+        let mut root = root.expect("cell root test maps should have a root node");
+        let cell_root = root.make_mut().convert_to_cell_node();
+        let result =
+            PathMap::new_with_root_in(Some(cell_root), root_val, crate::alloc::global_alloc());
+
+        assert_eq!(
+            result.read_zipper().get_focus().as_tagged().tag(),
+            crate::trie_node::CELL_BYTE_NODE_TAG
+        );
+
+        result
     }
 
     const DISJOINT_PATHS: BinaryTest = (
@@ -2836,6 +3224,114 @@ mod tests {
         }
 
         #[test]
+        fn test_join_value_policy_none_removes_matched_value() {
+            let left = PathMap::from_iter([(b"same".as_slice(), PolicyValue(7))]);
+            let right = PathMap::from_iter([(b"same".as_slice(), PolicyValue(7))]);
+            let mut result = PathMap::new();
+
+            zipper_join(
+                &mut left.read_zipper(),
+                &mut right.read_zipper(),
+                &mut result.write_zipper(),
+            );
+
+            assert!(
+                result.is_empty(),
+                "pjoin returning AlgebraicResult::None should remove the matched value, got {result:?}"
+            );
+        }
+
+        #[test]
+        fn test_join_matches_whole_map_for_flipped_residual_representations() {
+            let listy = PathMap::from_iter([
+                (b"item/alpha".as_slice(), PolicyValue(1)),
+                (b"item/beta".as_slice(), PolicyValue(2)),
+            ]);
+            let dense = PathMap::from_iter([
+                (b"item/alpha".as_slice(), PolicyValue(10)),
+                (b"item/delta".as_slice(), PolicyValue(30)),
+                (b"item/epsilon".as_slice(), PolicyValue(40)),
+                (b"item/gamma".as_slice(), PolicyValue(20)),
+            ]);
+            let focus = b"item/";
+
+            let listy_focus = listy.read_zipper_at_path(focus).make_map();
+            let dense_focus = dense.read_zipper_at_path(focus).make_map();
+
+            let mut listy_dense_result = PathMap::new();
+            zipper_join(
+                &mut listy.read_zipper_at_path(focus),
+                &mut dense.read_zipper_at_path(focus),
+                &mut listy_dense_result.write_zipper(),
+            );
+            assert_same_map(&listy_focus.join(&dense_focus), listy_dense_result);
+
+            let mut dense_listy_result = PathMap::new();
+            zipper_join(
+                &mut dense.read_zipper_at_path(focus),
+                &mut listy.read_zipper_at_path(focus),
+                &mut dense_listy_result.write_zipper(),
+            );
+            assert_same_map(&dense_focus.join(&listy_focus), dense_listy_result);
+        }
+
+        #[test]
+        fn test_join_matches_whole_map_for_tiny_residual_focus() {
+            let singleton = PathMap::from_iter([(b"shared/singular".as_slice(), PolicyValue(1))]);
+            let branched = PathMap::from_iter([
+                (b"shared/alpha".as_slice(), PolicyValue(10)),
+                (b"shared/beta".as_slice(), PolicyValue(20)),
+                (b"shared/gamma".as_slice(), PolicyValue(30)),
+            ]);
+            let focus = b"shared/";
+
+            let singleton_focus = singleton.read_zipper_at_path(focus).make_map();
+            let branched_focus = branched.read_zipper_at_path(focus).make_map();
+
+            let mut result = PathMap::new();
+            zipper_join(
+                &mut singleton.read_zipper_at_path(focus),
+                &mut branched.read_zipper_at_path(focus),
+                &mut result.write_zipper(),
+            );
+
+            assert_same_map(&singleton_focus.join(&branched_focus), result);
+        }
+
+        #[test]
+        fn test_join_matches_whole_map_for_cell_residual_representation() {
+            let cell = cell_root_map(PathMap::from_iter([
+                (b"a".as_slice(), PolicyValue(10)),
+                (b"b".as_slice(), PolicyValue(7)),
+                (b"c".as_slice(), PolicyValue(5)),
+                (b"d".as_slice(), PolicyValue(1)),
+            ]));
+            let listy = PathMap::from_iter([
+                (b"a".as_slice(), PolicyValue(3)),
+                (b"b".as_slice(), PolicyValue(9)),
+            ]);
+
+            let cell_focus = cell.read_zipper().make_map();
+            let listy_focus = listy.read_zipper().make_map();
+
+            let mut cell_listy_result = PathMap::new();
+            zipper_join(
+                &mut cell.read_zipper(),
+                &mut listy.read_zipper(),
+                &mut cell_listy_result.write_zipper(),
+            );
+            assert_same_map(&cell_focus.join(&listy_focus), cell_listy_result);
+
+            let mut listy_cell_result = PathMap::new();
+            zipper_join(
+                &mut listy.read_zipper(),
+                &mut cell.read_zipper(),
+                &mut listy_cell_result.write_zipper(),
+            );
+            assert_same_map(&listy_focus.join(&cell_focus), listy_cell_result);
+        }
+
+        #[test]
         fn test_one_side_empty3() {
             check3(
                 &LHS_EMPTY_3,
@@ -3254,6 +3750,98 @@ mod tests {
             check2(&DISJOINT_PATHS, DISJOINT_PATHS.0, |lhs, rhs, out| {
                 lhs.subtract(rhs, out);
             });
+        }
+
+        #[test]
+        fn test_subtract_value_policy_is_directional() {
+            let left = PathMap::from_iter([(b"same".as_slice(), PolicyValue(10))]);
+            let right = PathMap::from_iter([(b"same".as_slice(), PolicyValue(3))]);
+
+            let mut forward = PathMap::new();
+            zipper_subtract(
+                &mut left.read_zipper(),
+                &mut right.read_zipper(),
+                &mut forward.write_zipper(),
+            );
+            assert_eq!(forward.get_val_at(b"same"), Some(&PolicyValue(7)));
+
+            let mut reverse = PathMap::new();
+            zipper_subtract(
+                &mut right.read_zipper(),
+                &mut left.read_zipper(),
+                &mut reverse.write_zipper(),
+            );
+            assert!(
+                reverse.is_empty(),
+                "reverse subtract should annihilate when rhs dominates, got {reverse:?}"
+            );
+        }
+
+        #[test]
+        fn test_subtract_matches_whole_map_for_flipped_residual_representations() {
+            let dense = PathMap::from_iter([
+                (b"scope/a".as_slice(), PolicyValue(10)),
+                (b"scope/b".as_slice(), PolicyValue(7)),
+                (b"scope/c".as_slice(), PolicyValue(5)),
+                (b"scope/d".as_slice(), PolicyValue(1)),
+            ]);
+            let listy = PathMap::from_iter([
+                (b"scope/a".as_slice(), PolicyValue(3)),
+                (b"scope/b".as_slice(), PolicyValue(9)),
+            ]);
+            let focus = b"scope/";
+
+            let dense_focus = dense.read_zipper_at_path(focus).make_map();
+            let listy_focus = listy.read_zipper_at_path(focus).make_map();
+
+            let mut dense_listy_result = PathMap::new();
+            zipper_subtract(
+                &mut dense.read_zipper_at_path(focus),
+                &mut listy.read_zipper_at_path(focus),
+                &mut dense_listy_result.write_zipper(),
+            );
+            assert_same_map(&dense_focus.subtract(&listy_focus), dense_listy_result);
+
+            let mut listy_dense_result = PathMap::new();
+            zipper_subtract(
+                &mut listy.read_zipper_at_path(focus),
+                &mut dense.read_zipper_at_path(focus),
+                &mut listy_dense_result.write_zipper(),
+            );
+            assert_same_map(&listy_focus.subtract(&dense_focus), listy_dense_result);
+        }
+
+        #[test]
+        fn test_subtract_matches_whole_map_for_cell_residual_representation() {
+            let cell = cell_root_map(PathMap::from_iter([
+                (b"a".as_slice(), PolicyValue(10)),
+                (b"b".as_slice(), PolicyValue(7)),
+                (b"c".as_slice(), PolicyValue(5)),
+                (b"d".as_slice(), PolicyValue(1)),
+            ]));
+            let listy = PathMap::from_iter([
+                (b"a".as_slice(), PolicyValue(3)),
+                (b"b".as_slice(), PolicyValue(9)),
+            ]);
+
+            let cell_focus = cell.read_zipper().make_map();
+            let listy_focus = listy.read_zipper().make_map();
+
+            let mut cell_listy_result = PathMap::new();
+            zipper_subtract(
+                &mut cell.read_zipper(),
+                &mut listy.read_zipper(),
+                &mut cell_listy_result.write_zipper(),
+            );
+            assert_same_map(&cell_focus.subtract(&listy_focus), cell_listy_result);
+
+            let mut listy_cell_result = PathMap::new();
+            zipper_subtract(
+                &mut listy.read_zipper(),
+                &mut cell.read_zipper(),
+                &mut listy_cell_result.write_zipper(),
+            );
+            assert_same_map(&listy_focus.subtract(&cell_focus), listy_cell_result);
         }
 
         #[test]

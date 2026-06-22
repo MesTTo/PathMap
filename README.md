@@ -7,6 +7,15 @@ PathMap is optimized for large data sets under write-heavy workloads, and can be
 
 This crate provides the low-level data structure for [MORK](https://github.com/trueagi-io/MORK/)
 
+## This fork
+
+On top of the crate above, this fork adds memory-safety
+hardening (the unsafe paths cleared under Miri, the sanitizers, and Kani), additional zipper
+algebra, and performance tooling. It is the low-level substrate for the optimized
+[MORK fork](https://github.com/MesTTo/MORK), where the end-to-end speedups are measured: a
+worst-case-optimal join roughly a thousand times faster on clique detection, and parallel point
+queries past 17 million per second.
+
 ## Why pathmap?
 
 Several crates implement radix-256 trie structures in Rust.  For example [radix_trie](https://crates.io/crates/radix_trie) does it without any unsafe code.  Pathmap is unique because of the following combination of features:

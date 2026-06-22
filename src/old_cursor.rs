@@ -2,35 +2,40 @@
 //! Temporary file, porting old cursor to new trie.  ONLY WORKS WITH `all_dense_nodes` feature
 //!
 
-use crate::PathMap;
-use crate::trie_node::{TaggedNodeRef, NODE_ITER_FINISHED};
-use crate::dense_byte_node::{DenseByteNode, OrdinaryCoFree, CoFree};
 use crate::alloc::GlobalAlloc;
+use crate::dense_byte_node::{CoFree, DenseByteNode, OrdinaryCoFree};
+use crate::trie_node::{IterToken, TaggedNodeRef, NODE_ITER_FINISHED};
+use crate::PathMap;
 
 /// An iterator-like object that traverses key-value pairs in a [PathMap], however only one
 /// returned reference may exist at a given time
-pub struct AllDenseCursor<'a, V: Clone + Send + Sync> where V : Clone {
+pub struct AllDenseCursor<'a, V: Clone + Send + Sync>
+where
+    V: Clone,
+{
     prefix: Vec<u8>,
     btnis: Vec<ByteTrieNodeIter<'a, V>>,
-    nopush: bool
+    nopush: bool,
 }
 
-impl <'a, V : Clone + Send + Sync + Unpin> AllDenseCursor<'a, V> {
+impl<'a, V: Clone + Send + Sync + Unpin> AllDenseCursor<'a, V> {
     pub fn new(btm: &'a PathMap<V>) -> Self {
         btm.ensure_root();
         Self {
             prefix: vec![],
-            btnis: vec![ByteTrieNodeIter::new(btm.root().unwrap().as_tagged().as_dense().unwrap())],
-            nopush: false
+            btnis: vec![ByteTrieNodeIter::new(
+                btm.root().unwrap().as_tagged().as_dense().unwrap(),
+            )],
+            nopush: false,
         }
     }
 }
 
-impl <'a, V : Clone + Send + Sync> AllDenseCursor<'a, V> {
+impl<'a, V: Clone + Send + Sync> AllDenseCursor<'a, V> {
     pub fn next(&mut self) -> Option<(&[u8], &'a V)> {
         loop {
             match self.btnis.last_mut() {
-                None => { return None }
+                None => return None,
                 Some(last) => {
                     match last.next() {
                         None => {
@@ -51,15 +56,15 @@ impl <'a, V : Clone + Send + Sync> AllDenseCursor<'a, V> {
                                 }
                                 Some(rec) => {
                                     self.nopush = false;
-                                    self.btnis.push(ByteTrieNodeIter::new(rec.as_tagged().as_dense().unwrap()));
+                                    self.btnis.push(ByteTrieNodeIter::new(
+                                        rec.as_tagged().as_dense().unwrap(),
+                                    ));
                                 }
                             }
 
                             match cf.val() {
                                 None => {}
-                                Some(v) => {
-                                    return Some((&self.prefix, v))
-                                }
+                                Some(v) => return Some((&self.prefix, v)),
                             }
                         }
                     }
@@ -72,20 +77,20 @@ impl <'a, V : Clone + Send + Sync> AllDenseCursor<'a, V> {
 pub struct ByteTrieNodeIter<'a, V: Clone + Send + Sync> {
     i: u8,
     w: u64,
-    btn: &'a DenseByteNode<V, GlobalAlloc>
+    btn: &'a DenseByteNode<V, GlobalAlloc>,
 }
 
-impl <'a, V: Clone + Send + Sync> ByteTrieNodeIter<'a, V> {
+impl<'a, V: Clone + Send + Sync> ByteTrieNodeIter<'a, V> {
     fn new(btn: &'a DenseByteNode<V, GlobalAlloc>) -> Self {
         Self {
             i: 0,
             w: btn.mask.0[0],
-            btn: btn
+            btn: btn,
         }
     }
 }
 
-impl <'a, V : Clone + Send + Sync> Iterator for ByteTrieNodeIter<'a, V> {
+impl<'a, V: Clone + Send + Sync> Iterator for ByteTrieNodeIter<'a, V> {
     type Item = (u8, &'a OrdinaryCoFree<V, GlobalAlloc>);
 
     fn next(&mut self) -> Option<(u8, &'a OrdinaryCoFree<V, GlobalAlloc>)> {
@@ -93,13 +98,13 @@ impl <'a, V : Clone + Send + Sync> Iterator for ByteTrieNodeIter<'a, V> {
             if self.w != 0 {
                 let wi = self.w.trailing_zeros() as u8;
                 self.w ^= 1u64 << wi;
-                let index = self.i*64 + wi;
-                return Some((index, unsafe{ self.btn.get_unchecked(index) } ))
+                let index = self.i * 64 + wi;
+                return Some((index, unsafe { self.btn.get_unchecked(index) }));
             } else if self.i < 3 {
                 self.i += 1;
                 self.w = unsafe { *self.btn.mask.0.get_unchecked(self.i as usize) };
             } else {
-                return None
+                return None;
             }
         }
     }
@@ -249,10 +254,10 @@ impl <'a, V : Clone + Send + Sync> Iterator for ByteTrieNodeIter<'a, V> {
 
 pub struct PathMapCursor<'a, V: Clone + Send + Sync> {
     prefix_buf: Vec<u8>,
-    btnis: Vec<(TaggedNodeRef<'a, V, GlobalAlloc>, u128, usize)>,
+    btnis: Vec<(TaggedNodeRef<'a, V, GlobalAlloc>, IterToken, usize)>,
 }
 
-impl <'a, V : Clone + Send + Sync + Unpin> PathMapCursor<'a, V> {
+impl<'a, V: Clone + Send + Sync + Unpin> PathMapCursor<'a, V> {
     pub fn new(btm: &'a PathMap<V>) -> Self {
         const EXPECTED_DEPTH: usize = 16;
         const EXPECTED_PATH_LEN: usize = 256;
@@ -268,11 +273,11 @@ impl <'a, V : Clone + Send + Sync + Unpin> PathMapCursor<'a, V> {
     }
 }
 
-impl <'a, V : Clone + Send + Sync> PathMapCursor<'a, V> {
+impl<'a, V: Clone + Send + Sync> PathMapCursor<'a, V> {
     pub fn next(&mut self) -> Option<(&[u8], &'a V)> {
         loop {
             match self.btnis.last_mut() {
-                None => { return None }
+                None => return None,
                 Some((node, token, key_start)) => {
                     let (new_token, key_bytes, rec, value) = node.next_items(*token);
 
@@ -285,12 +290,13 @@ impl <'a, V : Clone + Send + Sync> PathMapCursor<'a, V> {
                         self.prefix_buf.extend(key_bytes);
 
                         match rec {
-                            None => {},
+                            None => {}
                             Some(rec) => {
                                 let child_node = rec.as_tagged();
                                 let child_token = child_node.new_iter_token();
-                                self.btnis.push((child_node, child_token, self.prefix_buf.len()));
-                            },
+                                self.btnis
+                                    .push((child_node, child_token, self.prefix_buf.len()));
+                            }
                         }
 
                         match value {
@@ -303,5 +309,3 @@ impl <'a, V : Clone + Send + Sync> PathMapCursor<'a, V> {
         }
     }
 }
-
-

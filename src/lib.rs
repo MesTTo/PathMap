@@ -1,66 +1,72 @@
-#![cfg_attr(feature = "nightly", allow(internal_features), feature(core_intrinsics))]
-#![cfg_attr(feature = "nightly", feature(portable_simd))]
 #![cfg_attr(feature = "nightly", feature(allocator_api))]
 #![cfg_attr(feature = "nightly", feature(coroutine_trait))]
 #![cfg_attr(feature = "nightly", feature(coroutines))]
 #![cfg_attr(feature = "nightly", feature(stmt_expr_attributes))]
-#![cfg_attr(feature = "nightly", feature(gen_blocks))]
 #![cfg_attr(feature = "nightly", feature(yield_expr))]
-
 #![doc = include_str!("../README.md")]
 
 #[cfg(feature = "jemalloc")]
 use tikv_jemallocator::Jemalloc;
 
-#[cfg(not(any(miri, target_arch="riscv64")))]
+#[cfg(not(any(kani, miri, target_arch = "riscv64")))]
 use gxhash;
 
-#[cfg(any(miri, target_arch="riscv64"))]
+#[cfg(any(kani, miri, target_arch = "riscv64"))]
 mod gxhash {
     // fallback
     // pub use xxhash_rust::xxh64::{Xxh64 as GxHasher};
     /// Just a simple XOR hasher so miri doesn't explode on all the tests that use GxHash
     #[derive(Clone, Default)]
-    pub struct GxHasher { state_lo: u64, state_hi: u64, }
+    pub struct GxHasher {
+        state_lo: u64,
+        state_hi: u64,
+    }
     impl GxHasher {
-      pub fn with_seed(seed: i64) -> Self {
-        //Reinterpret the bits without any kind of rounding, truncation, extension, etc.
-        let seed = u64::from_ne_bytes(seed.to_ne_bytes());
-        Self { state_lo: seed ^ 0xA5A5A5A5_A5A5A5A5, state_hi: !seed ^ 0x5A5A5A5A_5A5A5A5A, }
-      }
-      pub fn finish_u128(&self) -> u128 {
-        ((self.state_hi as u128) << 64) | self.state_lo as u128
-      }
+        pub fn with_seed(seed: i64) -> Self {
+            //Reinterpret the bits without any kind of rounding, truncation, extension, etc.
+            let seed = u64::from_ne_bytes(seed.to_ne_bytes());
+            Self {
+                state_lo: seed ^ 0xA5A5A5A5_A5A5A5A5,
+                state_hi: !seed ^ 0x5A5A5A5A_5A5A5A5A,
+            }
+        }
+        pub fn finish_u128(&self) -> u128 {
+            ((self.state_hi as u128) << 64) | self.state_lo as u128
+        }
     }
     impl core::hash::Hasher for GxHasher {
-      fn write(&mut self, buf: &[u8]) {
-        for &c in buf {
-            self.write_u8(c);
+        fn write(&mut self, buf: &[u8]) {
+            for &c in buf {
+                self.write_u8(c);
+            }
         }
-      }
-      fn write_u8(&mut self, i: u8) {
-        self.state_lo = self.state_lo.wrapping_add(i as u64);
-        self.state_hi ^= (i as u64).rotate_left(11);
-        self.state_lo = self.state_lo.rotate_left(3);
-      }
-      fn write_u128(&mut self, i: u128) {
-        let low = i as u64;
-        let high = (i >> 64) as u64;
-        self.state_lo = self.state_lo.wrapping_add(low);
-        self.state_hi ^= high.rotate_left(17);
-        self.state_lo ^= high.rotate_left(9);
-      }
-      fn finish(&self) -> u64 {
-        self.finish_u128() as u64
-      }
+        fn write_u8(&mut self, i: u8) {
+            self.state_lo = self.state_lo.wrapping_add(i as u64);
+            self.state_hi ^= (i as u64).rotate_left(11);
+            self.state_lo = self.state_lo.rotate_left(3);
+        }
+        fn write_u128(&mut self, i: u128) {
+            let low = i as u64;
+            let high = (i >> 64) as u64;
+            self.state_lo = self.state_lo.wrapping_add(low);
+            self.state_hi ^= high.rotate_left(17);
+            self.state_lo ^= high.rotate_left(9);
+        }
+        fn finish(&self) -> u64 {
+            self.finish_u128() as u64
+        }
     }
 
     pub use std::collections::HashMap;
-    pub fn gxhash128(data: &[u8], _seed: i64) -> u128 { xxhash_rust::const_xxh3::xxh3_128(data) }
-    pub trait HashMapExt{}
-    pub trait HashSetExt{}
+    #[allow(dead_code)]
+    pub fn gxhash128(data: &[u8], _seed: i64) -> u128 {
+        xxhash_rust::const_xxh3::xxh3_128(data)
+    }
+    #[allow(dead_code)]
+    pub trait HashMapExt {}
+    #[allow(dead_code)]
+    pub trait HashSetExt {}
 }
-
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -112,7 +118,7 @@ mod zipper_head;
 #[cfg(feature = "random")]
 pub mod random;
 
-/// Features to inspect performance properties of trees, for optimizing
+/// Features to inspect runtime properties of trees while tuning internals.
 #[cfg(feature = "counters")]
 pub mod counters;
 
@@ -126,20 +132,22 @@ pub mod viz;
 #[cfg(feature = "serialization")]
 pub mod paths_serialization;
 
-mod trie_node;
-mod write_zipper;
-mod product_zipper;
-mod empty_zipper;
-mod prefix_zipper;
-mod overlay_zipper;
-mod dependent_zipper;
-mod trie_ref;
-mod dense_byte_node;
-pub(crate) mod line_list_node;
-mod empty_node;
-mod tiny_node;
-#[cfg(feature = "bridge_nodes")]
+#[cfg(any())]
 mod bridge_node;
+mod dense_byte_node;
+mod dependent_zipper;
+mod empty_node;
+mod empty_zipper;
+pub(crate) mod line_list_node;
+mod overlay_zipper;
+mod prefix_zipper;
+mod product_zipper;
+mod restrict_zipper;
+mod subtract_zipper;
+mod tiny_node;
+mod trie_node;
+mod trie_ref;
+mod write_zipper;
 
 #[cfg(feature = "old_cursor")]
 mod old_cursor;
@@ -147,7 +155,7 @@ mod old_cursor;
 /// A supertrait that encapsulates the bounds for a value that can be put in a [PathMap]
 pub trait TrieValue: Clone + Send + Sync + Unpin {}
 
-impl<T> TrieValue for T where T : Clone + Send + Sync + Unpin {}
+impl<T> TrieValue for T where T: Clone + Send + Sync + Unpin {}
 
 /// Internal macro to implement Debug on a type that just outputs the type name
 macro_rules! impl_name_only_debug {
@@ -163,21 +171,23 @@ pub(crate) use impl_name_only_debug;
 
 #[cfg(test)]
 mod tests {
-    use rand::{Rng, SeedableRng, rngs::StdRng};
-    use crate::ring::*;
     use crate::PathMap;
+    use crate::ring::*;
     use crate::zipper::*;
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     pub(crate) fn prefix_key(k: &u64) -> &[u8] {
-        let bs = (8 - k.leading_zeros()/8) as u8;
+        let bs = (8 - k.leading_zeros() / 8) as u8;
         let kp: *const u64 = k;
         unsafe { std::slice::from_raw_parts(kp as *const _, (bs as usize).max(1)) }
     }
 
     pub(crate) fn from_prefix_key(k: Vec<u8>) -> u64 {
         let mut buf = [0u8; 8];
-        unsafe { core::ptr::copy_nonoverlapping(k.as_ptr(), buf.as_mut_ptr(), k.len()); }
-        let shift = 64usize.saturating_sub(k.len()*8);
+        unsafe {
+            core::ptr::copy_nonoverlapping(k.as_ptr(), buf.as_mut_ptr(), k.len());
+        }
+        let shift = 64usize.saturating_sub(k.len() * 8);
         u64::from_le_bytes(buf) & (!0u64 >> shift)
     }
 
@@ -243,8 +253,12 @@ mod tests {
 
         let mut vnl = PathMap::new();
         let mut vnr = PathMap::new();
-        for i in 0..N { vnl.set_val_at(prefix_key(&i), i); }
-        for i in o..(N+o) { vnr.set_val_at(prefix_key(&i), i); }
+        for i in 0..N {
+            vnl.set_val_at(prefix_key(&i), i);
+        }
+        for i in o..(N + o) {
+            vnr.set_val_at(prefix_key(&i), i);
+        }
         let l_no_r = vnl.subtract(&vnr);
 
         //Validate the ByteTrieMap::subtract against HashSet::difference
@@ -259,17 +273,16 @@ mod tests {
 
     #[test]
     fn btm_subtract_after_join() {
-
         //This entire operation works with only ListNodes
         let r: Vec<Vec<u8>> = vec![
             vec![61, 85, 161, 68, 245, 90, 129],
-            vec![70, 91, 37, 155, 181, 227, 100, 255, 66, 129, 158, 241, 183, 96, 59],
+            vec![
+                70, 91, 37, 155, 181, 227, 100, 255, 66, 129, 158, 241, 183, 96, 59,
+            ],
         ];
         let r: PathMap<u64> = r.into_iter().map(|v| (v, 0)).collect();
 
-        let l: Vec<Vec<u8>> = vec![
-            vec![70, 116, 109, 134, 122, 15, 78, 126, 240, 158, 42, 221],
-        ];
+        let l: Vec<Vec<u8>> = vec![vec![70, 116, 109, 134, 122, 15, 78, 126, 240, 158, 42, 221]];
         let l: PathMap<u64> = l.into_iter().map(|v| (v, 0)).collect();
 
         let joined = l.join(&r);
@@ -286,13 +299,13 @@ mod tests {
         let r: Vec<Vec<u8>> = vec![
             vec![61, 85, 161, 68, 245, 90, 129],
             vec![70, 10, 122, 77, 171, 54, 32, 161, 24, 162, 112, 152],
-            vec![70, 91, 37, 155, 181, 227, 100, 255, 66, 129, 158, 241, 183, 96, 59],
+            vec![
+                70, 91, 37, 155, 181, 227, 100, 255, 66, 129, 158, 241, 183, 96, 59,
+            ],
         ];
         let r: PathMap<u64> = r.into_iter().map(|v| (v, 0)).collect();
 
-        let l: Vec<Vec<u8>> = vec![
-            vec![70, 116, 109, 134, 122, 15, 78, 126, 240, 158, 42, 221],
-        ];
+        let l: Vec<Vec<u8>> = vec![vec![70, 116, 109, 134, 122, 15, 78, 126, 240, 158, 42, 221]];
         let l: PathMap<u64> = l.into_iter().map(|v| (v, 0)).collect();
 
         let joined = l.join(&r);
@@ -314,15 +327,22 @@ mod tests {
         const N: u64 = 500;
 
         let mut rng = StdRng::seed_from_u64(1);
-        let keys: Vec<Vec<u8>> = (0..N).into_iter().map(|_| {
-            let len = (rng.random::<u8>() % 18) + 3; //length between 3 and 20 chars
-            (0..len).into_iter().map(|_| rng.random::<u8>()).collect()
-        }).collect();
+        let keys: Vec<Vec<u8>> = (0..N)
+            .into_iter()
+            .map(|_| {
+                let len = (rng.random::<u8>() % 18) + 3; //length between 3 and 20 chars
+                (0..len).into_iter().map(|_| rng.random::<u8>()).collect()
+            })
+            .collect();
 
         let mut l: PathMap<u64> = PathMap::new();
-        for i in 0..(N/2) { l.set_val_at(&keys[i as usize], i); }
+        for i in 0..(N / 2) {
+            l.set_val_at(&keys[i as usize], i);
+        }
         let mut r: PathMap<u64> = PathMap::new();
-        for i in (N/2)..N { r.set_val_at(&keys[i as usize], i); }
+        for i in (N / 2)..N {
+            r.set_val_at(&keys[i as usize], i);
+        }
 
         let joined = l.join(&r);
         let remaining = joined.subtract(&r);
@@ -381,6 +401,107 @@ mod tests {
         assert_eq!(remaining.path_exists_at([5u8, 2u8]), true);
     }
 
+    /// Differential oracle for `subtract_cow` (the COW-identity-skipping diff).
+    /// `subtract_cow(a, b)` must equal both (1) an independent HashSet set
+    /// difference of the two key sets, and (2) the plain `subtract(a, b)`, across
+    /// random disjoint maps, COW clones of `a` with random facts added/removed
+    /// (the heavy-sharing case the optimization targets), identical maps, and
+    /// empty operands. Equal key sets here means byte-identical contents (these
+    /// are `()`-valued path sets), so this proves the COW skip changes nothing.
+    #[test]
+    fn subtract_cow_matches_subtract_and_set_difference() {
+        use std::collections::HashSet;
+
+        fn keyset(m: &PathMap<()>) -> HashSet<Vec<u8>> {
+            m.iter().map(|(k, _)| k).collect()
+        }
+        // assert subtract_cow == reference set-difference == plain subtract
+        fn check(a: &PathMap<()>, b: &PathMap<()>) {
+            let cow = a.subtract_cow(b);
+            let plain = a.subtract(b);
+            let a_set = keyset(a);
+            let b_set = keyset(b);
+            let mut reference: Vec<Vec<u8>> = a_set.difference(&b_set).cloned().collect();
+            let mut cow_keys: Vec<Vec<u8>> = cow.iter().map(|(k, _)| k).collect();
+            let mut plain_keys: Vec<Vec<u8>> = plain.iter().map(|(k, _)| k).collect();
+            reference.sort();
+            cow_keys.sort();
+            plain_keys.sort();
+            assert_eq!(cow_keys, reference, "subtract_cow != set difference");
+            assert_eq!(cow_keys, plain_keys, "subtract_cow != subtract");
+            assert_eq!(cow.val_count(), reference.len());
+        }
+
+        // random fixed-width key (so COW clones share interior structure)
+        fn rand_key(rng: &mut StdRng) -> [u8; 6] {
+            let mut k = [0u8; 6];
+            for b in k.iter_mut() {
+                *b = rng.gen_range(0..4u8); // small alphabet => deep shared trie
+            }
+            k
+        }
+
+        #[cfg(miri)]
+        const SEEDS: u64 = 2;
+        #[cfg(not(miri))]
+        const SEEDS: u64 = 16;
+        #[cfg(miri)]
+        const N: usize = 30;
+        #[cfg(not(miri))]
+        const N: usize = 400;
+
+        for seed in 0..SEEDS {
+            let mut rng = StdRng::seed_from_u64(seed);
+
+            // base map
+            let mut a: PathMap<()> = PathMap::new();
+            for _ in 0..N {
+                a.set_val_at(rand_key(&mut rng), ());
+            }
+
+            // (ii) the real case: b is a COW clone of a, then add and remove a few
+            // facts. clone() is COW, so a and b share almost all interior nodes;
+            // the optimization must prune those and still produce the exact diff.
+            let mut b = a.clone();
+            let edits = (N / 20).max(1);
+            for _ in 0..edits {
+                b.set_val_at(rand_key(&mut rng), ()); // adds (mostly new leaves)
+            }
+            // remove some keys that exist in a (so a\b is non-empty)
+            let a_keys: Vec<Vec<u8>> = a.iter().map(|(k, _)| k).collect();
+            for i in 0..edits.min(a_keys.len()) {
+                let idx = rng.gen_range(0..a_keys.len());
+                let _ = i;
+                b.remove_val_at(&a_keys[idx], true);
+            }
+            check(&a, &b); // a \ b
+            check(&b, &a); // b \ a (the other direction)
+
+            // (iii) identical maps (b is a pure COW clone): a \ a == empty
+            let a_clone = a.clone();
+            check(&a, &a_clone);
+            assert_eq!(a.subtract_cow(&a_clone).val_count(), 0);
+
+            // (i) random disjoint maps (different alphabets => no shared paths)
+            let mut c: PathMap<()> = PathMap::new();
+            for _ in 0..N {
+                let mut k = [0u8; 6];
+                for x in k.iter_mut() {
+                    *x = rng.gen_range(200..255u8);
+                }
+                c.set_val_at(k, ());
+            }
+            check(&a, &c);
+            check(&c, &a);
+
+            // (iv) empty operands
+            let empty: PathMap<()> = PathMap::new();
+            check(&a, &empty); // a \ {} == a
+            check(&empty, &a); // {} \ a == {}
+            check(&empty, &empty); // {} \ {} == {}
+        }
+    }
+
     #[test]
     fn btm_test_restrict1() {
         let mut l: PathMap<&str> = PathMap::new();
@@ -402,18 +523,42 @@ mod tests {
     /// Tests restrictions on a very dense trie
     #[test]
     fn btm_test_restrict2() {
-
         // These values are base-4 numbers in "little endian"
         let keys = [
-            vec![0],    vec![1],    vec![2],    vec![3],    vec![0, 1], vec![1, 1], vec![2, 1], vec![3, 1],
-            vec![0, 2], vec![1, 2], vec![2, 2], vec![3, 2], vec![0, 3], vec![1, 3], vec![2, 3], vec![3, 3],
-            vec![0, 0, 1], vec![1, 0, 1], vec![2, 0, 1], vec![3, 0, 1]
+            vec![0],
+            vec![1],
+            vec![2],
+            vec![3],
+            vec![0, 1],
+            vec![1, 1],
+            vec![2, 1],
+            vec![3, 1],
+            vec![0, 2],
+            vec![1, 2],
+            vec![2, 2],
+            vec![3, 2],
+            vec![0, 3],
+            vec![1, 3],
+            vec![2, 3],
+            vec![3, 3],
+            vec![0, 0, 1],
+            vec![1, 0, 1],
+            vec![2, 0, 1],
+            vec![3, 0, 1],
         ];
-        let map: PathMap<i32> = keys.iter().enumerate().map(|(i, k)| (k, i as i32)).collect();
+        let map: PathMap<i32> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k, i as i32))
+            .collect();
 
         // Restrict to odd numbers
-        let odd_keys = [ vec![1], vec![3]];
-        let odd_map: PathMap<i32> = odd_keys.iter().enumerate().map(|(i, k)| (k, i as i32)).collect();
+        let odd_keys = [vec![1], vec![3]];
+        let odd_map: PathMap<i32> = odd_keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k, i as i32))
+            .collect();
         let restricted = map.restrict(&odd_map);
 
         assert_eq!(restricted.val_count(), 10);
@@ -429,8 +574,12 @@ mod tests {
         assert_eq!(restricted.get_val_at([3, 0, 1]), Some(&19));
 
         // Restrict to numbers divisible by 4 (exluding 0; 0 technically isn't divisible by 4)
-        let div4_keys = [ vec![0, 0], vec![0, 1], vec![0, 2], vec![0, 3]];
-        let div4_map: PathMap<i32> = div4_keys.iter().enumerate().map(|(i, k)| (k, i as i32)).collect();
+        let div4_keys = [vec![0, 0], vec![0, 1], vec![0, 2], vec![0, 3]];
+        let div4_map: PathMap<i32> = div4_keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k, i as i32))
+            .collect();
         let restricted = map.restrict(&div4_map);
 
         assert_eq!(restricted.val_count(), 4);
@@ -455,11 +604,19 @@ mod tests {
             "adaptation",
             "adapter",
         ];
-        let map: PathMap<i32> = keys.iter().enumerate().map(|(i, k)| (k, i as i32)).collect();
+        let map: PathMap<i32> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k, i as i32))
+            .collect();
 
         // Restrict to words beginning with "act"
-        let restrictor = [ "act" ];
-        let restrictor_map: PathMap<i32> = restrictor.iter().enumerate().map(|(i, k)| (k, i as i32)).collect();
+        let restrictor = ["act"];
+        let restrictor_map: PathMap<i32> = restrictor
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k, i as i32))
+            .collect();
         let restricted = map.restrict(&restrictor_map);
 
         assert_eq!(restricted.val_count(), 4);
@@ -467,8 +624,12 @@ mod tests {
         assert_eq!(restricted.get_val_at("activities"), Some(&4));
 
         // Restrict to words beginning with "a"
-        let restrictor = [ "a" ];
-        let restrictor_map: PathMap<i32> = restrictor.iter().enumerate().map(|(i, k)| (k, i as i32)).collect();
+        let restrictor = ["a"];
+        let restrictor_map: PathMap<i32> = restrictor
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k, i as i32))
+            .collect();
         let restricted = map.restrict(&restrictor_map);
 
         assert_eq!(restricted.val_count(), 8);
@@ -507,9 +668,18 @@ mod tests {
         assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8]), Some(&5));
         assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
         assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), Some(&9));
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
+        assert_eq!(
+            map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]),
+            None
+        );
+        assert_eq!(
+            map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]),
+            Some(&9)
+        );
+        assert_eq!(
+            map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]),
+            None
+        );
     }
 
     #[test]
@@ -581,9 +751,13 @@ mod tests {
         const N: u64 = 1000;
 
         let mut l: PathMap<u64> = PathMap::new();
-        for i in 0..(N/2) { l.set_val_at(prefix_key(&i), i); }
+        for i in 0..(N / 2) {
+            l.set_val_at(prefix_key(&i), i);
+        }
         let mut r: PathMap<u64> = PathMap::new();
-        for i in (N/2)..N { r.set_val_at(prefix_key(&i), i); }
+        for i in (N / 2)..N {
+            r.set_val_at(prefix_key(&i), i);
+        }
 
         let joined = l.join(&r);
         let met = joined.meet(&l);
@@ -606,18 +780,25 @@ mod tests {
         let o = ((1. - overlap) * N as f64) as u64;
 
         let mut rng = StdRng::seed_from_u64(1);
-        let keys: Vec<Vec<u8>> = (0..N+o).into_iter().map(|_| {
-            let len = (rng.random::<u8>() % 18) + 3; //length between 3 and 20 chars
-            (0..len).into_iter().map(|_| rng.random::<u8>()).collect()
-        }).collect();
+        let keys: Vec<Vec<u8>> = (0..N + o)
+            .into_iter()
+            .map(|_| {
+                let len = (rng.random::<u8>() % 18) + 3; //length between 3 and 20 chars
+                (0..len).into_iter().map(|_| rng.random::<u8>()).collect()
+            })
+            .collect();
 
         let mut l: PathMap<u64> = PathMap::new();
-        for i in 0..N { l.set_val_at(&keys[i as usize], i); }
+        for i in 0..N {
+            l.set_val_at(&keys[i as usize], i);
+        }
         let mut r: PathMap<u64> = PathMap::new();
-        for i in o..(N+o) { r.set_val_at(&keys[i as usize], i); }
+        for i in o..(N + o) {
+            r.set_val_at(&keys[i as usize], i);
+        }
 
         let intersection = l.meet(&r);
-        assert_eq!(intersection.val_count(), (N/2) as usize);
+        assert_eq!(intersection.val_count(), (N / 2) as usize);
     }
 
     /// This test is a minimal repro case for a bug where a list node is intersected with a byte node,
@@ -628,15 +809,15 @@ mod tests {
             vec![207, 27],  //NON-OVERLAP!
             vec![207, 117], //Overlap
             vec![207, 142], //Overlap
-            // vec![208, 250], //Overlap
-            // vec![213, 63],  //Overlap
+                            // vec![208, 250], //Overlap
+                            // vec![213, 63],  //Overlap
         ];
         let r_keys = [
             vec![207, 117], //Overlap
             vec![207, 142], //Overlap
-            // vec![208, 157], //NON-OVERLAP!
-            // vec![208, 250], //Overlap
-            // vec![213, 63],  //Overlap
+                            // vec![208, 157], //NON-OVERLAP!
+                            // vec![208, 250], //Overlap
+                            // vec![213, 63],  //Overlap
         ];
         let l: PathMap<u64> = l_keys.into_iter().map(|v| (v, 0)).collect();
         let r: PathMap<u64> = r_keys.into_iter().map(|v| (v, 0)).collect();
@@ -660,10 +841,16 @@ mod tests {
             {
                 let mut vnl = PathMap::new();
                 let mut vnr = PathMap::new();
-                for i in 0..n { vnl.set_val_at(prefix_key(&i), i); }
+                for i in 0..n {
+                    vnl.set_val_at(prefix_key(&i), i);
+                }
                 // println!("{:?}", vnl.root);
-                for i in 0..n { assert_eq!(vnl.get_val_at(prefix_key(&i)), Some(i).as_ref()); }
-                for i in n..2*n { assert_eq!(vnl.get_val_at(prefix_key(&i)), None); }
+                for i in 0..n {
+                    assert_eq!(vnl.get_val_at(prefix_key(&i)), Some(i).as_ref());
+                }
+                for i in n..2 * n {
+                    assert_eq!(vnl.get_val_at(prefix_key(&i)), None);
+                }
                 let mut c: Vec<u64> = Vec::with_capacity(n as usize);
                 vnl.iter().for_each(|(k, v)| {
                     assert!(*v < n);
@@ -672,22 +859,69 @@ mod tests {
                 });
                 c.sort();
                 assert_eq!(c, (0..n).collect::<Vec<u64>>());
-                for i in o..(n+o) { vnr.set_val_at(prefix_key(&i), i); }
+                for i in o..(n + o) {
+                    vnr.set_val_at(prefix_key(&i), i);
+                }
 
                 let j: PathMap<u64> = vnl.join(&vnr);
                 let m = vnl.meet(&vnr);
                 let l_no_r = vnl.subtract(&vnr);
 
-                for i in 0..o { assert_eq!(l_no_r.get_val_at(prefix_key(&i)), vnl.get_val_at(prefix_key(&i))); }
-                for i in o..(n+o) { assert!(!l_no_r.contains(prefix_key(&i))); }
+                for i in 0..o {
+                    assert_eq!(
+                        l_no_r.get_val_at(prefix_key(&i)),
+                        vnl.get_val_at(prefix_key(&i))
+                    );
+                }
+                for i in o..(n + o) {
+                    assert!(!l_no_r.contains(prefix_key(&i)));
+                }
 
-                for i in o..n { assert!(vnl.contains(prefix_key(&i)) && vnr.contains(prefix_key(&i))); }
-                for i in 0..o { assert!(vnl.contains(prefix_key(&i)) && !vnr.contains(prefix_key(&i))); }
-                for i in n..(n+o) { assert!(!vnl.contains(prefix_key(&i)) && vnr.contains(prefix_key(&i))); }
-                for i in 0..(2*n) { assert_eq!(j.contains(prefix_key(&i)), (vnl.contains(prefix_key(&i)) || vnr.contains(prefix_key(&i)))); }
-                for i in 0..(2*n) { assert_eq!(m.contains(prefix_key(&i)), (vnl.contains(prefix_key(&i)) && vnr.contains(prefix_key(&i)))); }
-                for i in 0..(n+o) { assert_eq!(j.get_val_at(prefix_key(&i)).map(|v| *v), vnl.get_val_at(prefix_key(&i)).pjoin(&vnr.get_val_at(prefix_key(&i))).into_option([vnl.get_val_at(prefix_key(&i)).cloned(), vnr.get_val_at(prefix_key(&i)).cloned()]).flatten()); }
-                for i in o..n { assert_eq!(m.get_val_at(prefix_key(&i)).map(|v| *v), vnl.get_val_at(prefix_key(&i)).pmeet(&vnr.get_val_at(prefix_key(&i))).into_option([vnl.get_val_at(prefix_key(&i)).cloned(), vnr.get_val_at(prefix_key(&i)).cloned()]).flatten()); }
+                for i in o..n {
+                    assert!(vnl.contains(prefix_key(&i)) && vnr.contains(prefix_key(&i)));
+                }
+                for i in 0..o {
+                    assert!(vnl.contains(prefix_key(&i)) && !vnr.contains(prefix_key(&i)));
+                }
+                for i in n..(n + o) {
+                    assert!(!vnl.contains(prefix_key(&i)) && vnr.contains(prefix_key(&i)));
+                }
+                for i in 0..(2 * n) {
+                    assert_eq!(
+                        j.contains(prefix_key(&i)),
+                        (vnl.contains(prefix_key(&i)) || vnr.contains(prefix_key(&i)))
+                    );
+                }
+                for i in 0..(2 * n) {
+                    assert_eq!(
+                        m.contains(prefix_key(&i)),
+                        (vnl.contains(prefix_key(&i)) && vnr.contains(prefix_key(&i)))
+                    );
+                }
+                for i in 0..(n + o) {
+                    assert_eq!(
+                        j.get_val_at(prefix_key(&i)).map(|v| *v),
+                        vnl.get_val_at(prefix_key(&i))
+                            .pjoin(&vnr.get_val_at(prefix_key(&i)))
+                            .into_option([
+                                vnl.get_val_at(prefix_key(&i)).cloned(),
+                                vnr.get_val_at(prefix_key(&i)).cloned()
+                            ])
+                            .flatten()
+                    );
+                }
+                for i in o..n {
+                    assert_eq!(
+                        m.get_val_at(prefix_key(&i)).map(|v| *v),
+                        vnl.get_val_at(prefix_key(&i))
+                            .pmeet(&vnr.get_val_at(prefix_key(&i)))
+                            .into_option([
+                                vnl.get_val_at(prefix_key(&i)).cloned(),
+                                vnr.get_val_at(prefix_key(&i)).cloned()
+                            ])
+                            .flatten()
+                    );
+                }
                 // for i in 0..(2*N) { println!("{} {} {} {}", i, r.contains(i), vnl.contains(i), vnr.contains(i)); } // assert!(r.contains(i));
             }
         }
@@ -696,7 +930,6 @@ mod tests {
     /// This tests longer and longer keys to see if / where we blow the stack
     #[test]
     fn map_very_long_key_test() {
-
         let test_key_len = |len: usize| {
             let mut map: PathMap<u64> = PathMap::new();
             let mut z = map.write_zipper();
@@ -731,5 +964,4 @@ mod tests {
             // test_key_len(17179869184); //2^34 bytes - Still no failure at 16GB keys
         }
     }
-
 }

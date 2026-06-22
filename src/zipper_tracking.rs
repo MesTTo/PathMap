@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use crate::PathMap;
-use crate::zipper::{ReadZipperUntracked, Zipper, ZipperAbsolutePath, ZipperForking, ZipperMoving, ZipperReadOnlyValues, ZipperWriting, ZipperIteration, ZipperReadOnlyIteration, };
+use crate::zipper::{
+    ReadZipperUntracked, Zipper, ZipperAbsolutePath, ZipperForking, ZipperIteration, ZipperMoving,
+    ZipperReadOnlyIteration, ZipperReadOnlyValues, ZipperWriting,
+};
 
 /// Marker to track an outstanding read zipper
 pub struct TrackingRead;
@@ -121,14 +124,18 @@ impl Conflict {
             } else {
                 let steps = zipper.descend_to_val(current_path);
                 if steps == 0 {
-                    return None
+                    return None;
                 }
                 current_path = &current_path[steps..];
             }
         }
     }
 
-    fn check_for_write_conflict<C, ConflictF: FnOnce(&[u8])->C>(path: &[u8], all_paths: &PathMap<()>, conflict_f: ConflictF) -> Result<(), C> {
+    fn check_for_write_conflict<C, ConflictF: FnOnce(&[u8]) -> C>(
+        path: &[u8],
+        all_paths: &PathMap<()>,
+        conflict_f: ConflictF,
+    ) -> Result<(), C> {
         let mut zipper = all_paths.read_zipper();
         match Conflict::check_for_lock_along_path(path, &mut zipper) {
             None =>
@@ -149,10 +156,10 @@ impl Conflict {
         }
     }
 
-    fn check_for_read_conflict<C, ConflictF: FnOnce(NonZeroU32, &[u8])->C>(
+    fn check_for_read_conflict<C, ConflictF: FnOnce(NonZeroU32, &[u8]) -> C>(
         path: &[u8],
         all_paths: &PathMap<NonZeroU32>,
-        conflict_f: ConflictF
+        conflict_f: ConflictF,
     ) -> Result<(), C> {
         let mut zipper = all_paths.read_zipper();
         match Conflict::check_for_lock_along_path(path, &mut zipper) {
@@ -161,10 +168,7 @@ impl Conflict {
                     let mut subtree = zipper.fork_read_zipper();
                     match subtree.to_next_get_val() {
                         None => Ok(()),
-                        Some(lock) => Err(conflict_f(
-                            *lock,
-                            subtree.origin_path(),
-                        )),
+                        Some(lock) => Err(conflict_f(*lock, subtree.origin_path())),
                     }
                 } else {
                     Ok(())
@@ -232,12 +236,12 @@ impl SharedTrackerPaths {
         let path = path.as_ref();
         self.with_paths(|all_paths: &mut TrackerPaths| {
             match Conflict::check_for_write_conflict(path, &all_paths.written_paths, |_| ()) {
-                Ok(()) => {},
-                Err(()) => return PathStatus::Unavailable
+                Ok(()) => {}
+                Err(()) => return PathStatus::Unavailable,
             }
             match Conflict::check_for_read_conflict(path, &all_paths.read_paths, |_, _| ()) {
-                Ok(()) => {},
-                Err(()) => return PathStatus::AvailableForReading
+                Ok(()) => {}
+                Err(()) => return PathStatus::AvailableForReading,
             }
             PathStatus::Available
         })
@@ -245,8 +249,16 @@ impl SharedTrackerPaths {
 
     fn try_add_writer(&self, path: &[u8]) -> Result<(), Conflict> {
         let try_add_writer_internal = |all_paths: &mut TrackerPaths| {
-            Conflict::check_for_write_conflict(path, &all_paths.written_paths, Conflict::write_conflict)?;
-            Conflict::check_for_read_conflict(path, &all_paths.read_paths, Conflict::read_conflict)?;
+            Conflict::check_for_write_conflict(
+                path,
+                &all_paths.written_paths,
+                Conflict::write_conflict,
+            )?;
+            Conflict::check_for_read_conflict(
+                path,
+                &all_paths.read_paths,
+                Conflict::read_conflict,
+            )?;
             let mut writer = all_paths.written_paths.write_zipper_at_path(path);
             writer.set_val(());
             Ok(())
@@ -257,7 +269,11 @@ impl SharedTrackerPaths {
 
     fn try_add_reader(&self, path: &[u8]) -> Result<(), Conflict> {
         let try_add_reader_internal = |all_paths: &mut TrackerPaths| {
-            Conflict::check_for_write_conflict(path, &all_paths.written_paths, Conflict::write_conflict)?;
+            Conflict::check_for_write_conflict(
+                path,
+                &all_paths.written_paths,
+                Conflict::write_conflict,
+            )?;
             let mut writer = all_paths.read_paths.write_zipper_at_path(path);
             let value = writer.get_val_mut();
             match value {
@@ -285,7 +301,7 @@ impl SharedTrackerPaths {
             match writer.get_val_mut() {
                 Some(cnt) => {
                     *cnt = unsafe { NonZero::new_unchecked(cnt.get() + 1) };
-                },
+                }
                 None => {
                     writer.set_val(unsafe { NonZero::new_unchecked(1) });
                 }
@@ -363,7 +379,9 @@ impl ZipperTracker<TrackingWrite> {
         all_paths.add_reader_unchecked(&this_path);
         Self::remove_lock(&all_paths, &this_path);
         ZipperTracker::<TrackingRead> {
-            all_paths, this_path, _is_tracking: PhantomData
+            all_paths,
+            this_path,
+            _is_tracking: PhantomData,
         }
     }
 }

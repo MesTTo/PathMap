@@ -1,22 +1,19 @@
-
-use divan::{Divan, Bencher, black_box};
+use divan::{Bencher, Divan, black_box};
 use pathmap::PathMap;
 
 use std::fs::File;
-use std::io::prelude::*;
 use std::io::BufReader;
+use std::io::prelude::*;
 
 fn main() {
     // Run registered benchmarks.
-    let divan = Divan::from_args()
-        .sample_count(5);
+    let divan = Divan::from_args().sample_count(5);
 
     divan.main();
 }
 
 /// Call with `as_words == true` for a separate entry for each word, pass false for an entry for each sentence (clause)
 fn read_data(as_words: bool) -> Vec<String> {
-
     //The complete works of Shakespeare can be downloaded as a single file here:
     // https://ocw.mit.edu/ans7870/6/6.006/s08/lecturenotes/files/t8.shakespeare.txt
     // ~200k clauses
@@ -33,7 +30,6 @@ fn read_data(as_words: bool) -> Vec<String> {
     let mut line = String::new();
     let mut strings = vec![];
     while reader.read_line(&mut line).unwrap() > 0 {
-
         const TERMINATORS: &[char] = &[',', '.', ';', '?', '\"', '-', '[', ']'];
         const SEPARATORS: &[char] = &[' ', '\t', '\n'];
         const IGNORE_CHARS: &[char] = &['\''];
@@ -60,7 +56,6 @@ fn read_data(as_words: bool) -> Vec<String> {
 
 #[divan::bench()]
 fn shakespeare_words_insert(bencher: Bencher) {
-
     let strings = read_data(true);
 
     bencher.bench_local(|| {
@@ -73,7 +68,6 @@ fn shakespeare_words_insert(bencher: Bencher) {
 
 #[divan::bench()]
 fn shakespeare_words_get(bencher: Bencher) {
-
     let strings = read_data(true);
     let mut map = PathMap::new();
     for (v, k) in strings.iter().enumerate() {
@@ -96,7 +90,6 @@ fn shakespeare_words_get(bencher: Bencher) {
 
 #[divan::bench()]
 fn shakespeare_words_val_count(bencher: Bencher) {
-
     let strings = read_data(true);
     let mut map = PathMap::new();
     let mut unique_count = 0;
@@ -115,7 +108,6 @@ fn shakespeare_words_val_count(bencher: Bencher) {
 
 #[divan::bench()]
 fn shakespeare_sentences_insert(bencher: Bencher) {
-
     let strings = read_data(false);
 
     bencher.bench_local(|| {
@@ -128,7 +120,6 @@ fn shakespeare_sentences_insert(bencher: Bencher) {
 
 #[divan::bench()]
 fn shakespeare_sentences_get(bencher: Bencher) {
-
     let strings = read_data(false);
     let mut map = PathMap::new();
     for (v, k) in strings.iter().enumerate() {
@@ -151,7 +142,6 @@ fn shakespeare_sentences_get(bencher: Bencher) {
 
 #[divan::bench()]
 fn shakespeare_sentences_val_count(bencher: Bencher) {
-
     let strings = read_data(false);
     let mut map = PathMap::new();
     let mut unique_count = 0;
@@ -168,13 +158,10 @@ fn shakespeare_sentences_val_count(bencher: Bencher) {
     assert_eq!(sink, unique_count);
 }
 
-#[cfg(feature="arena_compact")]
+#[cfg(feature = "arena_compact")]
 #[divan::bench()]
 fn shakespeare_sentences_val_count_act(bencher: Bencher) {
-    use pathmap::{
-        arena_compact::ArenaCompactTree,
-        zipper::ZipperMoving,
-    };
+    use pathmap::{arena_compact::ArenaCompactTree, zipper::ZipperMoving};
     let strings = read_data(false);
     let mut map = PathMap::new();
     let mut unique_count = 0;

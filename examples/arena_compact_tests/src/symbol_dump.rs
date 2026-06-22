@@ -1,9 +1,6 @@
-use std::io::{
-    Write, Seek, SeekFrom, BufWriter,
-    Error as IoError,
-};
-use std::path::Path;
 use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Error as IoError, Seek, SeekFrom, Write};
+use std::path::Path;
 
 pub struct SymbolDumper {
     file: BufWriter<File>,
@@ -14,9 +11,7 @@ pub struct SymbolDumper {
 const SYMTAB_MAGIC: [u8; 8] = *b"Symtab00";
 
 impl SymbolDumper {
-    pub fn new<'a>(path: impl AsRef<std::path::Path>)
-        -> Result<Self, IoError>
-    {
+    pub fn new<'a>(path: impl AsRef<std::path::Path>) -> Result<Self, IoError> {
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -79,7 +74,7 @@ impl Drop for SymbolDumper {
     }
 }
 
-use memmap2::{Mmap};
+use memmap2::Mmap;
 
 pub struct SymbolMmap {
     mapping: Mmap,
@@ -95,18 +90,14 @@ fn read_u64(slice: &[u8]) -> u64 {
 
 #[cfg(target_endian = "little")]
 fn get_at_offset(mapping: &[u8], offset: usize) -> Option<&[u8]> {
-    let mapping_ptr =  mapping.as_ptr();
-    let [start, end] = unsafe {
-        *(mapping_ptr.add(offset).cast::<[u64; 2]>())
-    };
+    let mapping_ptr = mapping.as_ptr();
+    let [start, end] = unsafe { *(mapping_ptr.add(offset).cast::<[u64; 2]>()) };
     mapping.get(start as usize..end as usize)
 }
 
 impl SymbolMmap {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, IoError> {
-        let file = OpenOptions::new()
-            .read(true)
-            .open(path.as_ref())?;
+        let file = OpenOptions::new().read(true).open(path.as_ref())?;
         let mapping = unsafe { Mmap::map(&file)? };
         if mapping.len() < 24 {
             return Err(IoError::other("Symtab file is too short for header"));
@@ -119,7 +110,8 @@ impl SymbolMmap {
             return Err(IoError::other("Symyab offset table is not aligned"));
         }
         let count = (read_u64(&mapping[16..24]) as usize)
-            .checked_sub(1).ok_or(IoError::other("Count can't be zero"))?;
+            .checked_sub(1)
+            .ok_or(IoError::other("Count can't be zero"))?;
         if mapping.len() < count * 8 + offsets {
             return Err(IoError::other("Symtab file is too short"));
         }
@@ -201,11 +193,9 @@ mod tests {
     use super::{SymbolDumper, SymbolMmap};
     #[test]
     fn test_roundtrip() {
-        let symbols: &[&[u8]] = &["hello", "world", "123"]
-            .map(|s| s.as_ref());
+        let symbols: &[&[u8]] = &["hello", "world", "123"].map(|s| s.as_ref());
         let path = "dumper_test.sym";
-        let mut dumper = SymbolDumper::new(path)
-            .expect("failed to open file for dumping");
+        let mut dumper = SymbolDumper::new(path).expect("failed to open file for dumping");
         for sym in symbols {
             dumper.push(sym).expect("failed to dump symbol");
         }
@@ -223,11 +213,9 @@ mod tests {
     }
     #[test]
     fn test_range() {
-        let symbols: &[&[u8]] = &["hello", "world", "123"]
-            .map(|s| s.as_ref());
+        let symbols: &[&[u8]] = &["hello", "world", "123"].map(|s| s.as_ref());
         let path = "dumper_test_range.sym";
-        let mut dumper = SymbolDumper::new(path)
-            .expect("failed to open file for dumping");
+        let mut dumper = SymbolDumper::new(path).expect("failed to open file for dumping");
         for sym in symbols {
             dumper.push(sym).expect("failed to dump symbol");
         }
@@ -236,7 +224,8 @@ mod tests {
         for start in 0..3 {
             for end in start..3 {
                 let recovered: Vec<&[u8]> = sym_map
-                    .get_range(start..end).expect("failed range")
+                    .get_range(start..end)
+                    .expect("failed range")
                     .collect::<Vec<_>>();
                 assert_eq!(&symbols[start..end], &recovered);
             }

@@ -1,5 +1,16 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 
+//! Experimental topological DAG serialization for [`PathMap`].
+//!
+//! This format serializes shared subtries once and refers to them by table offset. The encoder writes
+//! raw hex records, a zero-compressed form, and metadata into separate files under the output directory.
+//! The decoder currently reads the zero-compressed record stream back into a `PathMap`.
+//!
+//! The API is still experimental. The current filesystem-shaped entry points expose the internal file
+//! names because downstream callers use them directly. A later public API should wrap the record stream
+//! and metadata in one versioned container, provide compressed and uncompressed entry points, and move
+//! the Merkle-style sharing pass behind a smaller `Read`, `Write`, and `Seek` based interface.
+
 use std::{any::type_name, hash::Hasher, io::{BufRead, BufReader, BufWriter, Read, Seek, Write}, path::PathBuf};
 
 use crate::{morphisms::Catamorphism, PathMap, zipper::{ZipperMoving, ZipperWriting}};
@@ -10,33 +21,6 @@ use alloc::collections::BTreeMap;
 use crate::gxhash::GxHasher;
 
 macro_rules! hex { () => { b'A'..=b'F' | b'0'..=b'9'}; }
-
-//GOAT, Document this module and clean up this list of desiderata
-//
-// Serialization requirements:
-// Should at least maintain the current sharing
-// Serialization should not traverse all paths (i.e. use pointer caching)
-// Needn't be finance/security correct
-// Somewhat fast to (de)serialize
-// Stable across machines
-// Instant verification if serialized trees are the same (plus if this is true for subtrees, too)
-// Version, val count, total path bytes count, and longest path in meta-data
-// I added a few, let me know what you think @Luke Peterson @Remy_Clarke
-// Big plus if we have skip-ahead (which allows for search, even better if it allows for partial deserialization) (modifié)
-
-//GOAT TODO to make this a nice public-facing API:
-// - We decided this format will be called the "topo_dag" format.  Change function names to reflect that
-// - Separate the trie optimization functionality from the format encode functionality, and move trie optimization
-//  (aka Merkle Tree optimization) to a separate module that can run independently or called from serialization
-// - Figure out if / how we can get the overheads in the encoding in line with the path_serialization, and if
-//  we can't (or don't want to), then document why.
-// - Make a single file format that encapsulates both the metadata and the serialized data, using separate sections.
-// - We should specify a private header that includes a file version.  LP: You have no idea how much time I've
-//  lost from my life debugging code when it had loaded an incompatible version of a private file format.
-// - Look at a single-pass approach to generate the file, so there is no need for a 2-pass algorithm and a temporary file
-// - Eliminate sub-file-names from the publicly exposed API.  e.g. `pub const RAW_HEX_DATA_FILENAME`, etc.
-// - Create separate entry points to encode it as either compressed or uncompressed.
-// - Abstract away filesystem calls, and implement in terms of std::io traits.  i.e. `std::io::Read`, `std::io::Write`, `std::io::Seek`
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
@@ -817,8 +801,8 @@ pub fn deserialize_file<V: TrieValue>(file_path : impl AsRef<std::path::Path>, d
 
                              let [path_idx, node_idx] = node_buf.map(|x| x as usize);
 
-                             let Deserialized::Path(path) = &deserialized[path_idx] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected path")); };
-                             let Deserialized::Node(node) = &deserialized[node_idx] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected node")); };
+                             let Deserialized::Path(path) = deserialized.get(path_idx).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, path offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected path")); };
+                             let Deserialized::Node(node) = deserialized.get(node_idx).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, node offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected node")); };
 
                              let mut path_node = PathMap::new();
 
@@ -838,8 +822,8 @@ pub fn deserialize_file<V: TrieValue>(file_path : impl AsRef<std::path::Path>, d
 
                              let [val_idx, node_idx] = node_buf.map(|x| x as usize);
 
-                             let Deserialized::Value(value) = &deserialized[val_idx]  else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected value")); };
-                             let Deserialized::Node(node)   = &deserialized[node_idx] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected node")); };
+                             let Deserialized::Value(value) = deserialized.get(val_idx).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, value offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected value")); };
+                             let Deserialized::Node(node)   = deserialized.get(node_idx).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, node offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected node")); };
 
                              let mut value_node = node.clone();
                              value_node.set_val_at(&[], value.clone());
@@ -852,10 +836,10 @@ pub fn deserialize_file<V: TrieValue>(file_path : impl AsRef<std::path::Path>, d
 
                              let [mask_idx, branches_idx] = node_buf.map(|x| x as usize);
 
-                             let Deserialized::ChildMask(mask) = &deserialized[mask_idx] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected childmask as `(/?<hex_top><Hex_bot>)*`")); };
+                             let Deserialized::ChildMask(mask) = deserialized.get(mask_idx).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, childmask offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected childmask as `(/?<hex_top><Hex_bot>)*`")); };
                              let iter = crate::utils::ByteMaskIter::new(*mask);
 
-                             let Deserialized::Branches(r) = &deserialized[branches_idx] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected branches")); };
+                             let Deserialized::Branches(r) = deserialized.get(branches_idx).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, branches offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected branches")); };
                              let branches = &branches_buffer[r.start..r.end];
 
                              core::debug_assert_eq!(mask.into_iter().copied().map(u64::count_ones).sum::<u32>() as usize, branches.len());
@@ -864,7 +848,7 @@ pub fn deserialize_file<V: TrieValue>(file_path : impl AsRef<std::path::Path>, d
                              let mut wz = branch_node.write_zipper();
 
                              for (byte, &idx) in iter.into_iter().zip(branches) {
-                               let Deserialized::Node(node) = &deserialized[idx as usize] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected node")); };
+                               let Deserialized::Node(node) = deserialized.get(idx as usize).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, child node offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected node")); };
 
                                core::debug_assert!(!node.is_empty());
 
@@ -985,6 +969,38 @@ fn decompress_zeros_compression_child_mask(mut encoded_hex : &[u8], )->Result<[[
 mod test {
   use super::*;
   use std::sync::Arc;
+
+  fn write_serialized_fixture(dir : &tempfile::TempDir, name : &str, data : &[u8])->PathBuf {
+    let path = dir.path().join(name);
+    std::fs::write(&path, data).unwrap();
+    path
+  }
+
+  #[test]
+  fn deserialize_rejects_malformed_records() {
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let bad_tag = write_serialized_fixture(&temp_dir, "bad_tag.data", b"header\n? bad\n");
+    let err = deserialize_file::<Arc<[u8]>>(&bad_tag, |b| Arc::<[u8]>::from(b)).unwrap_err();
+    assert!(err.to_string().contains("expected `<tag byte><space>`"));
+
+    let odd_path_hex = write_serialized_fixture(&temp_dir, "odd_path_hex.data", b"header\np A\n");
+    let err = deserialize_file::<Arc<[u8]>>(&odd_path_hex, |b| Arc::<[u8]>::from(b)).unwrap_err();
+    assert!(err.to_string().contains("expected path"));
+  }
+
+  #[test]
+  fn deserialize_rejects_forward_offsets_without_panic() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = write_serialized_fixture(
+      &temp_dir,
+      "forward_offset.data",
+      b"header\nP x0000000000000001x0000000000000002\n"
+    );
+
+    let err = deserialize_file::<Arc<[u8]>>(&path, |b| Arc::<[u8]>::from(b)).unwrap_err();
+    assert!(err.to_string().contains("offset out of bounds"));
+  }
 
   #[test]
   fn serialization_trivial_test() {
@@ -1478,35 +1494,27 @@ mod test {
 
     let trie_clone = trie.clone();
 
-    match std::env::var("CARGO_MANIFEST_DIR") {
-      Ok(manifest_dir) => {
-        let path = std::path::PathBuf::from(manifest_dir).join(".tmp");
-        let _ = std::fs::create_dir(&path);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path();
 
-        let serialized =  write_trie(
-          format!("(file : \"{}\", module : \"{}\", line : \"{}\")", file!(), module_path!(), line!()),
-          trie.clone(),
-          |bs, v|{ v.extend_from_slice(bs); ValueSlice::Encode(
-            v
-          )}, &path
-        ).unwrap();
+    let serialized =  write_trie(
+      format!("(file : \"{}\", module : \"{}\", line : \"{}\")", file!(), module_path!(), line!()),
+      trie.clone(),
+      |bs, v|{ v.extend_from_slice(bs); ValueSlice::Encode(
+        v
+      )}, path
+    ).unwrap();
 
-        let read = std::fs::File::open(serialized.zeroes_compressed_data_path).unwrap();
-        dbg_hex_line_numbers(&read, &path).unwrap();
+    let read = std::fs::File::open(serialized.zeroes_compressed_data_path).unwrap();
+    dbg_hex_line_numbers(&read, path).unwrap();
 
-        let de_path = path.join(ZERO_COMPRESSED_HEX_DATA_FILENAME);
-        let de = deserialize_file(&de_path, |b|as_arc(b)).unwrap();
+    let de_path = path.join(ZERO_COMPRESSED_HEX_DATA_FILENAME);
+    let de = deserialize_file(&de_path, |b|as_arc(b)).unwrap();
 
-        let [src,de_] = [string_pathmap_as_btree_dbg(trie_clone), string_pathmap_as_btree_dbg(de)];
-        // println!("src : {src:#?}\n de_ : {de_:#?}");
+    let [src,de_] = [string_pathmap_as_btree_dbg(trie_clone), string_pathmap_as_btree_dbg(de)];
+    // println!("src : {src:#?}\n de_ : {de_:#?}");
 
-        core::assert!(src == de_);
-      }
-      _ => {
-        #[cfg(not(miri))]
-        panic!("Test should be running under Cargo")
-      }
-    }
+    core::assert!(src == de_);
   }
 
   // for doing test equality check
@@ -1544,7 +1552,7 @@ fn _trace<V: TrieValue + 'static>(trie : PathMap<V>) {
       \n      val      : {}\
       \n      origin   : {:?}\
       \n    }}",
-      &bytemask.iter().map(|x| x as char).collect::<Vec<_>>(),
+      bytemask.iter().map(|x| x as char).collect::<Vec<_>>(),
       v.is_some(),
       std::str::from_utf8(o).unwrap()
     );

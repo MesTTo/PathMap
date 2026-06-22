@@ -13,11 +13,15 @@ arbitrary = { version = "1", features = ["derive"] }
 
 [dependencies.pathmap]
 path = ".."
+default-features = false
+
+[features]
+default = ["pathmap/default"]
 
 [workspace]
 
 [[bin]]
-name = "fuzz_ops"
-path = "fuzz_targets/fuzz_ops.rs"
+name = "pathmap_ops"
+path = "fuzz_targets/pathmap_ops.rs"
 test = false
 doc = false

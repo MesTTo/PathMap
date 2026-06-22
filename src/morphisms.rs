@@ -42,7 +42,7 @@
 //!
 //! In most cases, jumping morphisms will perform substantially better than stepping morphisms, so you should use
 //! them when it is convenient.  It is always possible to re-express an `alg` for a stepping morphism in terms of
-//! an `alg` for a jumping morphism, however sometimes the logic become uglier and / or the performance benefit
+//! an `alg` for a jumping morphism, however sometimes the logic become uglier and / or the speed benefit
 //! is negligible.  Therefore, the stepping methods can be thought of as a convenience API.
 //!
 //! ### Side-Effecting vs Cached Iteration
@@ -66,18 +66,69 @@
 //! However, the `side_effect` methods are useful in the implementation of things like serialization, etc.
 //!
 use core::convert::Infallible;
+use reusing_vec::ReusingQueue;
 use std::hash::Hasher;
 use std::ptr::slice_from_raw_parts;
-use reusing_vec::ReusingQueue;
 
-use crate::utils::*;
 use crate::alloc::Allocator;
-use crate::PathMap;
 use crate::trie_node::TrieNodeODRc;
+use crate::utils::*;
 use crate::zipper;
 use crate::zipper::*;
+use crate::PathMap;
 
+#[cfg(any(kani, miri, target_arch = "riscv64"))]
+use crate::gxhash::{self, HashMap};
+#[cfg(not(any(kani, miri, target_arch = "riscv64")))]
 use crate::gxhash::{self, HashMap, HashMapExt};
+
+/// Declares how much absolute path context a cached catamorphism may observe.
+///
+/// Cached catamorphisms normally cache only by shared subtrie identity.  That is
+/// correct for structural folds, but not for folds whose result depends on the
+/// absolute path used to reach a shared subtrie.  A `PathScope` makes that
+/// dependency explicit and adds the declared path view to the cache key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum PathScope {
+    /// The closure receives an empty path context and cached results are keyed
+    /// only by shared subtrie identity.
+    None,
+    /// The closure receives at most the last `n` bytes of the current absolute
+    /// path.  `Suffix(0)` is equivalent to [`PathScope::None`].
+    Suffix(usize),
+    /// The closure receives the full current absolute path.
+    Full,
+}
+
+impl PathScope {
+    #[inline]
+    fn observes_path(self) -> bool {
+        !matches!(self, PathScope::None | PathScope::Suffix(0))
+    }
+
+    #[inline]
+    fn path_context<'a>(self, path: &'a [u8]) -> &'a [u8] {
+        match self {
+            PathScope::None => &[],
+            PathScope::Suffix(len) => &path[path.len().saturating_sub(len)..],
+            PathScope::Full => path,
+        }
+    }
+
+    #[inline]
+    fn cache_key(self, node_addr: Option<u64>, path: &[u8]) -> Option<ContextualCacheKey> {
+        node_addr.map(|node_addr| ContextualCacheKey {
+            node_addr,
+            path_context: self.path_context(path).to_vec(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct ContextualCacheKey {
+    node_addr: u64,
+    path_context: Vec<u8>,
+}
 
 /// Provides methods to perform a catamorphism on types that can reference or contain a trie
 pub trait Catamorphism<V> {
@@ -103,20 +154,22 @@ pub trait Catamorphism<V> {
     ///
     /// The focus position of the zipper will be ignored and it will be immediately reset to the root.
     fn into_cata_side_effect<W, AlgF>(self, mut alg_f: AlgF) -> W
-        where
+    where
         AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
-        Self: Sized
+        Self: Sized,
     {
         self.into_cata_side_effect_fallible(|mask, children, val, path| -> Result<W, Infallible> {
             Ok(alg_f(mask, children, val, path))
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     /// Allows the closure to return an error, stopping traversal immediately
     ///
     /// See [Catamorphism::into_cata_side_effect]
     fn into_cata_side_effect_fallible<W, Err, AlgF>(self, alg_f: AlgF) -> Result<W, Err>
-        where AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, Err>;
+    where
+        AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, Err>;
 
     /// Applies a "jumping" catamorphism to the trie
     ///
@@ -132,20 +185,24 @@ pub trait Catamorphism<V> {
     /// See [into_cata_side_effect](Catamorphism::into_cata_side_effect) for explanation of other arguments and
     /// behavior
     fn into_cata_jumping_side_effect<W, AlgF>(self, mut alg_f: AlgF) -> W
-        where
+    where
         AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> W,
-        Self: Sized
+        Self: Sized,
     {
-        self.into_cata_jumping_side_effect_fallible(|mask, children, jumped_cnt, val, path| -> Result<W, Infallible> {
-            Ok(alg_f(mask, children, jumped_cnt, val, path))
-        }).unwrap()
+        self.into_cata_jumping_side_effect_fallible(
+            |mask, children, jumped_cnt, val, path| -> Result<W, Infallible> {
+                Ok(alg_f(mask, children, jumped_cnt, val, path))
+            },
+        )
+        .unwrap()
     }
 
     /// Allows the closure to return an error, stopping traversal immediately
     ///
     /// See [Catamorphism::into_cata_jumping_side_effect]
     fn into_cata_jumping_side_effect_fallible<W, Err, AlgF>(self, alg_f: AlgF) -> Result<W, Err>
-        where AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> Result<W, Err>;
+    where
+        AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> Result<W, Err>;
 
     /// Applies a **cached**, **stepping**, catamorphism to the trie descending from the zipper's
     /// root, running the `alg_f` at every step (at every byte)
@@ -169,23 +226,24 @@ pub trait Catamorphism<V> {
     ///
     /// The focus position of the zipper will be ignored and it will be immediately reset to the root.
     fn into_cata_cached<W, AlgF>(self, alg_f: AlgF) -> W
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> W,
-        Self: Sized
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> W,
+        Self: Sized,
     {
         self.into_cata_cached_fallible(|mask, children, val| -> Result<W, Infallible> {
             Ok(alg_f(mask, children, val))
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     /// Allows the closure to return an error, stopping traversal immediately
     ///
     /// See [Catamorphism::into_cata_cached]
     fn into_cata_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>;
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>;
 
     /// Applies a "jumping" catamorphism to the trie
     ///
@@ -214,29 +272,99 @@ pub trait Catamorphism<V> {
     ///
     /// See [into_cata_cached](Catamorphism::into_cata_cached) for explanation of other arguments and behavior
     fn into_cata_jumping_cached<W, AlgF>(self, alg_f: AlgF) -> W
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
-        Self: Sized
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
+        Self: Sized,
     {
-        self.into_cata_jumping_cached_fallible(|mask, children, val, sub_path| -> Result<W, Infallible> {
-            Ok(alg_f(mask, children, val, sub_path))
-        }).unwrap()
+        self.into_cata_jumping_cached_fallible(
+            |mask, children, val, sub_path| -> Result<W, Infallible> {
+                Ok(alg_f(mask, children, val, sub_path))
+            },
+        )
+        .unwrap()
     }
 
     /// Allows the closure to return an error, stopping traversal immediately
     ///
     /// See [Catamorphism::into_cata_jumping_cached]
     fn into_cata_jumping_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>;
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>;
+
+    /// Applies a cached stepping catamorphism whose closure may observe a declared path context.
+    ///
+    /// The `path_scope` controls both the `path_context` argument passed to `alg_f` and the cache key.
+    /// Use [`PathScope::None`] or [`PathScope::Suffix(0)`] for structural folds; those scopes use the
+    /// same node-id cache behavior as [`into_cata_cached`](Catamorphism::into_cata_cached).
+    ///
+    /// A non-empty suffix or full path scope should only be used when the fold result truly depends on
+    /// that context, because it intentionally reduces cache reuse for shared subtries reached through
+    /// different paths.
+    fn into_cata_contextual_cached<W, AlgF>(self, path_scope: PathScope, alg_f: AlgF) -> W
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
+        Self: Sized,
+    {
+        self.into_cata_contextual_cached_fallible(
+            path_scope,
+            |mask, children, val, path_context| -> Result<W, Infallible> {
+                Ok(alg_f(mask, children, val, path_context))
+            },
+        )
+        .unwrap()
+    }
+
+    /// Allows the contextual cached stepping catamorphism closure to return an error.
+    ///
+    /// See [`Catamorphism::into_cata_contextual_cached`].
+    fn into_cata_contextual_cached_fallible<W, E, AlgF>(
+        self,
+        path_scope: PathScope,
+        alg_f: AlgF,
+    ) -> Result<W, E>
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>;
+
+    /// Applies a cached jumping catamorphism whose closure may observe a declared path context.
+    ///
+    /// The closure receives both the local `sub_path` skipped by the jumping traversal and the declared
+    /// `path_context` view of the current absolute path.
+    fn into_cata_jumping_contextual_cached<W, AlgF>(self, path_scope: PathScope, alg_f: AlgF) -> W
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8]) -> W,
+        Self: Sized,
+    {
+        self.into_cata_jumping_contextual_cached_fallible(
+            path_scope,
+            |mask, children, val, sub_path, path_context| -> Result<W, Infallible> {
+                Ok(alg_f(mask, children, val, sub_path, path_context))
+            },
+        )
+        .unwrap()
+    }
+
+    /// Allows the contextual cached jumping catamorphism closure to return an error.
+    ///
+    /// See [`Catamorphism::into_cata_jumping_contextual_cached`].
+    fn into_cata_jumping_contextual_cached_fallible<W, E, AlgF>(
+        self,
+        path_scope: PathScope,
+        alg_f: AlgF,
+    ) -> Result<W, E>
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8]) -> Result<W, E>;
 
     /// Hash the logical `PathMap` and all its values
     fn hash(self) -> u128
     where
         Self: Sized,
-        V: std::hash::Hash
+        V: std::hash::Hash,
     {
         self.hash_with(|v| {
             let mut hasher = gxhash::GxHasher::with_seed(0);
@@ -249,34 +377,29 @@ pub trait Catamorphism<V> {
     fn hash_with<F>(self, val_hash: F) -> u128
     where
         Self: Sized,
-        F: Fn(&V) -> u128
+        F: Fn(&V) -> u128,
     {
         self.into_cata_cached(|bm, hs, mv| {
-            let mut hasher = gxhash::GxHasher::with_seed(0b0100001010101101111110010110100110000010011000100100100111110111i64);
-            hasher.write(unsafe { slice_from_raw_parts(bm.0.as_ptr() as *const u8, 32).as_ref().unwrap_unchecked() });
-            hasher.write(unsafe { slice_from_raw_parts(hs.as_ptr() as *const u8, 16*hs.len()).as_ref().unwrap_unchecked() });
-            if let Some(v) = mv { hasher.write_u128(val_hash(v)) };
+            let mut hasher = gxhash::GxHasher::with_seed(
+                0b0100001010101101111110010110100110000010011000100100100111110111i64,
+            );
+            hasher.write(unsafe {
+                slice_from_raw_parts(bm.0.as_ptr() as *const u8, 32)
+                    .as_ref()
+                    .unwrap_unchecked()
+            });
+            hasher.write(unsafe {
+                slice_from_raw_parts(hs.as_ptr() as *const u8, 16 * hs.len())
+                    .as_ref()
+                    .unwrap_unchecked()
+            });
+            if let Some(v) = mv {
+                hasher.write_u128(val_hash(v))
+            };
             hasher.finish_u128()
         })
     }
 }
-
-//TODO GOAT!!: It would be nice to get rid of this Default bound on all morphism Ws.  In this case, the plan
-// for doing that would be to create a new type called a TakableSlice.  It would be able to deref
-// into a regular mutable slice of `T` so it would work just like an ordinary slice.  Additionally
-// there would be special `take(idx: usize)` methods. it would have an additional bitmask to keep
-// track of which elements have already been taken.  So each element would be backed by a MaybeUninit,
-// and taking an element twice would be a panic.  There would be an additional `try_take` method to
-// avoid the panic.
-//Additionally, if `T: Default`, the `take` method would become the ordinary mem::take, and would always
-// succeed, therefore the abstraction would have minimal cost
-//Creating a new TakableSlice would be very cheap as it could be transmuted from an existing slice of T.
-// The tricky part is making sure Drop does the right thing, dropping the elements that were taken, and
-// not double-dropping the ones that weren't.  For this reason, I think the right solution would be to
-// require a `TakableSlice` be borrowed from a `TakableVec`, and then making sure the `TakableVec`
-// methods like `clear` do the right thing.
-//When all this work is done, this object probably deserves a stand-alone crate.
-
 
 /// A compatibility shim to provide a 3-function catamorphism API
 ///
@@ -294,8 +417,12 @@ pub struct SplitCata;
 
 #[allow(deprecated)]
 impl SplitCata {
-    pub fn new<'a, V, W, MapF, CollapseF, AlgF>(mut map_f: MapF, mut collapse_f: CollapseF, alg_f: AlgF) -> impl FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W + 'a
-        where
+    pub fn new<'a, V, W, MapF, CollapseF, AlgF>(
+        mut map_f: MapF,
+        mut collapse_f: CollapseF,
+        alg_f: AlgF,
+    ) -> impl FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W + 'a
+    where
         MapF: FnMut(&V, &[u8]) -> W + 'a,
         CollapseF: FnMut(&V, W, &[u8]) -> W + 'a,
         AlgF: Fn(&ByteMask, &mut [W], &[u8]) -> W + 'a,
@@ -310,12 +437,12 @@ impl SplitCata {
                         debug_assert_eq!(path.len(), 0);
                         alg_f(mask, children, path)
                     }
-                }
+                };
             }
             let w = alg_f(mask, children, path);
             match val {
                 Some(val) => collapse_f(val, w, path),
-                None => w
+                None => w,
             }
         }
     }
@@ -332,8 +459,13 @@ pub struct SplitCataJumping;
 
 #[allow(deprecated)]
 impl SplitCataJumping {
-    pub fn new<'a, V, W, MapF, CollapseF, AlgF, JumpF>(mut map_f: MapF, mut collapse_f: CollapseF, mut alg_f: AlgF, mut jump_f: JumpF) -> impl FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> W + 'a
-        where
+    pub fn new<'a, V, W, MapF, CollapseF, AlgF, JumpF>(
+        mut map_f: MapF,
+        mut collapse_f: CollapseF,
+        mut alg_f: AlgF,
+        mut jump_f: JumpF,
+    ) -> impl FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> W + 'a
+    where
         W: Default,
         MapF: FnMut(&V, &[u8]) -> W + 'a,
         CollapseF: FnMut(&V, W, &[u8]) -> W + 'a,
@@ -359,7 +491,7 @@ impl SplitCataJumping {
                 };
                 match val {
                     Some(val) => collapse_f(val, w, path),
-                    None => w
+                    None => w,
                 }
             };
             debug_assert!(jump_len <= path.len());
@@ -383,78 +515,179 @@ impl SplitCataJumping {
     }
 }
 
-impl<'a, Z, V: 'a> Catamorphism<V> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer {
+impl<'a, Z, V: 'a> Catamorphism<V> for Z
+where
+    Z: Zipper
+        + ZipperReadOnlyConditionalValues<'a, V>
+        + ZipperConcrete
+        + ZipperAbsolutePath
+        + ZipperPathBuffer,
+{
     fn into_cata_side_effect_fallible<W, Err, AlgF>(self, mut alg_f: AlgF) -> Result<W, Err>
-        where AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, Err>,
+    where
+        AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, Err>,
     {
-        cata_side_effect_body::<Self, V, W, Err, _, false>(self, |mask, children, jump_len, val, path, _z| {
-            debug_assert!(jump_len == 0);
-            alg_f(mask, children, val, path)
-        })
+        cata_side_effect_body::<Self, V, W, Err, _, false>(
+            self,
+            |mask, children, jump_len, val, path, _z| {
+                debug_assert!(jump_len == 0);
+                alg_f(mask, children, val, path)
+            },
+        )
     }
     fn into_cata_jumping_side_effect_fallible<W, Err, AlgF>(self, mut alg_f: AlgF) -> Result<W, Err>
-        where AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> Result<W, Err>
+    where
+        AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> Result<W, Err>,
     {
-        cata_side_effect_body::<Self, V, W, Err, _, true>(self, |mask, children, jump_len, val, path, _z| {
-            alg_f(mask, children, jump_len, val, path)
-        })
+        cata_side_effect_body::<Self, V, W, Err, _, true>(
+            self,
+            |mask, children, jump_len, val, path, _z| alg_f(mask, children, jump_len, val, path),
+        )
     }
     fn into_cata_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>,
     {
-        into_cata_cached_body::<Self, V, W, E, _, DoCache, false, false>(self, |mask, children, val, sub_path, _debug_path, _z| {
-            debug_assert_eq!(sub_path.len(), 0);
-            alg_f(mask, children, val)
-        })
+        into_cata_cached_body::<Self, V, W, E, _, DoCache, false, false>(
+            self,
+            |mask, children, val, sub_path, _debug_path, _z| {
+                debug_assert_eq!(sub_path.len(), 0);
+                alg_f(mask, children, val)
+            },
+        )
     }
     fn into_cata_jumping_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>,
     {
-        into_cata_cached_body::<Self, V, W, E, _, DoCache, true, false>(self,
-            |mask, children, val, sub_path, _debug_path, _z| alg_f(mask, children, val, sub_path))
+        into_cata_cached_body::<Self, V, W, E, _, DoCache, true, false>(
+            self,
+            |mask, children, val, sub_path, _debug_path, _z| alg_f(mask, children, val, sub_path),
+        )
+    }
+    fn into_cata_contextual_cached_fallible<W, E, AlgF>(
+        self,
+        path_scope: PathScope,
+        alg_f: AlgF,
+    ) -> Result<W, E>
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>,
+    {
+        if !path_scope.observes_path() {
+            return into_cata_cached_body::<Self, V, W, E, _, DoCache, false, false>(
+                self,
+                |mask, children, val, sub_path, _debug_path, _z| {
+                    debug_assert_eq!(sub_path.len(), 0);
+                    alg_f(mask, children, val, &[])
+                },
+            );
+        }
+        into_cata_contextual_cached_body::<Self, V, W, E, _, false>(
+            self,
+            path_scope,
+            |mask, children, val, sub_path, path_context, _z| {
+                debug_assert_eq!(sub_path.len(), 0);
+                alg_f(mask, children, val, path_context)
+            },
+        )
+    }
+    fn into_cata_jumping_contextual_cached_fallible<W, E, AlgF>(
+        self,
+        path_scope: PathScope,
+        alg_f: AlgF,
+    ) -> Result<W, E>
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8]) -> Result<W, E>,
+    {
+        if !path_scope.observes_path() {
+            return into_cata_cached_body::<Self, V, W, E, _, DoCache, true, false>(
+                self,
+                |mask, children, val, sub_path, _debug_path, _z| {
+                    alg_f(mask, children, val, sub_path, &[])
+                },
+            );
+        }
+        into_cata_contextual_cached_body::<Self, V, W, E, _, true>(
+            self,
+            path_scope,
+            |mask, children, val, sub_path, path_context, _z| {
+                alg_f(mask, children, val, sub_path, path_context)
+            },
+        )
     }
 }
 
-impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorphism<V> for PathMap<V, A> {
+impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorphism<V>
+    for PathMap<V, A>
+{
     fn into_cata_side_effect_fallible<W, Err, AlgF>(self, alg_f: AlgF) -> Result<W, Err>
-        where AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, Err>
+    where
+        AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, Err>,
     {
         let rz = self.into_read_zipper(&[]);
         rz.into_cata_side_effect_fallible(alg_f)
     }
     fn into_cata_jumping_side_effect_fallible<W, Err, AlgF>(self, alg_f: AlgF) -> Result<W, Err>
-        where AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> Result<W, Err>
+    where
+        AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> Result<W, Err>,
     {
         let rz = self.into_read_zipper(&[]);
         rz.into_cata_jumping_side_effect_fallible(alg_f)
     }
     fn into_cata_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>,
     {
         let rz = self.into_read_zipper(&[]);
         rz.into_cata_cached_fallible(alg_f)
     }
     fn into_cata_jumping_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>,
     {
         let rz = self.into_read_zipper(&[]);
         rz.into_cata_jumping_cached_fallible(alg_f)
     }
+    fn into_cata_contextual_cached_fallible<W, E, AlgF>(
+        self,
+        path_scope: PathScope,
+        alg_f: AlgF,
+    ) -> Result<W, E>
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>,
+    {
+        let rz = self.into_read_zipper(&[]);
+        rz.into_cata_contextual_cached_fallible(path_scope, alg_f)
+    }
+    fn into_cata_jumping_contextual_cached_fallible<W, E, AlgF>(
+        self,
+        path_scope: PathScope,
+        alg_f: AlgF,
+    ) -> Result<W, E>
+    where
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8]) -> Result<W, E>,
+    {
+        let rz = self.into_read_zipper(&[]);
+        rz.into_cata_jumping_contextual_cached_fallible(path_scope, alg_f)
+    }
 }
 
 #[inline]
-fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z: Z, mut alg_f: AlgF) -> Result<W, Err>
-    where
+fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(
+    mut z: Z,
+    mut alg_f: AlgF,
+) -> Result<W, Err>
+where
     Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperAbsolutePath + ZipperPathBuffer,
-    AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8], &Z) -> Result<W, Err>
+    AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8], &Z) -> Result<W, Err>,
 {
     //`stack` holds a "frame" at each forking point above the zipper position.  No frames exist for values
     let mut stack = Vec::<StackFrame>::with_capacity(12);
@@ -467,7 +700,7 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
     stack.push(StackFrame::from(&z));
     if !z.descend_first_byte() {
         //Empty trie is a special case
-        return alg_f(&ByteMask::EMPTY, &mut [], 0, z.val(), z.origin_path(), &z)
+        return alg_f(&ByteMask::EMPTY, &mut [], 0, z.val(), z.origin_path(), &z);
     }
 
     loop {
@@ -489,7 +722,6 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
             //Keep ascending until we get to a branch that we haven't fully explored
             debug_assert!(stack[frame_idx].child_idx <= stack[frame_idx].child_cnt);
             while stack[frame_idx].child_idx == stack[frame_idx].child_cnt {
-
                 if frame_idx == 0 {
                     //See if we need to run the aggregate function on the root before returning
                     let stack_frame = &mut stack[0];
@@ -502,13 +734,15 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
                     } else {
                         children.pop().unwrap()
                     };
-                    return Ok(w)
+                    return Ok(w);
                 } else {
                     // Ascend the rest of the way back up to the branch
                     debug_assert_eq!(stack[frame_idx].child_idx, stack[frame_idx].child_cnt);
                     let child_start = children.len() - stack[frame_idx].child_cnt as usize;
                     let children2 = &mut children[child_start..];
-                    let cur_w = ascend_to_fork::<Z, V, W, Err, AlgF, JUMPING>(&mut z, &mut alg_f, children2)?;
+                    let cur_w = ascend_to_fork::<Z, V, W, Err, AlgF, JUMPING>(
+                        &mut z, &mut alg_f, children2,
+                    )?;
                     children.truncate(child_start);
                     frame_idx -= 1;
 
@@ -532,12 +766,14 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
 }
 
 #[inline(always)]
-fn ascend_to_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(z: &mut Z, 
-        alg_f: &mut AlgF, children: &mut [W]
+fn ascend_to_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(
+    z: &mut Z,
+    alg_f: &mut AlgF,
+    children: &mut [W],
 ) -> Result<W, Err>
-    where
+where
     Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperAbsolutePath + ZipperPathBuffer,
-    AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8], &Z) -> Result<W, Err>
+    AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8], &Z) -> Result<W, Err>,
 {
     let z_witness = z.witness();
     let mut w;
@@ -552,9 +788,9 @@ fn ascend_to_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(z: &mut Z,
             let ascended = z.ascend_until();
             debug_assert!(ascended);
 
-            let origin_path = unsafe{ z.origin_path_assert_len(old_path_len) };
+            let origin_path = unsafe { z.origin_path_assert_len(old_path_len) };
             let jump_len = if z.child_count() != 1 || z.is_val() {
-                old_path_len - (z.origin_path().len()+1)
+                old_path_len - (z.origin_path().len() + 1)
             } else {
                 old_path_len - z.origin_path().len()
             };
@@ -562,13 +798,15 @@ fn ascend_to_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(z: &mut Z,
             w = alg_f(&child_mask, children, jump_len, old_val, origin_path, &z)?;
 
             if z.child_count() != 1 || z.at_root() {
-                return Ok(w)
+                return Ok(w);
             }
 
             children = core::array::from_mut(&mut w);
 
             // SAFETY: We will never over-read the path buffer because we only get here after we ascended
-            let byte = *unsafe{ z.origin_path_assert_len(old_path_len-jump_len) }.last().unwrap();
+            let byte = *unsafe { z.origin_path_assert_len(old_path_len - jump_len) }
+                .last()
+                .unwrap();
             child_mask = ByteMask::EMPTY;
             child_mask.set_bit(byte);
         }
@@ -584,7 +822,7 @@ fn ascend_to_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(z: &mut Z,
             debug_assert!(ascended);
 
             if z.child_count() != 1 || z.at_root() {
-                return Ok(w)
+                return Ok(w);
             }
 
             children = core::array::from_mut(&mut w);
@@ -604,7 +842,8 @@ struct StackFrame {
 impl StackFrame {
     /// Allocates a new StackFrame
     fn from<Z>(zipper: &Z) -> Self
-        where Z: Zipper,
+    where
+        Z: Zipper,
     {
         let mut stack_frame = StackFrame {
             child_cnt: 0,
@@ -617,7 +856,8 @@ impl StackFrame {
 
     /// Resets a StackFrame to the state needed to iterate a new forking point
     fn reset<Z>(&mut self, zipper: &Z)
-        where Z: Zipper,
+    where
+        Z: Zipper,
     {
         self.child_cnt = zipper.child_count() as u16;
         self.child_idx = 0;
@@ -660,20 +900,18 @@ impl Stack {
     /// This function re-uses allocations for stack frames,
     /// to avoid allocator thrashing.
     pub fn push_state<Z>(&mut self, z: &Z)
-        where Z: Zipper,
+    where
+        Z: Zipper,
     {
         Self::push_state_raw(&mut self.stack, &mut self.position, z);
     }
 
-    pub fn push_state_raw<'a, Z>(
-        stack: &mut Vec<StackFrame>,
-        position: &mut usize,
-        zipper: &Z)
-        where Z: Zipper,
+    pub fn push_state_raw<'a, Z>(stack: &mut Vec<StackFrame>, position: &mut usize, zipper: &Z)
+    where
+        Z: Zipper,
     {
         *position = position.wrapping_add(1);
-        assert!(*position <= stack.len(),
-            "stack invariant: position <= len");
+        assert!(*position <= stack.len(), "stack invariant: position <= len");
         if *position == stack.len() {
             stack.push(StackFrame::from(zipper));
         } else {
@@ -682,11 +920,17 @@ impl Stack {
     }
 }
 
-pub(crate) fn new_map_from_ana_jumping<'a, V, A: Allocator, WZ, W, CoAlgF, I>(wz: &mut WZ, w: W, mut coalg_f: CoAlgF)
-where
+#[allow(
+    dead_code,
+    reason = "kept as the recursive builder for planned jumping ana traversal"
+)]
+pub(crate) fn new_map_from_ana_jumping<'a, V, A: Allocator, WZ, W, CoAlgF, I>(
+    wz: &mut WZ,
+    w: W,
+    mut coalg_f: CoAlgF,
+) where
     V: 'static + Clone + Send + Sync + Unpin,
-    W: Default,
-    I: IntoIterator<Item=W>,
+    I: IntoIterator<Item = W>,
     WZ: ZipperWriting<V, A> + zipper::ZipperMoving,
     CoAlgF: Copy + FnMut(W, &[u8]) -> (&'a [u8], ByteMask, I, Option<V>),
 {
@@ -694,7 +938,9 @@ where
     let prefix_len = prefix.len();
 
     wz.descend_to(&prefix[..]);
-    if let Some(v) = mv { wz.set_val(v); }
+    if let Some(v) = mv {
+        wz.set_val(v);
+    }
     for (b, w) in bm.iter().zip(ws) {
         wz.descend_to_byte(b);
         new_map_from_ana_jumping(wz, w, coalg_f);
@@ -740,7 +986,7 @@ pub(crate) trait CacheStrategy<W> {
 }
 
 /// Cache is disabled
-#[allow(dead_code)] // this is unused for now, but can be used in side_effecting
+#[allow(dead_code)] // reserved for side-effecting morphism variants
 struct NoCache;
 
 impl<W> CacheStrategy<W> for NoCache {
@@ -755,19 +1001,36 @@ pub(crate) struct DoCache;
 
 impl<W: Clone> CacheStrategy<W> for DoCache {
     const CACHING: bool = true;
-    fn clone(w: &W) -> W { w.clone() }
+    fn clone(w: &W) -> W {
+        w.clone()
+    }
 }
 
 /// Internal implementation behind all cached catas
 ///
 /// AlgF args: (child_mask, children, value, sub_path, debug_path, zipper)
-pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool, const DEBUG_PATH: bool>(
-    mut zipper: Z, mut alg_f: AlgF
+pub(crate) fn into_cata_cached_body<
+    'a,
+    Z,
+    V: 'a,
+    W,
+    E,
+    AlgF,
+    Cache,
+    const JUMPING: bool,
+    const DEBUG_PATH: bool,
+>(
+    mut zipper: Z,
+    mut alg_f: AlgF,
 ) -> Result<W, E>
-    where
+where
     Cache: CacheStrategy<W>,
-    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer,
-    AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8], &Z) -> Result<W, E>
+    Z: Zipper
+        + ZipperReadOnlyConditionalValues<'a, V>
+        + ZipperConcrete
+        + ZipperAbsolutePath
+        + ZipperPathBuffer,
+    AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8], &Z) -> Result<W, E>,
 {
     zipper.reset();
     zipper.prepare_buffers();
@@ -777,7 +1040,8 @@ pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPI
     let mut cache = HashMap::<u64, W>::new();
     stack.push_state(&zipper);
     'outer: loop {
-        let frame_mut = stack.last_mut()
+        let frame_mut = stack
+            .last_mut()
             .expect("into_cata stack is emptied before we returned to root");
         // This branch represents the body of the for loop.
         if frame_mut.child_idx < frame_mut.child_cnt {
@@ -806,9 +1070,12 @@ pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPI
                 // If we encounter a leaf, ascend immediately.
                 // This branch will preserve the current stack frame.
                 let cur_w = ascend_to_fork::<Z, V, W, E, _, JUMPING>(
-                    &mut zipper, &mut |mask, children, jump, val, path, z| {
-                        alg_f(mask, children, val, &path[path.len()-jump..], path, z)
-                    }, &mut [])?;
+                    &mut zipper,
+                    &mut |mask, children, jump, val, path, z| {
+                        alg_f(mask, children, val, &path[path.len() - jump..], path, z)
+                    },
+                    &mut [],
+                )?;
                 // Put value to cache (1)
                 Cache::insert(&mut cache, frame_mut.child_addr, &cur_w);
                 children.push(cur_w);
@@ -822,7 +1089,8 @@ pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPI
 
         // This branch represents the rest of the function after the loop
         let frame_idx = stack.position;
-        let StackFrame { child_cnt, .. } = stack.pop_mut()
+        let StackFrame { child_cnt, .. } = stack
+            .pop_mut()
             .expect("we just checked that stack is not empty, pop must return Some");
         let child_start = children.len() - *child_cnt as usize;
         let children2 = &mut children[child_start..];
@@ -845,16 +1113,162 @@ pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPI
         }
 
         let cur_w = ascend_to_fork::<Z, V, W, E, _, JUMPING>(
-            &mut zipper, &mut |mask, children, jump, val, path, z| {
-                alg_f(mask, children, val, &path[path.len()-jump..], path, z)
-            }, children2)?;
+            &mut zipper,
+            &mut |mask, children, jump, val, path, z| {
+                alg_f(mask, children, val, &path[path.len() - jump..], path, z)
+            },
+            children2,
+        )?;
         children.truncate(child_start);
 
         // Exit one recursion step
-        let frame_mut = stack.last_mut()
+        let frame_mut = stack
+            .last_mut()
             .expect("when we're not at root, expect parent stack");
         // Put value to cache (2) after recursion
         Cache::insert(&mut cache, frame_mut.child_addr, &cur_w);
+        children.push(cur_w);
+    }
+}
+
+#[inline]
+fn ensure_context_key_slot(keys: &mut Vec<Option<ContextualCacheKey>>, position: usize) {
+    if keys.len() <= position {
+        keys.resize_with(position + 1, || None);
+    }
+}
+
+/// Internal implementation behind contextual cached catas.
+///
+/// AlgF args: (child_mask, children, value, sub_path, path_context, zipper)
+fn into_cata_contextual_cached_body<'a, Z, V: 'a, W: Clone, E, AlgF, const JUMPING: bool>(
+    mut zipper: Z,
+    path_scope: PathScope,
+    mut alg_f: AlgF,
+) -> Result<W, E>
+where
+    Z: Zipper
+        + ZipperReadOnlyConditionalValues<'a, V>
+        + ZipperConcrete
+        + ZipperAbsolutePath
+        + ZipperPathBuffer,
+    AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8], &Z) -> Result<W, E>,
+{
+    debug_assert!(path_scope.observes_path());
+
+    zipper.reset();
+    zipper.prepare_buffers();
+
+    let mut stack = Stack::new();
+    let mut children = Vec::<W>::new();
+    let mut cache = HashMap::<ContextualCacheKey, W>::new();
+    let mut child_cache_keys = Vec::<Option<ContextualCacheKey>>::with_capacity(12);
+    stack.push_state(&zipper);
+    ensure_context_key_slot(&mut child_cache_keys, stack.position);
+    'outer: loop {
+        let frame_idx = stack.position;
+        let frame_mut = stack
+            .last_mut()
+            .expect("into_cata stack is emptied before we returned to root");
+        // This branch represents the body of the for loop.
+        if frame_mut.child_idx < frame_mut.child_cnt {
+            zipper.descend_indexed_byte(frame_mut.child_idx as usize);
+            frame_mut.child_idx += 1;
+            frame_mut.child_addr = zipper.shared_node_id();
+            let child_key = path_scope.cache_key(frame_mut.child_addr, zipper.origin_path());
+            child_cache_keys[frame_idx] = child_key.clone();
+
+            // Read and reuse value from cache, if exists
+            if let Some(key) = child_key.as_ref() {
+                if let Some(cached) = cache.get(key).cloned() {
+                    // DO NOT modify the W from cache
+                    children.push(cached);
+                    zipper.ascend_byte();
+                    continue 'outer;
+                }
+            }
+
+            // Descend until leaf or branch
+            let mut is_leaf = false;
+            'descend: while zipper.child_count() < 2 {
+                if !zipper.descend_until() {
+                    is_leaf = true;
+                    break 'descend;
+                }
+            }
+
+            if is_leaf {
+                // If we encounter a leaf, ascend immediately.
+                // This branch will preserve the current stack frame.
+                let cur_w = ascend_to_fork::<Z, V, W, E, _, JUMPING>(
+                    &mut zipper,
+                    &mut |mask, children, jump, val, path, z| {
+                        let sub_path = &path[path.len() - jump..];
+                        let path_context = path_scope.path_context(path);
+                        alg_f(mask, children, val, sub_path, path_context, z)
+                    },
+                    &mut [],
+                )?;
+                // Put value to cache (1)
+                if let Some(key) = child_key {
+                    cache.insert(key, cur_w.clone());
+                }
+                children.push(cur_w);
+                continue 'outer;
+            }
+
+            // Enter one recursion step
+            stack.push_state(&zipper);
+            ensure_context_key_slot(&mut child_cache_keys, stack.position);
+            continue 'outer;
+        }
+
+        // This branch represents the rest of the function after the loop
+        let frame_idx = stack.position;
+        let StackFrame { child_cnt, .. } = stack
+            .pop_mut()
+            .expect("we just checked that stack is not empty, pop must return Some");
+        let child_start = children.len() - *child_cnt as usize;
+        let children2 = &mut children[child_start..];
+
+        if frame_idx == 0 {
+            // Final branch
+            debug_assert!(zipper.at_root(), "must be at root when cata is done");
+            let value = zipper.val();
+            let child_mask = ByteMask::from(zipper.child_mask());
+            return if JUMPING && *child_cnt == 1 && value.is_none() {
+                Ok(children.pop().unwrap())
+            } else {
+                let path = zipper.origin_path();
+                let path_context = path_scope.path_context(path);
+                alg_f(&child_mask, children2, value, &[], path_context, &zipper)
+            };
+        }
+
+        let cur_w = ascend_to_fork::<Z, V, W, E, _, JUMPING>(
+            &mut zipper,
+            &mut |mask, children, jump, val, path, z| {
+                let sub_path = &path[path.len() - jump..];
+                let path_context = path_scope.path_context(path);
+                alg_f(mask, children, val, sub_path, path_context, z)
+            },
+            children2,
+        )?;
+        children.truncate(child_start);
+
+        // Exit one recursion step
+        let parent_frame_idx = stack.position;
+        let frame_mut = stack
+            .last_mut()
+            .expect("when we're not at root, expect parent stack");
+        // Put value to cache (2) after recursion
+        if let Some(key) = child_cache_keys
+            .get(parent_frame_idx)
+            .and_then(|key| key.clone())
+        {
+            debug_assert_eq!(Some(key.node_addr), frame_mut.child_addr);
+            cache.insert(key, cur_w.clone());
+        }
         children.push(cur_w);
     }
 }
@@ -864,11 +1278,17 @@ pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPI
 // is very hard to read. It took several days to debug the unrolled version.
 #[cfg(any())]
 fn into_cata_jumping_naive<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool>(
-    z: &mut Z, alg_f: &mut AlgF
+    z: &mut Z,
+    alg_f: &mut AlgF,
 ) -> Result<W, E>
-    where
-    Cache: CacheStrategy<W>, Z: Zipper + ZipperReadOnlyValues<'a, V> + ZipperAbsolutePath + ZipperPathBuffer + ZipperConcretePriv,
-    AlgF: FnMut (&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> Result<W, E>
+where
+    Cache: CacheStrategy<W>,
+    Z: Zipper
+        + ZipperReadOnlyValues<'a, V>
+        + ZipperAbsolutePath
+        + ZipperPathBuffer
+        + ZipperConcretePriv,
+    AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> Result<W, E>,
 {
     let child_mask = ByteMask::from(z.child_mask());
     let child_count = child_mask.count_bits();
@@ -923,11 +1343,14 @@ fn into_cata_jumping_naive<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool>
 }
 
 /// Internal function to generate a new root trie node from an anamorphism
-pub(crate) fn new_map_from_ana_in<V, W, AlgF, A: Allocator>(w: W, mut alg_f: AlgF, alloc: A) -> PathMap<V, A>
-    where
+pub(crate) fn new_map_from_ana_in<V, W, AlgF, A: Allocator>(
+    w: W,
+    mut alg_f: AlgF,
+    alloc: A,
+) -> PathMap<V, A>
+where
     V: 'static + Clone + Send + Sync + Unpin,
-    W: Default,
-    AlgF: FnMut(W, &mut Option<V>, &mut TrieBuilder<V, W, A>, &[u8])
+    AlgF: FnMut(W, &mut Option<V>, &mut TrieBuilder<V, W, A>, &[u8]),
 {
     let mut stack = Vec::<(TrieBuilder<V, W, A>, usize)>::with_capacity(12);
     let mut frame_idx = 0;
@@ -946,31 +1369,21 @@ pub(crate) fn new_map_from_ana_in<V, W, AlgF, A: Allocator>(w: W, mut alg_f: Alg
     loop {
         //Should we descend?
         if let Some(w_or_node) = stack[frame_idx].0.take_next() {
-            //TODO Optimization Opportunity: There is likely a 2x speedup in here, that can be achieved by
-            // setting all the children at the same time.  The reason is that the current behavior will create
-            // a smaller node (ListNode), and then upgrade it if necessary.  But if we know in advance what
-            // the node needs to hold, we could allocate the correct node right off the bat.
-            //
-            // I'm going to hold off on implementing this until the explicit path API is fully settled,
-            // since ideally we'd call a WriteZipper method to set multiple downstream paths, but we'd want
-            // some assurances those paths would actually be created, and not pruned because they're empty.
-            //
-            //I'm thinking this needs to take the form of a TrieNode trait method that looks something like:
-            // `fn set_children_and_values(child_mask, val_mask, branches: &[??], vals: &[V])` or possibly
-            // a node creation method.  Since this is designed to be used by anamorphism (trie construction)
-            // perhaps we don't actually need the downstream nodes at all, and can fill them in later.
-            //
-            //BEWARE: This change needs to be accompanied by another change to allow an existing node's path
-            // to be augmented, or the above change could be a performance step backwards.  Specifically,
-            // consider a ListNode that is created with only one child, based on a mask.  Then, if the zipper
-            // descends and tries to create the rest of a path, it would be a disaster if that took the form
-            // of another node, as opposed to just putting the rest of the path into the existing node.
+            // Bulk child construction already exists in WriteZipperCore::graft_child_maps, which
+            // builds a DenseByteNode directly when it replaces more than two child maps. This
+            // top-down anamorphism loop cannot call it locally: the closure must see absolute path
+            // context before child maps exist, and pre-grafting empty child nodes would change
+            // dangling-path behavior. Use graft_child_maps for bulk map grafting; revisit this only
+            // with a bottom-up anamorphism builder that preserves path context explicitly.
 
             let child_path_byte = stack[frame_idx].0.taken_child_byte();
             z.descend_to_byte(child_path_byte);
             let mut child_path_len = 1;
 
-            if let Some(child_path_remains) = stack[frame_idx].0.taken_child_remaining_path(child_path_byte) {
+            if let Some(child_path_remains) = stack[frame_idx]
+                .0
+                .taken_child_remaining_path(child_path_byte)
+            {
                 z.descend_to(child_path_remains);
                 child_path_len += child_path_remains.len();
             }
@@ -981,7 +1394,10 @@ pub(crate) fn new_map_from_ana_in<V, W, AlgF, A: Allocator>(w: W, mut alg_f: Alg
                     debug_assert!(frame_idx < stack.len());
                     frame_idx += 1;
                     if frame_idx == stack.len() {
-                        stack.push((TrieBuilder::<V, W, A>::new_in(alloc.clone()), child_path_len));
+                        stack.push((
+                            TrieBuilder::<V, W, A>::new_in(alloc.clone()),
+                            child_path_len,
+                        ));
                     } else {
                         stack[frame_idx].0.reset();
                         stack[frame_idx].1 = child_path_len;
@@ -993,7 +1409,7 @@ pub(crate) fn new_map_from_ana_in<V, W, AlgF, A: Allocator>(w: W, mut alg_f: Alg
                     if let Some(val) = core::mem::take(&mut val) {
                         z.set_val(val);
                     }
-                },
+                }
                 // Path from a graft, we shouldn't descend
                 WOrNode::Node(node) => {
                     z.core().graft_internal(Some(node));
@@ -1003,7 +1419,7 @@ pub(crate) fn new_map_from_ana_in<V, W, AlgF, A: Allocator>(w: W, mut alg_f: Alg
         } else {
             //If not, we should ascend
             if frame_idx == 0 {
-                break
+                break;
             }
             z.ascend(stack[frame_idx].1);
             stack[frame_idx].0.reset();
@@ -1014,40 +1430,27 @@ pub(crate) fn new_map_from_ana_in<V, W, AlgF, A: Allocator>(w: W, mut alg_f: Alg
     new_map
 }
 
-/// A [Vec]-like struct for assembling all the downstream branches from a path in the trie
-//GOAT, Ideally I would skip the `val` argument to the anamorphism closure, and add a `set_val` method
-// to TrieBuilder.  I'm a little on the fence about it, however, because it increases the size of the
-// TrieBuilder by an `Option<V>`, which is stored for every stack frame, as opposed to just the one place
-// it's needed.  However, this change opens up the possibility to embed the WriteZipper into the TrieBuilder,
-// which can make some operations a bit more efficient.
-//
-//GOAT, If we exposed an interface that allowed values to be set in bulk, (e.g. with a mask), we could
-// plumb it straight through to a node interface
+/// A [Vec]-like struct for assembling all the downstream branches from a path in the trie.
+///
+/// The anamorphism closure receives the output value slot separately instead of
+/// storing it in every `TrieBuilder` frame. That keeps each frame smaller. If
+/// bulk value or child insertion becomes part of the public API, it should go
+/// through the node/write-zipper layer rather than adding hidden storage here.
 pub struct TrieBuilder<V: Clone + Send + Sync, W, A: Allocator> {
     child_mask: [u64; 4],
     cur_mask_word: usize,
     child_paths: ReusingQueue<Vec<u8>>,
-    child_structs: ReusingQueue<WOrNode<V, W, A>>,
+    child_structs: ReusingQueue<Option<WOrNode<V, W, A>>>,
     _alloc: A,
 }
 
-/// Internal structure 
+/// Internal structure
 enum WOrNode<V: Clone + Send + Sync, W, A: Allocator> {
     W(W),
-    Node(TrieNodeODRc<V, A>)
+    Node(TrieNodeODRc<V, A>),
 }
 
-impl<V: Clone + Send + Sync, W: Default, A: Allocator> Default for WOrNode<V, W, A> {
-    fn default() -> Self {
-        //GOAT, the default impl here is mainly to facilitate core::mem::take, therefore, the default
-        // should be the cheapest thing to create.  At some point that will be a TrieNodeODRc pointing
-        // at a static empty node, but that's currently not implemented yet.
-        // Alternatively we could use a MaybeUninit.
-        Self::W(W::default())
-    }
-}
-
-impl<V: Clone + Send + Sync, W: Default, A: Allocator> TrieBuilder<V, W, A> {
+impl<V: Clone + Send + Sync, W, A: Allocator> TrieBuilder<V, W, A> {
     /// Internal method to make a new empty `TrieBuilder`
     fn new_in(alloc: A) -> Self {
         Self {
@@ -1074,7 +1477,7 @@ impl<V: Clone + Send + Sync, W: Default, A: Allocator> TrieBuilder<V, W, A> {
     }
     /// Internal method to get the next child from the builder in the push order.  Used by the anamorphism
     fn take_next(&mut self) -> Option<WOrNode<V, W, A>> {
-        self.child_structs.pop_front().map(|element| core::mem::take(element))
+        self.child_structs.pop_front().and_then(Option::take)
     }
     /// Internal method.  After [Self::take_next] returns `Some`, this method will return the first byte of the
     /// associated path.
@@ -1105,18 +1508,26 @@ impl<V: Clone + Send + Sync, W: Default, A: Allocator> TrieBuilder<V, W, A> {
     ///
     /// Panics if existing children have already been set / pushed, or if the number of bits set in `mask`
     /// doesn't match `children.len()`.
-    pub fn set_child_mask<C: AsMut<[W]>>(&mut self, mask: [u64; 4], mut children: C) {
+    pub fn set_child_mask<C: AsMut<[W]>>(&mut self, mask: [u64; 4], mut children: C)
+    where
+        W: Default,
+    {
         if self.child_structs.len() != 0 {
             panic!("set_mask called over existing children")
         }
         let children = children.as_mut();
-        debug_assert_eq!(mask.iter().fold(0, |sum, word| sum + word.count_ones() as usize), children.len());
+        debug_assert_eq!(
+            mask.iter()
+                .fold(0, |sum, word| sum + word.count_ones() as usize),
+            children.len()
+        );
         if children.len() == 0 {
-            return
+            return;
         }
         self.child_structs.clear();
         for child in children {
-            self.child_structs.push_val(WOrNode::W(core::mem::take(child)));
+            self.child_structs
+                .push_val(Some(WOrNode::W(core::mem::take(child))));
         }
         debug_assert_eq!(self.cur_mask_word, 0);
         while mask[self.cur_mask_word] == 0 {
@@ -1137,10 +1548,30 @@ impl<V: Clone + Send + Sync, W: Default, A: Allocator> TrieBuilder<V, W, A> {
         if self.child_mask[mask_word] >= mask_delta {
             panic!("children must be pushed in sorted order and each initial byte must be unique")
         }
+        self.push_byte_after_checks(w, mask_word, mask_delta);
+    }
+    /// Pushes a child byte without release-mode invariant checks.
+    ///
+    /// The caller must push children in sorted order with no duplicate initial byte.  Debug builds
+    /// still check the invariants.
+    pub fn push_byte_unchecked(&mut self, byte: u8, w: W) {
+        let mask_word = (byte / 64) as usize;
+        debug_assert!(
+            mask_word >= self.cur_mask_word,
+            "children must be pushed in sorted order"
+        );
+        let mask_delta = 1u64 << (byte % 64);
+        debug_assert!(
+            self.child_mask[mask_word] < mask_delta,
+            "children must be pushed in sorted order and each initial byte must be unique"
+        );
+        self.push_byte_after_checks(w, mask_word, mask_delta);
+    }
+    #[inline]
+    fn push_byte_after_checks(&mut self, w: W, mask_word: usize, mask_delta: u64) {
+        self.cur_mask_word = mask_word;
         self.child_mask[mask_word] |= mask_delta;
-
-        //Push the `W`
-        self.child_structs.push_val(WOrNode::W(w));
+        self.child_structs.push_val(Some(WOrNode::W(w)));
     }
     /// Pushes a new child branch into the `TrieBuilder` with the specified `sub_path`
     ///
@@ -1151,10 +1582,6 @@ impl<V: Clone + Send + Sync, W: Default, A: Allocator> TrieBuilder<V, W, A> {
     ///
     /// For example, pushing `b"horse"` and then `b"hour"` is wrong.  Instead you should push `b"ho"`, and
     /// push the remaining parts of the path from the triggered closures downstream.
-    //
-    //TODO, could make a `push_unchecked` method to turn these these checks from `assert!` to `debug_assert`.
-    // Not sure if it would make any difference.  Feels unlikely, but might be worth a try after we've implemented
-    // the other speedup ideas
     pub fn push(&mut self, sub_path: &[u8], w: W) {
         assert!(sub_path.len() > 0);
 
@@ -1167,79 +1594,35 @@ impl<V: Clone + Send + Sync, W: Default, A: Allocator> TrieBuilder<V, W, A> {
 
         self.push_byte(sub_path[0], w);
     }
-//GOAT WIP
-//     /// Behaves like [push](Self::push), but will tolerate inputs in any order, and inputs and with
-//     /// overlapping initial bytes
-//     ///
-//     /// DISCUSSION: This method is handy when you are generating paths composed of data types that can't be
-//     /// cleanly separated at byte boundaries; for example UTF-8 encoded `char`s.  This method saves you the
-//     /// extra work of handling the case where different structures encode with the same initial byte, and of
-//     /// concerning yourself with partial encoding generally.
-//     ///
-//     /// This method is much higher overhead than the ordinary `push` method, and also it introduces
-//     /// some ambiguity in the order in which the closure is run for the children.  Specifically it means that
-//     /// the same path location in the trie may be visited multiple times, and you cannot rely on closure
-//     /// execution proceeding in a strictly depth-first order.  Furthermore, the closure order may not match
-//     /// the traversal order of the completed trie.
-//     ///
-//     /// NOTE: Because a given location may be visited multiple times, values set by later-running closures
-//     /// will overwrite a value set by an earlier closure running at the same path.
-//     ///
-//     /// NOTE: If you push twice to an identical path within the same closure execution, the second push will
-//     /// overwrite the first.
-//     ///
-//     /// NOTE: use of this method will preclude any automatic multi-threading of the anamorphism on downstream
-//     /// paths.
-//     pub fn tolerant_push(&mut self, sub_path: &[u8], w: W) {
-//         let byte = match sub_path.get(0) {
-//             Some(byte) => byte,
-//             None => return
-//         };
+    /// Pushes a child path without release-mode invariant checks.
+    ///
+    /// The caller must pass a non-empty path and push children in sorted order with no duplicate initial
+    /// byte.  Debug builds still check the invariants.
+    pub fn push_unchecked(&mut self, sub_path: &[u8], w: W) {
+        debug_assert!(sub_path.len() > 0);
 
-//         //Find the index in the `child_structs` vec based on the initial byte
-//         let mask_word = (byte / 64) as usize;
-//         let byte_remainder = byte % 64;
-//         let mut byte_index = 0;
-//         for i in 0..mask_word {
-//             byte_index += self.child_mask[i].count_ones();
-//         }
-//         if byte_remainder > 0 {
-//             byte_index += (self.child_mask[mask_word] & 0xFFFFFFFFFFFFFFFF >> (64-byte_remainder)).count_ones();
-//         }
+        if sub_path.len() > 1 {
+            let child_path = self.child_paths.push_mut();
+            child_path.clear();
+            child_path.extend(sub_path);
+        }
 
-//         let mask_delta = 1u64 << (byte % 64);
-//         let collision = self.child_mask[mask_word] & mask_delta > 0;
-//         self.child_mask[mask_word] |= mask_delta;
-
-// //GOAT, my thinking on the data structure changes
-// //For the paths, we should go back to storing the whole path, and use the first byte for association.  No need
-// // to keep the index association
-// //For the W array, we ought to just push the Ws in, in the order we want.  Since we always iterate the W vec
-// //If we want to support direct-push of values, we ought to have a separate value mask
-// //There should be two value vecs.  One for direct values of the current node, and one for values associated
-// // with downstream children / paths.  (we could even piggy-back the downstream value on the path)
-
-// //GOAT, THE W vec should have the string pairs hanging off each element.  So the W vec is `Vec<(W, Vec<(Vec<u8>, W)>)>`
-// //GOAT, Actually the W needs to be an Option<W>, and at that point, we may as well split the 
-
-// //GOAT options:
-// // 1. Make one vec that holds length-1 children, and another that holds lenth > 1,
-// //     
-
-// //GOAT!!! Vec<(Option<W>, Vec<(Vec<u8>, W)>)>
-// //GOAT!!! ReusingQueue<SmallVec<(Vec<u8>, W)>>
-
-//         //GOAT, we need to reset self.cur_mask_word, scanning the whole child_mask, because any child byte may have been added
-//         // self.cur_mask_word = mask_word;
-//     }
+        self.push_byte_unchecked(sub_path[0], w);
+    }
     /// Returns the child mask from the `TrieBuilder`, representing paths that have been pushed so far
+    ///
+    /// Design note: `TrieBuilder` intentionally accepts children in sorted order with unique first bytes.
+    /// An order-tolerant builder would need a different accumulation structure keyed by first byte, plus
+    /// explicit value-conflict rules. The current builder keeps the fast path simple.
     pub fn child_mask(&self) -> [u64; 4] {
         self.child_mask
     }
     /// Grafts the subtrie below the focus of the `read_zipper` at the specified `byte`
     ///
-    /// WARNING: This method is incompatible with [Self::set_child_mask] and must follow the same
-    /// rules as [Self::push_byte]
+    /// Ordering contract: this method is incompatible with [Self::set_child_mask] and must follow
+    /// the same ordering rules as [Self::push_byte].
+    ///
+    /// Panics if `read_zipper` is focused on a nonexistent path.
     pub fn graft_at_byte<Z: ZipperInfallibleSubtries<V, A>>(&mut self, byte: u8, read_zipper: &Z) {
         let mask_word = (byte / 64) as usize;
         if mask_word < self.cur_mask_word {
@@ -1252,125 +1635,415 @@ impl<V: Clone + Send + Sync, W: Default, A: Allocator> TrieBuilder<V, W, A> {
         }
         self.child_mask[mask_word] |= mask_delta;
 
-        //Clone the read_zipper's focus and push it
-        let node = read_zipper.get_focus().into_option();
-        self.child_structs.push_val(WOrNode::Node(node.unwrap())); //GOAT!! Currently we panic if the read_zipper is at an nonexistent path
+        let node = read_zipper
+            .get_focus()
+            .into_option()
+            .expect("graft_at_byte requires read_zipper focus to exist");
+        self.child_structs.push_val(Some(WOrNode::Node(node)));
     }
-    //GOAT, feature removed.  See below
-    // /// Returns an [`Iterator`] type to iterate over the `(sub_path, w)` pairs that have been pushed
-    // pub fn iter(&self) -> TrieBuilderIter<'_, W> {
-    //     self.into_iter()
-    // }
 }
-
-//GOAT, the IntoIterator impl is obnoxious because I don't have a contiguous buffer that holds the path anymore
-// It's unnecessary anyway, so I'm just going to chuck it
-//
-// impl<'a, W> IntoIterator for &'a TrieBuilder<W> {
-//     type Item = (&'a[u8], &'a W);
-//     type IntoIter = TrieBuilderIter<'a, W>;
-
-//     fn into_iter(self) -> Self::IntoIter {
-//         TrieBuilderIter {
-//             cb: self,
-//             cur_mask: self.child_mask[0],
-//             mask_word: 0,
-//             i: 0
-//         }
-//     }
-// }
-
-// /// An [`Iterator`] type for a [`TrieBuilder`]
-// pub struct TrieBuilderIter<'a, W> {
-//     cb: &'a TrieBuilder<W>,
-//     cur_mask: u64,
-//     mask_word: usize,
-//     i: usize,
-// }
-
-// impl<'a, W> Iterator for TrieBuilderIter<'a, W> {
-//     type Item = (&'a[u8], &'a W);
-//     fn next(&mut self) -> Option<Self::Item> {
-//         while self.mask_word < 4 {
-//             let tz = self.cur_mask.trailing_zeros();
-//             if tz < 64 {
-
-//                 self.i += 1;
-//             } else {
-//                 self.mask_word += 1;
-//             }
-//         }
-//         None
-//     }
-// }
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Range;
-    use crate::PathMap;
-    use crate::utils::BitMask;
     use super::*;
+    use crate::utils::BitMask;
+    use crate::PathMap;
+    use std::ops::Range;
 
     fn check_side_effect_catas<'a, W, V, Z, AlgF, Assert>(
-        zipper: Z, mut f_side: AlgF, mut assert: Assert)
-        where
-            Z: Clone + Catamorphism<V>, W: Clone,
-            AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> W,
-            Assert: FnMut(W, &str),
+        zipper: Z,
+        mut f_side: AlgF,
+        mut assert: Assert,
+    ) where
+        Z: Clone + Catamorphism<V>,
+        W: Clone,
+        AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> W,
+        Assert: FnMut(W, &str),
     {
-        let output = zipper.clone().into_cata_side_effect(
-            |bm, ch, v, path| f_side(bm, ch, 0, v, path));
+        let output = zipper
+            .clone()
+            .into_cata_side_effect(|bm, ch, v, path| f_side(bm, ch, 0, v, path));
         assert(output, "into_cata_side_effect");
-        let output = zipper.clone().into_cata_jumping_side_effect(
-            |bm, ch, jmp, v, path| f_side(bm, ch, jmp, v, path));
+        let output = zipper
+            .clone()
+            .into_cata_jumping_side_effect(|bm, ch, jmp, v, path| f_side(bm, ch, jmp, v, path));
         assert(output, "into_cata_jumping_side_effect");
     }
 
-    fn check_pure_catas<'a, W, V, Z, AlgFP, Assert>(
-        zipper: Z, f_pure: AlgFP, mut assert: Assert)
-        where
-            Z: Clone + Catamorphism<V>, W: Clone,
-            AlgFP: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
-            Assert: FnMut(W, &str),
+    fn check_pure_catas<'a, W, V, Z, AlgFP, Assert>(zipper: Z, f_pure: AlgFP, mut assert: Assert)
+    where
+        Z: Clone + Catamorphism<V>,
+        W: Clone,
+        AlgFP: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
+        Assert: FnMut(W, &str),
     {
-        let output = zipper.clone().into_cata_cached(
-            |bm, ch, v| f_pure(bm, ch, v, &[]));
+        let output = zipper
+            .clone()
+            .into_cata_cached(|bm, ch, v| f_pure(bm, ch, v, &[]));
         assert(output, "into_cata_cached");
-        let output = zipper.clone().into_cata_jumping_cached(
-            |bm, ch, v, sub_path| f_pure(bm, ch, v, sub_path));
+        let output = zipper
+            .clone()
+            .into_cata_jumping_cached(|bm, ch, v, sub_path| f_pure(bm, ch, v, sub_path));
         assert(output, "into_cata_jumping_cached");
     }
 
-    fn check_all_catas<'a, W, V, Z, AlgF, Assert>(
-        zipper: Z, alg_f: AlgF, mut assert: Assert)
-        where
-            Z: Clone + Catamorphism<V>, W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> W,
-            Assert: FnMut(W, &str),
+    fn check_all_catas<'a, W, V, Z, AlgF, Assert>(zipper: Z, alg_f: AlgF, mut assert: Assert)
+    where
+        Z: Clone + Catamorphism<V>,
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> W,
+        Assert: FnMut(W, &str),
     {
-        check_side_effect_catas(zipper.clone(), |mask, children, _jmp, val, _path| {
-            alg_f(mask, children, val)
-        }, &mut assert);
-        check_pure_catas(zipper.clone(), |mask, children, val, _sub_path| {
-            alg_f(mask, children, val)
-        }, &mut assert);
+        check_side_effect_catas(
+            zipper.clone(),
+            |mask, children, _jmp, val, _path| alg_f(mask, children, val),
+            &mut assert,
+        );
+        check_pure_catas(
+            zipper.clone(),
+            |mask, children, val, _sub_path| alg_f(mask, children, val),
+            &mut assert,
+        );
+    }
+
+    fn count_split_jumping_events<V, Z>(zipper: Z) -> (usize, usize, usize, usize)
+    where
+        Z: Catamorphism<V>,
+    {
+        let mut map_cnt = 0;
+        let mut collapse_cnt = 0;
+        let mut alg_cnt = 0;
+        let mut jump_cnt = 0;
+
+        zipper.into_cata_jumping_side_effect(|_mask, children: &mut [()], jump_len, val, path| {
+            if children.is_empty() {
+                if val.is_some() {
+                    map_cnt += 1;
+                } else {
+                    alg_cnt += 1;
+                }
+            } else {
+                if children.len() > 1 {
+                    alg_cnt += 1;
+                }
+                if val.is_some() {
+                    collapse_cnt += 1;
+                }
+            }
+
+            debug_assert!(jump_len <= path.len());
+            let jump_dst_len = path.len() - jump_len;
+            if (jump_len > 0 && jump_dst_len > 0) || jump_len > 1 {
+                jump_cnt += 1;
+            }
+            if jump_dst_len == 0 && jump_len > 0 {
+                alg_cnt += 1;
+            }
+        });
+
+        (map_cnt, collapse_cnt, alg_cnt, jump_cnt)
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct OrderedDigest {
+        hash: u128,
+        len: u32,
+    }
+
+    impl OrderedDigest {
+        const BASE: u128 = 257;
+
+        fn atom(token: u128) -> Self {
+            Self {
+                hash: token.wrapping_add(1),
+                len: 1,
+            }
+        }
+
+        fn combine(self, rhs: Self) -> Self {
+            Self {
+                hash: self
+                    .hash
+                    .wrapping_mul(pow_digest_base(rhs.len))
+                    .wrapping_add(rhs.hash),
+                len: self.len + rhs.len,
+            }
+        }
+    }
+
+    fn pow_digest_base(exp: u32) -> u128 {
+        (0..exp).fold(1, |acc, _| acc.wrapping_mul(OrderedDigest::BASE))
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct CommutativeDigest {
+        sum: u128,
+        xor: u128,
+        count: usize,
+    }
+
+    impl CommutativeDigest {
+        fn atom(token: u128) -> Self {
+            Self {
+                sum: token,
+                xor: token.rotate_left(17),
+                count: 1,
+            }
+        }
+
+        fn combine(self, rhs: Self) -> Self {
+            Self {
+                sum: self.sum.wrapping_add(rhs.sum),
+                xor: self.xor ^ rhs.xor,
+                count: self.count + rhs.count,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct BoyerMooreState {
+        candidate: Option<u8>,
+        count: usize,
+    }
+
+    impl BoyerMooreState {
+        fn single(value: u8) -> Self {
+            Self {
+                candidate: Some(value),
+                count: 1,
+            }
+        }
+
+        fn combine(self, rhs: Self) -> Self {
+            match (self.candidate, rhs.candidate) {
+                (None, _) => rhs,
+                (_, None) => self,
+                (Some(left), Some(right)) if left == right => Self {
+                    candidate: Some(left),
+                    count: self.count + rhs.count,
+                },
+                (Some(left), Some(_)) if self.count > rhs.count => Self {
+                    candidate: Some(left),
+                    count: self.count - rhs.count,
+                },
+                (Some(_), Some(right)) if rhs.count > self.count => Self {
+                    candidate: Some(right),
+                    count: rhs.count - self.count,
+                },
+                _ => Self::default(),
+            }
+        }
+    }
+
+    fn reducer_law_fixture_map() -> PathMap<u8> {
+        let mut map = PathMap::new();
+        map.set_val_at([], 9);
+        map.set_val_at(b"a", 1);
+        map.set_val_at(b"ab", 2);
+        map.set_val_at(b"b0", 3);
+        map.set_val_at(b"b1", 4);
+        map.set_val_at(b"root/deep", 5);
+        map
+    }
+
+    fn path_value_events(map: &PathMap<u8>) -> Vec<(Vec<u8>, u8)> {
+        let mut zipper = map.read_zipper();
+        let mut events = Vec::new();
+        if let Some(value) = zipper.val() {
+            events.push((zipper.path().to_vec(), *value));
+        }
+        while zipper.to_next_val() {
+            if let Some(value) = zipper.val() {
+                events.push((zipper.path().to_vec(), *value));
+            }
+        }
+        events
+    }
+
+    fn ordered_event_digest(path: &[u8], value: u8) -> OrderedDigest {
+        path.iter()
+            .copied()
+            .fold(OrderedDigest::default(), |digest, byte| {
+                digest.combine(OrderedDigest::atom(u128::from(byte) + 1))
+            })
+            .combine(OrderedDigest::atom(0x100 + u128::from(value)))
+    }
+
+    fn ordered_digest(events: &[(Vec<u8>, u8)]) -> OrderedDigest {
+        events
+            .iter()
+            .fold(OrderedDigest::default(), |digest, (path, value)| {
+                digest.combine(ordered_event_digest(path, *value))
+            })
+    }
+
+    fn ordered_chunk_states(events: &[(Vec<u8>, u8)], chunk_sizes: &[usize]) -> Vec<OrderedDigest> {
+        let mut states = Vec::new();
+        let mut offset = 0;
+        let mut chunk_idx = 0;
+        while offset < events.len() {
+            let chunk_len = chunk_sizes[chunk_idx % chunk_sizes.len()].max(1);
+            let end = events.len().min(offset + chunk_len);
+            states.push(ordered_digest(&events[offset..end]));
+            offset = end;
+            chunk_idx += 1;
+        }
+        states
+    }
+
+    fn combine_ordered_states(states: impl IntoIterator<Item = OrderedDigest>) -> OrderedDigest {
+        states
+            .into_iter()
+            .fold(OrderedDigest::default(), OrderedDigest::combine)
+    }
+
+    fn commutative_event_digest(path: &[u8], value: u8) -> CommutativeDigest {
+        let token: u128 = path
+            .iter()
+            .copied()
+            .fold(0x9e37_79b9_7f4a_7c15, |hash, byte| {
+                hash.wrapping_mul(131).wrapping_add(u128::from(byte) + 1)
+            });
+        CommutativeDigest::atom(token.wrapping_mul(131).wrapping_add(u128::from(value)))
+    }
+
+    fn commutative_digest(events: &[(Vec<u8>, u8)]) -> CommutativeDigest {
+        events
+            .iter()
+            .fold(CommutativeDigest::default(), |digest, (path, value)| {
+                digest.combine(commutative_event_digest(path, *value))
+            })
+    }
+
+    fn commutative_chunk_states(
+        events: &[(Vec<u8>, u8)],
+        chunk_sizes: &[usize],
+    ) -> Vec<CommutativeDigest> {
+        let mut states = Vec::new();
+        let mut offset = 0;
+        let mut chunk_idx = 0;
+        while offset < events.len() {
+            let chunk_len = chunk_sizes[chunk_idx % chunk_sizes.len()].max(1);
+            let end = events.len().min(offset + chunk_len);
+            states.push(commutative_digest(&events[offset..end]));
+            offset = end;
+            chunk_idx += 1;
+        }
+        states
+    }
+
+    fn combine_commutative_states(
+        states: impl IntoIterator<Item = CommutativeDigest>,
+    ) -> CommutativeDigest {
+        states
+            .into_iter()
+            .fold(CommutativeDigest::default(), CommutativeDigest::combine)
+    }
+
+    fn boyer_moore_reduce_values(values: impl IntoIterator<Item = u8>) -> BoyerMooreState {
+        values
+            .into_iter()
+            .map(BoyerMooreState::single)
+            .fold(BoyerMooreState::default(), BoyerMooreState::combine)
+    }
+
+    fn boyer_moore_reduce_chunks(values: &[u8], chunk_sizes: &[usize]) -> BoyerMooreState {
+        let mut state = BoyerMooreState::default();
+        let mut offset = 0;
+        let mut chunk_idx = 0;
+        while offset < values.len() {
+            let chunk_len = chunk_sizes[chunk_idx % chunk_sizes.len()].max(1);
+            let end = values.len().min(offset + chunk_len);
+            let chunk_state = boyer_moore_reduce_values(values[offset..end].iter().copied());
+            state = state.combine(chunk_state);
+            offset = end;
+            chunk_idx += 1;
+        }
+        state
+    }
+
+    fn verified_majority(candidate: u8, values: &[u8]) -> bool {
+        values.iter().filter(|&&value| value == candidate).count() > values.len() / 2
+    }
+
+    #[test]
+    fn monoid_reducer_ordered_chunks_match_sequential_fold() {
+        let events = path_value_events(&reducer_law_fixture_map());
+        let sequential = ordered_digest(&events);
+
+        for chunk_sizes in [[1].as_slice(), &[2, 1, 3], &[4, 99]] {
+            let chunked = combine_ordered_states(ordered_chunk_states(&events, chunk_sizes));
+            assert_eq!(chunked, sequential, "chunk_sizes={chunk_sizes:?}");
+        }
+    }
+
+    #[test]
+    fn monoid_reducer_ordered_chunks_do_not_allow_permutation() {
+        let events = path_value_events(&reducer_law_fixture_map());
+        let chunk_states = ordered_chunk_states(&events, &[2, 3, 1]);
+        let in_order = combine_ordered_states(chunk_states.iter().copied());
+        let reversed = combine_ordered_states(chunk_states.iter().rev().copied());
+
+        assert_ne!(reversed, in_order);
+    }
+
+    #[test]
+    fn monoid_reducer_commutative_chunks_allow_permutation() {
+        let events = path_value_events(&reducer_law_fixture_map());
+        let chunk_states = commutative_chunk_states(&events, &[2, 3, 1]);
+        let in_order = combine_commutative_states(chunk_states.iter().copied());
+        let reversed = combine_commutative_states(chunk_states.iter().rev().copied());
+
+        assert_eq!(reversed, in_order);
+    }
+
+    #[test]
+    fn boyer_moore_majority_reducer_chunks_match_sequential_candidate() {
+        let majority_values = [7, 1, 7, 2, 7, 3, 7, 4, 7];
+        let mut map = PathMap::new();
+        for (idx, value) in majority_values.iter().copied().enumerate() {
+            map.set_val_at([idx as u8], value);
+        }
+        let values = path_value_events(&map)
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+
+        let sequential = boyer_moore_reduce_values(values.iter().copied());
+        let chunked = boyer_moore_reduce_chunks(&values, &[2, 3, 1]);
+
+        assert_eq!(values, majority_values);
+        assert_eq!(chunked, sequential);
+        assert_eq!(sequential.candidate, Some(7));
+        assert!(verified_majority(7, &values));
+    }
+
+    #[test]
+    fn boyer_moore_candidate_requires_verification_when_no_majority_exists() {
+        let values = [1, 2, 3, 4, 5];
+        let candidate = boyer_moore_reduce_values(values).candidate;
+
+        assert!(!candidate.is_some_and(|candidate| verified_majority(candidate, &values)));
     }
 
     /// Adds up all the the path bytes at each value
     #[test]
     fn cata_test1() {
         let tests = [
-            (vec![], 0), //Empty special case
+            (vec![], 0),    //Empty special case
             (vec!["1"], 1), //A branch at the root
             (vec!["1", "2"], 3),
             (vec!["1", "2", "3", "4", "5", "6"], 21),
             (vec!["a1", "a2"], 3), //A branch above the root
             (vec!["a1", "a2", "a3", "a4", "a5", "a6"], 21),
-            (vec!["12345"], 5), //A deep leaf
+            (vec!["12345"], 5),                            //A deep leaf
             (vec!["1", "12", "123", "1234", "12345"], 15), //Values along the path
-            (vec!["123", "123456", "123789"], 18), //A branch that also has a value
+            (vec!["123", "123456", "123789"], 18),         //A branch that also has a value
             (vec!["12", "123", "123456", "123789"], 20),
-            (vec!["1", "2", "123", "123765", "1234", "12345", "12349"], 29) //A challenging mix of everything
+            (
+                vec!["1", "2", "123", "123765", "1234", "12345", "12349"],
+                29,
+            ), //A challenging mix of everything
         ];
         for (keys, expected_sum) in tests {
             let map: PathMap<()> = keys.into_iter().map(|v| (v, ())).collect();
@@ -1378,7 +2051,11 @@ mod tests {
             //Test both flavors of the side-effect catas, since they fundamentally work the same
             // for this algorithm.  They just add the path byte each time there is a value, and
             // sum all the downstream branches.
-            let alg = |_child_mask: &ByteMask, children: &mut [u32], _jump_len: usize, val: Option<&()>, path: &[u8]| {
+            let alg = |_child_mask: &ByteMask,
+                       children: &mut [u32],
+                       _jump_len: usize,
+                       val: Option<&()>,
+                       path: &[u8]| {
                 let this_digit = if val.is_some() {
                     (*path.last().unwrap() as char).to_digit(10).unwrap()
                 } else {
@@ -1387,21 +2064,26 @@ mod tests {
                 let sum_of_branches = children.into_iter().fold(0, |sum, child| sum + *child);
                 sum_of_branches + this_digit
             };
-            check_side_effect_catas(map.read_zipper(), alg, |sum, _| assert_eq!(sum, expected_sum));
+            check_side_effect_catas(map.read_zipper(), alg, |sum, _| {
+                assert_eq!(sum, expected_sum)
+            });
 
             //The pure stepping cata alg is similar, but works a little differently
             // Here, we pass whether there was a val, so we can decide to add the path byte
             // at the next level up.
-            let pure_alg_stepping = |child_mask: &ByteMask, children: &mut [(bool, u32)], val: Option<&()>| {
-                let mut sum = 0;
-                for (child_byte, (child_val, downstream_sum)) in child_mask.iter().zip(children.into_iter()) {
-                    if *child_val {
-                        sum += (child_byte as char).to_digit(10).unwrap()
+            let pure_alg_stepping =
+                |child_mask: &ByteMask, children: &mut [(bool, u32)], val: Option<&()>| {
+                    let mut sum = 0;
+                    for (child_byte, (child_val, downstream_sum)) in
+                        child_mask.iter().zip(children.into_iter())
+                    {
+                        if *child_val {
+                            sum += (child_byte as char).to_digit(10).unwrap()
+                        }
+                        sum += *downstream_sum;
                     }
-                    sum += *downstream_sum;
-                }
-                (val.is_some(), sum)
-            };
+                    (val.is_some(), sum)
+                };
             let output = map.read_zipper().into_cata_cached(pure_alg_stepping);
             assert_eq!(output.1, expected_sum);
 
@@ -1411,32 +2093,54 @@ mod tests {
             //
             //This code works fine for both stepping and jumping, but is a little more complicated
             // than the stepping-only version
-            let pure_alg = |child_mask: &ByteMask, children: &mut [(bool, u32)], val: Option<&()>, sub_path: &[u8]| {
+            let pure_alg = |child_mask: &ByteMask,
+                            children: &mut [(bool, u32)],
+                            val: Option<&()>,
+                            sub_path: &[u8]| {
                 let mut sum = 0;
                 if val.is_some() {
                     if let Some(path_byte) = sub_path.last() {
                         sum += (*path_byte as char).to_digit(10).unwrap();
                     }
                 }
-                for (child_byte, (child_val, downstream_sum)) in child_mask.iter().zip(children.into_iter()) {
+                for (child_byte, (child_val, downstream_sum)) in
+                    child_mask.iter().zip(children.into_iter())
+                {
                     if *child_val {
                         sum += (child_byte as char).to_digit(10).unwrap()
                     }
                     sum += *downstream_sum;
                 }
-                (val.is_some() && sub_path.len()==0, sum)
+                (val.is_some() && sub_path.len() == 0, sum)
             };
 
             //Test both stepping and jumping cached catas
-            check_pure_catas(map.read_zipper(), pure_alg, |sum, _| assert_eq!(sum.1, expected_sum));
+            check_pure_catas(map.read_zipper(), pure_alg, |sum, _| {
+                assert_eq!(sum.1, expected_sum)
+            });
         }
     }
 
     #[test]
     fn cata_test2() {
         let mut btm = PathMap::new();
-        let rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
-        rs.iter().enumerate().for_each(|(i, r)| { btm.set_val_at(r.as_bytes(), i); });
+        let rs = [
+            "arrow",
+            "bow",
+            "cannon",
+            "roman",
+            "romane",
+            "romanus",
+            "romulus",
+            "rubens",
+            "ruber",
+            "rubicon",
+            "rubicundus",
+            "rom'i",
+        ];
+        rs.iter().enumerate().for_each(|(i, r)| {
+            btm.set_val_at(r.as_bytes(), i);
+        });
 
         //These algorithms should perform the same with both "jumping" and "non-jumping" versions
 
@@ -1450,35 +2154,49 @@ mod tests {
                 1 //leaf node
             }
         }
-        let alg = |_mask: &ByteMask, children: &mut [usize], val: Option<&usize>| {
-            leaf_cnt(children, val)
-        };
+        let alg =
+            |_mask: &ByteMask, children: &mut [usize], val: Option<&usize>| leaf_cnt(children, val);
         check_all_catas(btm.read_zipper(), alg, |cnt, _| assert_eq!(cnt, 11));
 
         //=================================================================================
         // LongestPath - Finds the longest path in the trie, by just looking at the path.  Side-effect catas have that luxury
-        fn longest_path(children: &mut[Vec<u8>], path: &[u8]) -> Vec<u8> {
+        fn longest_path(children: &mut [Vec<u8>], path: &[u8]) -> Vec<u8> {
             if children.len() == 0 {
                 path.to_vec()
             } else {
-                children.iter_mut().max_by_key(|p| p.len()).map_or(vec![], std::mem::take)
+                children
+                    .iter_mut()
+                    .max_by_key(|p| p.len())
+                    .map_or(vec![], std::mem::take)
             }
         }
-        let alg = |_mask: &ByteMask, children: &mut [Vec<u8>], _jmp: usize, _val: Option<&usize>, path: &[u8]| {
-            longest_path(children, path)
-        };
-        check_side_effect_catas(btm.read_zipper(), alg, |longest, _|
-            assert_eq!(std::str::from_utf8(longest.as_slice()).unwrap(), "rubicundus"));
+        let alg = |_mask: &ByteMask,
+                   children: &mut [Vec<u8>],
+                   _jmp: usize,
+                   _val: Option<&usize>,
+                   path: &[u8]| { longest_path(children, path) };
+        check_side_effect_catas(btm.read_zipper(), alg, |longest, _| {
+            assert_eq!(
+                std::str::from_utf8(longest.as_slice()).unwrap(),
+                "rubicundus"
+            )
+        });
 
         //=================================================================================
         // PureLongestPath - Finds the longest path in the trie by concatenating sub-paths;
         //  This is necessary for pure catas because the same subtrie may share multiple base paths
-        fn longest_partial_path(child_mask: &ByteMask, children: &mut[Vec<u8>], sub_path: &[u8]) -> Vec<u8> {
+        fn longest_partial_path(
+            child_mask: &ByteMask,
+            children: &mut [Vec<u8>],
+            sub_path: &[u8],
+        ) -> Vec<u8> {
             if children.len() == 0 {
                 sub_path.to_vec()
             } else {
-                let mut longest_downstream_path = child_mask.iter()
-                    .zip(children.iter_mut()).max_by_key(|(_byte, path_rest)| path_rest.len())
+                let mut longest_downstream_path = child_mask
+                    .iter()
+                    .zip(children.iter_mut())
+                    .max_by_key(|(_byte, path_rest)| path_rest.len())
                     .map_or(vec![], |(byte, path_rest)| {
                         let mut path_rest = std::mem::take(path_rest);
                         path_rest.insert(0, byte);
@@ -1492,8 +2210,12 @@ mod tests {
         let alg = |mask: &ByteMask, children: &mut [Vec<u8>], _val: Option<&usize>, path: &[u8]| {
             longest_partial_path(mask, children, path)
         };
-        check_pure_catas(btm.read_zipper(), alg, |longest, _|
-            assert_eq!(std::str::from_utf8(longest.as_slice()).unwrap(), "rubicundus"));
+        check_pure_catas(btm.read_zipper(), alg, |longest, _| {
+            assert_eq!(
+                std::str::from_utf8(longest.as_slice()).unwrap(),
+                "rubicundus"
+            )
+        });
 
         //=================================================================================
         // CountBranchValues - Finds all values that are positioned at branch points (where children.len() > 0)
@@ -1503,7 +2225,9 @@ mod tests {
                     Some(val) => vec![*val],
                     None => {
                         let mut r = children.first_mut().map_or(vec![], std::mem::take);
-                        for w in children[1..].iter_mut() { r.extend(w.drain(..)); }
+                        for w in children[1..].iter_mut() {
+                            r.append(w);
+                        }
                         r
                     }
                 }
@@ -1514,8 +2238,9 @@ mod tests {
         let alg = |_mask: &ByteMask, children: &mut [Vec<usize>], val: Option<&usize>| {
             vals_at_branches(children, val)
         };
-        check_all_catas(btm.read_zipper(), alg, |at_truncated, _|
-            assert_eq!(at_truncated, vec![3]));
+        check_all_catas(btm.read_zipper(), alg, |at_truncated, _| {
+            assert_eq!(at_truncated, vec![3])
+        });
     }
 
     /// Counts both the number of leaves & forks, and well as the number of total bytes in the trie
@@ -1523,44 +2248,61 @@ mod tests {
     fn cata_test3() {
         let tests = [
             (vec![], 0, 0),
-            (vec!["i"], 1, 1), //1 leaf, 1 node
-            (vec!["i", "ii"], 2, 1), //1 leaf, 2 total "nodes"
-            (vec!["ii", "iiiii"], 5, 1), //1 leaf, 5 total "nodes"
+            (vec!["i"], 1, 1),                             //1 leaf, 1 node
+            (vec!["i", "ii"], 2, 1),                       //1 leaf, 2 total "nodes"
+            (vec!["ii", "iiiii"], 5, 1),                   //1 leaf, 5 total "nodes"
             (vec!["ii", "iii", "iiiii", "iiiiiii"], 7, 1), //1 leaf, 7 total "nodes"
-            (vec!["ii", "iiii", "iij", "iijjj"], 7, 3), //2 leaves, 1 fork, 7 total "nodes"
+            (vec!["ii", "iiii", "iij", "iijjj"], 7, 3),    //2 leaves, 1 fork, 7 total "nodes"
         ];
         for (keys, byte_cnt, leaf_cnt) in tests {
             let map: PathMap<()> = keys.into_iter().map(|v| (v, ())).collect();
             let zip = map.read_zipper();
 
             //Test both the jumping and non-jumping versions
-            let (node_sum, leaf_sum) = zip.clone().into_cata_side_effect(|_child_mask: &ByteMask, children: &mut [(u32, u32)], _val, path: &[u8]| {
-                // println!("aggregate path=\"{}\", children={children:?}", String::from_utf8_lossy(path));
-                let (mut node_sum, mut leaf_sum) = children.into_iter().fold((0, 0), |(node_sum, leaf_sum), (child_node, child_leaf)| (node_sum + *child_node, leaf_sum + *child_leaf));
-                if path.len() > 0 {
-                    node_sum += 1;
-                }
-                if children.len() != 1 && path.len() > 0 { //Don't count the root as a leaf
-                    leaf_sum += 1
-                }
-                (node_sum, leaf_sum)
-            });
+            let (node_sum, leaf_sum) = zip.clone().into_cata_side_effect(
+                |_child_mask: &ByteMask, children: &mut [(u32, u32)], _val, path: &[u8]| {
+                    // println!("aggregate path=\"{}\", children={children:?}", String::from_utf8_lossy(path));
+                    let (mut node_sum, mut leaf_sum) = children.into_iter().fold(
+                        (0, 0),
+                        |(node_sum, leaf_sum), (child_node, child_leaf)| {
+                            (node_sum + *child_node, leaf_sum + *child_leaf)
+                        },
+                    );
+                    if path.len() > 0 {
+                        node_sum += 1;
+                    }
+                    if children.len() != 1 && path.len() > 0 {
+                        //Don't count the root as a leaf
+                        leaf_sum += 1
+                    }
+                    (node_sum, leaf_sum)
+                },
+            );
             assert_eq!(node_sum, byte_cnt);
             assert_eq!(leaf_sum, leaf_cnt);
 
-            let (node_sum, leaf_sum) = zip.into_cata_jumping_side_effect(|_child_mask: &ByteMask, children: &mut [(u32, u32)], jump, _val, path: &[u8]| {
-                // println!("aggregate path=\"{}\", children={children:?}, jump={jump}", String::from_utf8_lossy(path));
-                let (mut node_sum, mut leaf_sum) = children.into_iter().fold((0, 0), |(node_sum, leaf_sum), (child_node, child_leaf)| (node_sum + *child_node, leaf_sum + *child_leaf));
-                if children.len() != 1 && path.len() > 0 { //Don't count the root as a leaf
-                    leaf_sum += 1;
-                }
-                if path.len() - jump > 0 { //Again a special case so we don't count the root
-                    node_sum += jump as u32 + 1;
-                } else {
-                    node_sum += jump as u32;
-                }
-                (node_sum, leaf_sum)
-            });
+            let (node_sum, leaf_sum) = zip.into_cata_jumping_side_effect(
+                |_child_mask: &ByteMask, children: &mut [(u32, u32)], jump, _val, path: &[u8]| {
+                    // println!("aggregate path=\"{}\", children={children:?}, jump={jump}", String::from_utf8_lossy(path));
+                    let (mut node_sum, mut leaf_sum) = children.into_iter().fold(
+                        (0, 0),
+                        |(node_sum, leaf_sum), (child_node, child_leaf)| {
+                            (node_sum + *child_node, leaf_sum + *child_leaf)
+                        },
+                    );
+                    if children.len() != 1 && path.len() > 0 {
+                        //Don't count the root as a leaf
+                        leaf_sum += 1;
+                    }
+                    if path.len() - jump > 0 {
+                        //Again a special case so we don't count the root
+                        node_sum += jump as u32 + 1;
+                    } else {
+                        node_sum += jump as u32;
+                    }
+                    (node_sum, leaf_sum)
+                },
+            );
             assert_eq!(node_sum, byte_cnt);
             assert_eq!(leaf_sum, leaf_cnt);
         }
@@ -1571,11 +2313,11 @@ mod tests {
     fn cata_test3split() {
         let tests = [
             (vec![], 0, 0),
-            (vec!["i"], 1, 1), //1 leaf, 1 node
-            (vec!["i", "ii"], 2, 1), //1 leaf, 2 total "nodes"
-            (vec!["ii", "iiiii"], 5, 1), //1 leaf, 5 total "nodes"
+            (vec!["i"], 1, 1),                             //1 leaf, 1 node
+            (vec!["i", "ii"], 2, 1),                       //1 leaf, 2 total "nodes"
+            (vec!["ii", "iiiii"], 5, 1),                   //1 leaf, 5 total "nodes"
             (vec!["ii", "iii", "iiiii", "iiiiiii"], 7, 1), //1 leaf, 7 total "nodes"
-            (vec!["ii", "iiii", "iij", "iijjj"], 7, 3), //2 leaves, 1 fork, 7 total "nodes"
+            (vec!["ii", "iiii", "iij", "iijjj"], 7, 3),    //2 leaves, 1 fork, 7 total "nodes"
         ];
         for (keys, expected_sum_ordinary, expected_sum_jumping) in tests {
             let map: PathMap<()> = keys.into_iter().map(|v| (v, ())).collect();
@@ -1601,11 +2343,18 @@ mod tests {
 
             //Test both the jumping and non-jumping versions
             #[allow(deprecated)]
-            let sum = zip.clone().into_cata_side_effect(SplitCata::new(map_f, collapse_f, alg_f));
+            let sum = zip
+                .clone()
+                .into_cata_side_effect(SplitCata::new(map_f, collapse_f, alg_f));
             assert_eq!(sum, expected_sum_ordinary);
 
             #[allow(deprecated)]
-            let sum = zip.into_cata_jumping_side_effect(SplitCataJumping::new(map_f, collapse_f, alg_f, |_subpath, w, _path| w));
+            let sum = zip.into_cata_jumping_side_effect(SplitCataJumping::new(
+                map_f,
+                collapse_f,
+                alg_f,
+                |_subpath, w, _path| w,
+            ));
             assert_eq!(sum, expected_sum_jumping);
         }
     }
@@ -1616,51 +2365,226 @@ mod tests {
         struct Trie<V> {
             prefix: String,
             value: Option<V>,
-            children: Vec<(char, Trie<V>)>
+            children: Vec<(char, Trie<V>)>,
         }
 
         let mut btm = PathMap::new();
-        let rs = ["arr", "arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
-        rs.iter().enumerate().for_each(|(i, r)| { btm.set_val_at(r.as_bytes(), i); });
-
-        let s: Option<Trie<usize>> = btm.read_zipper().into_cata_jumping_side_effect(|bm, ws: &mut [Option<Trie<usize>>], jump, mv, path| {
-            Some(Trie{
-                prefix: String::from_utf8(path[path.len()-jump..].to_vec()).unwrap(),
-                value: mv.cloned(),
-                children: bm.iter().zip(ws).map(|(b, t)| (b as char, std::mem::take(t).unwrap())).collect()
-            })
+        let rs = [
+            "arr",
+            "arrow",
+            "bow",
+            "cannon",
+            "roman",
+            "romane",
+            "romanus",
+            "romulus",
+            "rubens",
+            "ruber",
+            "rubicon",
+            "rubicundus",
+            "rom'i",
+        ];
+        rs.iter().enumerate().for_each(|(i, r)| {
+            btm.set_val_at(r.as_bytes(), i);
         });
 
-        assert_eq!(s, Some(Trie { prefix: "".into(), value: None, children: [
-            ('a', Trie { prefix: "rr".into(), value: Some(0), children: [
-                ('o', Trie { prefix: "w".into(), value: Some(1), children: [].into() })].into() }),
-            ('b', Trie { prefix: "ow".into(), value: Some(2), children: [].into() }),
-            ('c', Trie { prefix: "annon".into(), value: Some(3), children: [].into() }),
-            ('r', Trie { prefix: "".into(), value: None, children: [
-                ('o', Trie { prefix: "m".into(), value: None, children: [
-                    ('\'', Trie { prefix: "i".into(), value: Some(12), children: [].into() }),
-                    ('a', Trie { prefix: "n".into(), value: Some(4), children: [
-                        ('e', Trie { prefix: "".into(), value: Some(5), children: [].into() }),
-                        ('u', Trie { prefix: "s".into(), value: Some(6), children: [].into() })].into() }),
-                    ('u', Trie { prefix: "lus".into(), value: Some(7), children: [].into() })].into() }),
-                ('u', Trie { prefix: "b".into(), value: None, children: [
-                    ('e', Trie { prefix: "".into(), value: None, children: [
-                        ('n', Trie { prefix: "s".into(), value: Some(8), children: [].into() }),
-                        ('r', Trie { prefix: "".into(), value: Some(9), children: [].into() })].into() }),
-                    ('i', Trie { prefix: "c".into(), value: None, children: [
-                        ('o', Trie { prefix: "n".into(), value: Some(10), children: [].into() }),
-                        ('u', Trie { prefix: "ndus".into(), value: Some(11), children: [].into() })].into() })].into() })].into() })].into() }));
+        let s: Option<Trie<usize>> = btm.read_zipper().into_cata_jumping_side_effect(
+            |bm, ws: &mut [Option<Trie<usize>>], jump, mv, path| {
+                Some(Trie {
+                    prefix: String::from_utf8(path[path.len() - jump..].to_vec()).unwrap(),
+                    value: mv.cloned(),
+                    children: bm
+                        .iter()
+                        .zip(ws)
+                        .map(|(b, t)| (b as char, std::mem::take(t).unwrap()))
+                        .collect(),
+                })
+            },
+        );
+
+        assert_eq!(
+            s,
+            Some(Trie {
+                prefix: "".into(),
+                value: None,
+                children: [
+                    (
+                        'a',
+                        Trie {
+                            prefix: "rr".into(),
+                            value: Some(0),
+                            children: [(
+                                'o',
+                                Trie {
+                                    prefix: "w".into(),
+                                    value: Some(1),
+                                    children: [].into()
+                                }
+                            )]
+                            .into()
+                        }
+                    ),
+                    (
+                        'b',
+                        Trie {
+                            prefix: "ow".into(),
+                            value: Some(2),
+                            children: [].into()
+                        }
+                    ),
+                    (
+                        'c',
+                        Trie {
+                            prefix: "annon".into(),
+                            value: Some(3),
+                            children: [].into()
+                        }
+                    ),
+                    (
+                        'r',
+                        Trie {
+                            prefix: "".into(),
+                            value: None,
+                            children: [
+                                (
+                                    'o',
+                                    Trie {
+                                        prefix: "m".into(),
+                                        value: None,
+                                        children: [
+                                            (
+                                                '\'',
+                                                Trie {
+                                                    prefix: "i".into(),
+                                                    value: Some(12),
+                                                    children: [].into()
+                                                }
+                                            ),
+                                            (
+                                                'a',
+                                                Trie {
+                                                    prefix: "n".into(),
+                                                    value: Some(4),
+                                                    children: [
+                                                        (
+                                                            'e',
+                                                            Trie {
+                                                                prefix: "".into(),
+                                                                value: Some(5),
+                                                                children: [].into()
+                                                            }
+                                                        ),
+                                                        (
+                                                            'u',
+                                                            Trie {
+                                                                prefix: "s".into(),
+                                                                value: Some(6),
+                                                                children: [].into()
+                                                            }
+                                                        )
+                                                    ]
+                                                    .into()
+                                                }
+                                            ),
+                                            (
+                                                'u',
+                                                Trie {
+                                                    prefix: "lus".into(),
+                                                    value: Some(7),
+                                                    children: [].into()
+                                                }
+                                            )
+                                        ]
+                                        .into()
+                                    }
+                                ),
+                                (
+                                    'u',
+                                    Trie {
+                                        prefix: "b".into(),
+                                        value: None,
+                                        children: [
+                                            (
+                                                'e',
+                                                Trie {
+                                                    prefix: "".into(),
+                                                    value: None,
+                                                    children: [
+                                                        (
+                                                            'n',
+                                                            Trie {
+                                                                prefix: "s".into(),
+                                                                value: Some(8),
+                                                                children: [].into()
+                                                            }
+                                                        ),
+                                                        (
+                                                            'r',
+                                                            Trie {
+                                                                prefix: "".into(),
+                                                                value: Some(9),
+                                                                children: [].into()
+                                                            }
+                                                        )
+                                                    ]
+                                                    .into()
+                                                }
+                                            ),
+                                            (
+                                                'i',
+                                                Trie {
+                                                    prefix: "c".into(),
+                                                    value: None,
+                                                    children: [
+                                                        (
+                                                            'o',
+                                                            Trie {
+                                                                prefix: "n".into(),
+                                                                value: Some(10),
+                                                                children: [].into()
+                                                            }
+                                                        ),
+                                                        (
+                                                            'u',
+                                                            Trie {
+                                                                prefix: "ndus".into(),
+                                                                value: Some(11),
+                                                                children: [].into()
+                                                            }
+                                                        )
+                                                    ]
+                                                    .into()
+                                                }
+                                            )
+                                        ]
+                                        .into()
+                                    }
+                                )
+                            ]
+                            .into()
+                        }
+                    )
+                ]
+                .into()
+            })
+        );
 
         let keys = [vec![b'a', b'b', b'c'], vec![b'a', b'b', b'c', b'x', b'y']];
         let btm: PathMap<usize> = keys.into_iter().enumerate().map(|(i, k)| (k, i)).collect();
 
-        let s: Option<Trie<usize>> = btm.read_zipper().into_cata_jumping_side_effect(|bm, ws: &mut [Option<Trie<usize>>], jump, mv, path| {
-            Some(Trie{
-                prefix: String::from_utf8(path[path.len()-jump..].to_vec()).unwrap(),
-                value: mv.cloned(),
-                children: bm.iter().zip(ws).map(|(b, t)| (b as char, std::mem::take(t).unwrap())).collect()
-            })
-        });
+        let s: Option<Trie<usize>> = btm.read_zipper().into_cata_jumping_side_effect(
+            |bm, ws: &mut [Option<Trie<usize>>], jump, mv, path| {
+                Some(Trie {
+                    prefix: String::from_utf8(path[path.len() - jump..].to_vec()).unwrap(),
+                    value: mv.cloned(),
+                    children: bm
+                        .iter()
+                        .zip(ws)
+                        .map(|(b, t)| (b as char, std::mem::take(t).unwrap()))
+                        .collect(),
+                })
+            },
+        );
 
         println!("{:?}", s);
     }
@@ -1673,43 +2597,133 @@ mod tests {
             Value(V),
             Collapse(V, Box<Trie<V>>),
             Alg(Vec<(char, Trie<V>)>),
-            Jump(String, Box<Trie<V>>)
+            Jump(String, Box<Trie<V>>),
         }
         use Trie::*;
 
         let mut btm = PathMap::new();
-        let rs = ["arr", "arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
-        rs.iter().enumerate().for_each(|(i, r)| { btm.set_val_at(r.as_bytes(), i); });
+        let rs = [
+            "arr",
+            "arrow",
+            "bow",
+            "cannon",
+            "roman",
+            "romane",
+            "romanus",
+            "romulus",
+            "rubens",
+            "ruber",
+            "rubicon",
+            "rubicundus",
+            "rom'i",
+        ];
+        rs.iter().enumerate().for_each(|(i, r)| {
+            btm.set_val_at(r.as_bytes(), i);
+        });
 
         #[allow(deprecated)]
-        let s = btm.read_zipper().into_cata_jumping_side_effect(SplitCataJumping::new(
-            |v, _path| { Some(Box::new(Value(*v))) },
-            |v, w, _path| { Some(Box::new(Collapse(*v, w.unwrap()))) },
-            |cm, ws, _path| {
-                let mut it = cm.iter();
-                Some(Box::new(Alg(ws.iter_mut().map(|w| (it.next().unwrap() as char, *std::mem::take(w).unwrap())).collect())))},
-            |sp, w, _path| { Some(Box::new(Jump(std::str::from_utf8(sp).unwrap().to_string(), w.unwrap()))) }
-        ));
+        let s = btm
+            .read_zipper()
+            .into_cata_jumping_side_effect(SplitCataJumping::new(
+                |v, _path| Some(Box::new(Value(*v))),
+                |v, w, _path| Some(Box::new(Collapse(*v, w.unwrap()))),
+                |cm, ws, _path| {
+                    let mut it = cm.iter();
+                    Some(Box::new(Alg(ws
+                        .iter_mut()
+                        .map(|w| (it.next().unwrap() as char, *std::mem::take(w).unwrap()))
+                        .collect())))
+                },
+                |sp, w, _path| {
+                    Some(Box::new(Jump(
+                        std::str::from_utf8(sp).unwrap().to_string(),
+                        w.unwrap(),
+                    )))
+                },
+            ));
 
-        assert_eq!(s, Some(Alg([
-            ('a', Jump("rr".into(), Collapse(0, Jump("w".into(), Value(1).into()).into()).into())),
-            ('b', Jump("ow".into(), Value(2).into())),
-            ('c', Jump("annon".into(), Value(3).into())),
-            ('r', Alg([
-                ('o', Jump("m".into(), Alg([
-                    ('\'', Jump("i".into(), Value(12).into())),
-                    ('a', Jump("n".into(), Collapse(4, Alg([
-                        ('e', Value(5)),
-                        ('u', Jump("s".into(), Value(6).into()))
-                    ].into()).into()).into())),
-                    ('u', Jump("lus".into(), Value(7).into()))].into()).into())),
-                ('u', Jump("b".into(), Alg([
-                    ('e', Alg([
-                        ('n', Jump("s".into(), Value(8).into())),
-                        ('r', Value(9))].into())),
-                    ('i', Jump("c".into(), Alg([
-                        ('o', Jump("n".into(), Value(10).into())),
-                        ('u', Jump("ndus".into(), Value(11).into()))].into()).into()))].into()).into()))].into()))].into()).into()));
+        assert_eq!(
+            s,
+            Some(
+                Alg([
+                    (
+                        'a',
+                        Jump(
+                            "rr".into(),
+                            Collapse(0, Jump("w".into(), Value(1).into()).into()).into()
+                        )
+                    ),
+                    ('b', Jump("ow".into(), Value(2).into())),
+                    ('c', Jump("annon".into(), Value(3).into())),
+                    (
+                        'r',
+                        Alg([
+                            (
+                                'o',
+                                Jump(
+                                    "m".into(),
+                                    Alg([
+                                        ('\'', Jump("i".into(), Value(12).into())),
+                                        (
+                                            'a',
+                                            Jump(
+                                                "n".into(),
+                                                Collapse(
+                                                    4,
+                                                    Alg([
+                                                        ('e', Value(5)),
+                                                        ('u', Jump("s".into(), Value(6).into()))
+                                                    ]
+                                                    .into())
+                                                    .into()
+                                                )
+                                                .into()
+                                            )
+                                        ),
+                                        ('u', Jump("lus".into(), Value(7).into()))
+                                    ]
+                                    .into())
+                                    .into()
+                                )
+                            ),
+                            (
+                                'u',
+                                Jump(
+                                    "b".into(),
+                                    Alg([
+                                        (
+                                            'e',
+                                            Alg([
+                                                ('n', Jump("s".into(), Value(8).into())),
+                                                ('r', Value(9))
+                                            ]
+                                            .into())
+                                        ),
+                                        (
+                                            'i',
+                                            Jump(
+                                                "c".into(),
+                                                Alg([
+                                                    ('o', Jump("n".into(), Value(10).into())),
+                                                    ('u', Jump("ndus".into(), Value(11).into()))
+                                                ]
+                                                .into())
+                                                .into()
+                                            )
+                                        )
+                                    ]
+                                    .into())
+                                    .into()
+                                )
+                            )
+                        ]
+                        .into())
+                    )
+                ]
+                .into())
+                .into()
+            )
+        );
     }
 
     /// Tests going from a map directly to a catamorphism
@@ -1737,37 +2751,16 @@ mod tests {
         assert_eq!(result, 1);
     }
 
-    ///TODO: Port this test away from the deprecated `SplitCata` / `SplitCataJumping` API
     #[test]
     fn cata_test6() {
         let mut btm = PathMap::new();
         let rs = ["Hello, my name is", "Helsinki", "Hell"];
-        rs.iter().enumerate().for_each(|(i, r)| { btm.set_val_at(r.as_bytes(), i); });
+        rs.iter().enumerate().for_each(|(i, r)| {
+            btm.set_val_at(r.as_bytes(), i);
+        });
 
-        let mut map_cnt = 0;
-        let mut collapse_cnt = 0;
-        let mut alg_cnt = 0;
-        let mut jump_cnt = 0;
-
-        #[allow(deprecated)]
-        btm.read_zipper().into_cata_jumping_side_effect(SplitCataJumping::new(
-            |_, _path| {
-                // println!("map: \"{}\"", String::from_utf8_lossy(_path));
-                map_cnt += 1;
-            },
-            |_, _, _path| {
-                // println!("collapse: \"{}\"", String::from_utf8_lossy(_path));
-                collapse_cnt += 1;
-            },
-            |_, _, _path| {
-                // println!("alg: \"{}\"", String::from_utf8_lossy(_path));
-                alg_cnt += 1;
-            },
-            |_sub_path, _, _path| {
-                // println!("jump: over \"{}\" to \"{}\"", String::from_utf8_lossy(_sub_path), String::from_utf8_lossy(_path));
-                jump_cnt += 1;
-            }
-        ));
+        let (map_cnt, collapse_cnt, alg_cnt, jump_cnt) =
+            count_split_jumping_events(btm.read_zipper());
         // println!("map_cnt={map_cnt}, collapse_cnt={collapse_cnt}, alg_cnt={alg_cnt}, jump_cnt={jump_cnt}");
 
         assert_eq!(map_cnt, 2);
@@ -1777,38 +2770,21 @@ mod tests {
     }
 
     /// Covers the full spectrum of byte values, not limited to ascii
-    ///
-    /// TODO: Port this test away from the deprecated `SplitCata` / `SplitCataJumping` API,
     #[test]
     fn cata_test7() {
         let mut btm = PathMap::new();
-        let rs = [[0, 0, 0, 0], [0, 255, 170, 170], [0, 255, 255, 255], [0, 255, 88, 88]];
-        rs.iter().enumerate().for_each(|(i, r)| { btm.set_val_at(r, i); });
+        let rs = [
+            [0, 0, 0, 0],
+            [0, 255, 170, 170],
+            [0, 255, 255, 255],
+            [0, 255, 88, 88],
+        ];
+        rs.iter().enumerate().for_each(|(i, r)| {
+            btm.set_val_at(r, i);
+        });
 
-        let mut map_cnt = 0;
-        let mut collapse_cnt = 0;
-        let mut alg_cnt = 0;
-        let mut jump_cnt = 0;
-
-        #[allow(deprecated)]
-        btm.read_zipper().into_cata_jumping_side_effect(SplitCataJumping::new(
-            |_, _path| {
-                // println!("map: {_path:?}");
-                map_cnt += 1;
-            },
-            |_, _, _path| {
-                // println!("collapse: {_path:?}");
-                collapse_cnt += 1;
-            },
-            |_mask, _, _path| {
-                // println!("alg: {_path:?}, mask: {_mask:?}");
-                alg_cnt += 1;
-            },
-            |_sub_path, _, _path| {
-                // println!("jump: over {_sub_path:?} to {_path:?}");
-                jump_cnt += 1;
-            }
-        ));
+        let (map_cnt, collapse_cnt, alg_cnt, jump_cnt) =
+            count_split_jumping_events(btm.read_zipper());
         // println!("map_cnt={map_cnt}, collapse_cnt={collapse_cnt}, alg_cnt={alg_cnt}, jump_cnt={jump_cnt}");
 
         assert_eq!(map_cnt, 4);
@@ -1818,38 +2794,45 @@ mod tests {
     }
 
     /// Tests that cata hits the root value
-    ///
-    /// TODO: Port this test away from the deprecated `SplitCata` / `SplitCataJumping` API,
     #[test]
     fn cata_test8() {
         let keys = ["", "ab", "abc"];
         let btm: PathMap<usize> = keys.into_iter().enumerate().map(|(i, k)| (k, i)).collect();
 
-        #[allow(deprecated)]
-        btm.into_cata_jumping_side_effect(SplitCataJumping::new(
-            |v, path| {
-                // println!("map: {path:?}");
-                assert_eq!(path, &[97, 98, 99]);
-                assert_eq!(*v, 2);
-            },
-            |v, _, path| {
-                // println!("collapse: {path:?}");
-                match *v {
-                    1 => assert_eq!(path, &[97, 98]),
-                    0 => assert_eq!(path, &[]),
-                    _ => unreachable!(),
+        btm.into_cata_jumping_side_effect(|_mask, children: &mut [()], jump_len, val, path| {
+            if children.is_empty() {
+                if let Some(v) = val {
+                    // println!("map: {path:?}");
+                    assert_eq!(path, &[97, 98, 99]);
+                    assert_eq!(*v, 2);
+                } else {
+                    // println!("alg: {path:?}");
+                    assert_eq!(path, b"");
                 }
-            },
-            |_mask, _, path| {
-                // println!("alg: {path:?}");
-                assert_eq!(path, &[]);
-            },
-            |sub_path, _, path| {
-                // println!("jump: over {sub_path:?} to {path:?}");
-                assert_eq!(sub_path, &[98]);
-                assert_eq!(path, &[97]);
+            } else {
+                if children.len() > 1 {
+                    // println!("alg: {path:?}");
+                    assert_eq!(path, b"");
+                }
+                if let Some(v) = val {
+                    // println!("collapse: {path:?}");
+                    match *v {
+                        1 => assert_eq!(path, &[97, 98]),
+                        0 => assert_eq!(path, b""),
+                        _ => unreachable!(),
+                    }
+                }
             }
-        ))
+
+            debug_assert!(jump_len <= path.len());
+            let jump_dst_path = &path[..path.len() - jump_len];
+            let stem = &path[path.len() - jump_len..];
+            if (jump_len > 0 && !jump_dst_path.is_empty()) || jump_len > 1 {
+                // println!("jump: over {stem:?} to {jump_dst_path:?}");
+                assert_eq!(stem, &[98]);
+                assert_eq!(jump_dst_path, &[97]);
+            }
+        });
     }
 
     #[test]
@@ -1865,26 +2848,26 @@ mod tests {
                     assert_eq!(children.len(), 0);
                     assert_eq!(*mask, ByteMask::EMPTY);
                     assert_eq!(val, Some(&1));
-                },
+                }
                 [0, 1, 3] => {
                     assert_eq!(jump_len, 0);
                     assert_eq!(children.len(), 0);
                     assert_eq!(*mask, ByteMask::EMPTY);
                     assert_eq!(val, Some(&2));
-                },
+                }
                 [0, 1] => {
                     assert_eq!(jump_len, 0);
                     assert_eq!(children.len(), 2);
                     assert_eq!(*mask, ByteMask::from_iter([2, 3]));
                     assert_eq!(val, None);
-                },
+                }
                 [0] => {
                     assert_eq!(jump_len, 1);
                     assert_eq!(children.len(), 1);
                     assert_eq!(*mask, ByteMask::from(1));
                     assert_eq!(val, Some(&0));
-                },
-                _ => panic!()
+                }
+                _ => panic!(),
             }
         })
     }
@@ -1914,29 +2897,33 @@ mod tests {
         })
     }
 
+    fn heavily_shared_cata_map() -> PathMap<u8> {
+        // let btm: PathMap<u8> = crate::utils::ints::gen_int_range::<false, u16>(0x0, 0x101, 0x1, 0);
+        // if true { return btm; }
+        // let keys = [vec![0, 128, 1], vec![0, 128, 1, 255, 2]];
+        // let btm: PathMap<u8> = keys.into_iter().enumerate()
+        //     .map(|(i, k)| (k, i as u8)).collect();
+        // if true { return btm; }
+        let mut map: PathMap<u8> = PathMap::from_iter([([0], 0)]);
+        for _level in 0..3 {
+            let prev_zipper = map.read_zipper();
+            let next_map = PathMap::new_from_ana(false, |quit, _val, children, _path| {
+                if quit {
+                    return;
+                }
+                for ii in 0..=2 {
+                    children.graft_at_byte(ii, &prev_zipper);
+                }
+            });
+            drop(prev_zipper);
+            map = next_map;
+        }
+        map
+    }
+
     #[test]
     fn cata_test_cached() {
-        let make_map = || {
-            // let btm: PathMap<u8> = crate::utils::ints::gen_int_range::<false, u16>(0x0, 0x101, 0x1, 0);
-            // if true { return btm; }
-            // let keys = [vec![0, 128, 1], vec![0, 128, 1, 255, 2]];
-            // let btm: PathMap<u8> = keys.into_iter().enumerate()
-            //     .map(|(i, k)| (k, i as u8)).collect();
-            // if true { return btm; }
-            let mut map: PathMap<u8> = PathMap::from_iter([([0], 0)]);
-            for _level in 0..3 {
-                let prev_zipper = map.read_zipper();
-                let next_map = PathMap::new_from_ana(false, |quit, _val, children, _path| {
-                    if quit { return }
-                    for ii in 0..=2 {
-                        children.graft_at_byte(ii, &prev_zipper);
-                    }
-                });
-                drop(prev_zipper);
-                map = next_map;
-            }
-            map
-        };
+        let make_map = heavily_shared_cata_map;
 
         use std::rc::Rc;
         #[allow(dead_code)] // not accessing the fields, but using debug/eq
@@ -1947,7 +2934,10 @@ mod tests {
         }
         impl<V: Clone> Node<V> {
             fn new(value: Option<&V>, children: &[Rc<Node<V>>]) -> Self {
-                Self { value: value.cloned(), children: children.to_vec() }
+                Self {
+                    value: value.cloned(),
+                    children: children.to_vec(),
+                }
             }
         }
 
@@ -1968,22 +2958,153 @@ mod tests {
         // println!("tree: {:#?}", visit(&mut make_map().read_zipper()));
         use core::sync::atomic::{AtomicU64, Ordering::*};
         let calls_cached = AtomicU64::new(0);
-        let tree_cached: Rc::<Node<u8>> = make_map().into_cata_cached(
-            |_bm, children, value| {
-                calls_cached.fetch_add(1, Relaxed);
-                Rc::new(Node::new(value, children))
-            });
+        let tree_cached: Rc<Node<u8>> = make_map().into_cata_cached(|_bm, children, value| {
+            calls_cached.fetch_add(1, Relaxed);
+            Rc::new(Node::new(value, children))
+        });
         let calls_cached = calls_cached.load(Relaxed);
 
         let mut calls_side = 0;
-        let tree_side: Rc::<Node<u8>> = make_map().into_cata_side_effect(
-            |_bm, children, value, _path| {
+        let tree_side: Rc<Node<u8>> =
+            make_map().into_cata_side_effect(|_bm, children, value, _path| {
                 calls_side += 1;
                 Rc::new(Node::new(value, children))
             });
 
         assert_eq!(tree_side, tree_cached);
         eprintln!("calls_cached: {calls_cached}\ncalls_side: {calls_side}");
+    }
+
+    fn shared_context_map() -> PathMap<()> {
+        let mut shared = PathMap::<()>::new();
+        shared.set_val_at(b"leaf", ());
+        shared.set_val_at(b"limb", ());
+
+        let mut map = PathMap::<()>::new();
+        {
+            let mut zipper = map.write_zipper();
+            zipper.descend_to(b"left/shared:");
+            zipper.graft_map(shared.clone());
+            zipper.move_to_path(b"right/shared:");
+            zipper.graft_map(shared);
+        }
+        map
+    }
+
+    fn collect_value_contexts(
+        children: &mut [Vec<Vec<u8>>],
+        val: Option<&()>,
+        path_context: &[u8],
+    ) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        for child in children {
+            out.append(child);
+        }
+        if val.is_some() {
+            out.push(path_context.to_vec());
+        }
+        out
+    }
+
+    #[test]
+    fn contextual_cached_full_path_keeps_shared_subtries_distinct() {
+        let map = shared_context_map();
+
+        let mut stepping = map.clone().into_cata_contextual_cached(
+            PathScope::Full,
+            |_mask, children, val, path_context| {
+                collect_value_contexts(children, val, path_context)
+            },
+        );
+        stepping.sort();
+        assert_eq!(
+            stepping,
+            vec![
+                b"left/shared:leaf".to_vec(),
+                b"left/shared:limb".to_vec(),
+                b"right/shared:leaf".to_vec(),
+                b"right/shared:limb".to_vec(),
+            ]
+        );
+
+        let mut jumping = map.into_cata_jumping_contextual_cached(
+            PathScope::Full,
+            |_mask, children, val, _sub_path, path_context| {
+                collect_value_contexts(children, val, path_context)
+            },
+        );
+        jumping.sort();
+        assert_eq!(jumping, stepping);
+    }
+
+    #[test]
+    fn contextual_cached_suffix_zero_keeps_structural_cache_reuse() {
+        use core::sync::atomic::{AtomicU64, Ordering::*};
+
+        let map = heavily_shared_cata_map();
+
+        let structural_calls = AtomicU64::new(0);
+        let _structural_score = map.clone().into_cata_jumping_contextual_cached(
+            PathScope::Suffix(0),
+            |_mask, children: &mut [usize], val: Option<&u8>, _sub_path, path_context| {
+                structural_calls.fetch_add(1, Relaxed);
+                debug_assert!(path_context.is_empty());
+                children.iter().copied().sum::<usize>() + val.map_or(0, |v| *v as usize)
+            },
+        );
+
+        let full_calls = AtomicU64::new(0);
+        let _full_score = map.into_cata_jumping_contextual_cached(
+            PathScope::Full,
+            |_mask, children: &mut [usize], val: Option<&u8>, _sub_path, path_context| {
+                full_calls.fetch_add(1, Relaxed);
+                children.iter().copied().sum::<usize>()
+                    + val.map_or(0, |v| *v as usize + path_context.len())
+            },
+        );
+
+        let structural_calls = structural_calls.load(Relaxed);
+        let full_calls = full_calls.load(Relaxed);
+        assert!(
+            structural_calls < full_calls,
+            "zero-width suffix scope should preserve structural cache reuse; structural={structural_calls}, full={full_calls}"
+        );
+    }
+
+    #[test]
+    fn contextual_cached_full_path_handles_root_values() {
+        let mut map = PathMap::<()>::new();
+        map.set_val_at(b"", ());
+        map.set_val_at(b"child", ());
+
+        let mut contexts = map.into_cata_contextual_cached(
+            PathScope::Full,
+            |_mask, children, val, path_context| {
+                collect_value_contexts(children, val, path_context)
+            },
+        );
+        contexts.sort();
+
+        assert_eq!(contexts, vec![b"".to_vec(), b"child".to_vec()]);
+    }
+
+    #[test]
+    fn contextual_cached_full_path_respects_read_zipper_root_prefix() {
+        let mut map = PathMap::<()>::new();
+        map.set_val_at(b"prefix0000leaf", ());
+        map.set_val_at(b"prefix0000limb", ());
+
+        let mut stepping = map
+            .read_zipper_at_path(b"prefix0000")
+            .into_cata_contextual_cached(PathScope::Full, |_mask, children, val, path_context| {
+                collect_value_contexts(children, val, path_context)
+            });
+        stepping.sort();
+
+        assert_eq!(
+            stepping,
+            vec![b"prefix0000leaf".to_vec(), b"prefix0000limb".to_vec()]
+        );
     }
 
     /// Generate some basic tries using the [TrieBuilder::push_byte] API
@@ -2018,23 +3139,40 @@ mod tests {
         assert_eq!(invocations, 15);
     }
 
+    #[test]
+    fn ana_accepts_non_default_workspace() {
+        struct NonDefault(usize);
+
+        let map = PathMap::<()>::new_from_ana(NonDefault(3), |state, val, children, _path| {
+            if state.0 == 0 {
+                *val = Some(());
+            } else {
+                children.push_unchecked(b"x", NonDefault(state.0 - 1));
+            }
+        });
+
+        assert_eq!(map.val_count(), 1);
+        assert_eq!(map.get_val_at(b"xxx"), Some(&()));
+    }
+
     /// Test the [`TrieBuilder::set_child_mask`] API to set multiple children at once
     #[test]
     fn ana_test2() {
-        let map: PathMap<()> = PathMap::<()>::new_from_ana(([0u64; 4], 0), |(mut mask, idx), val, children, _path| {
-            // println!("path=\"{}\"", String::from_utf8_lossy(_path));
-            if idx < 5 {
-                mask[1] |= 1u64 << 1+idx;
-                let child_vec = vec![(mask, idx+1); idx+1];
-                children.set_child_mask(mask , child_vec);
-            } else {
-                *val = Some(());
-            }
-        });
+        let map: PathMap<()> =
+            PathMap::<()>::new_from_ana(([0u64; 4], 0), |(mut mask, idx), val, children, _path| {
+                // println!("path=\"{}\"", String::from_utf8_lossy(_path));
+                if idx < 5 {
+                    mask[1] |= 1u64 << 1 + idx;
+                    let child_vec = vec![(mask, idx + 1); idx + 1];
+                    children.set_child_mask(mask, child_vec);
+                } else {
+                    *val = Some(());
+                }
+            });
         assert_eq!(map.val_count(), 120); // 1 * 2 * 3 * 4 * 5
-        // for (path, ()) in map.iter() {
-        //     println!("{}", String::from_utf8_lossy(&path));
-        // }
+                                          // for (path, ()) in map.iter() {
+                                          //     println!("{}", String::from_utf8_lossy(&path));
+                                          // }
     }
     /// Test the [`TrieBuilder::push`] API to set whole string paths
     #[test]
@@ -2042,8 +3180,8 @@ mod tests {
         let map: PathMap<()> = PathMap::<()>::new_from_ana(3, |idx, val, children, _path| {
             // println!("path=\"{}\"", String::from_utf8_lossy(_path));
             if idx > 0 {
-                children.push(b"Left:", idx-1);
-                children.push(b"Right:", idx-1);
+                children.push(b"Left:", idx - 1);
+                children.push(b"Right:", idx - 1);
             } else {
                 *val = Some(());
             }
@@ -2060,11 +3198,11 @@ mod tests {
             // println!("path=\"{}\"", String::from_utf8_lossy(_path));
             if idx > 0 {
                 if idx % 2 == 0 {
-                    children.push_byte(b'+', idx-1);
-                    children.push_byte(b'-', idx-1);
+                    children.push_byte(b'+', idx - 1);
+                    children.push_byte(b'-', idx - 1);
                 } else {
-                    children.push(b"Left", idx-1);
-                    children.push(b"Right", idx-1);
+                    children.push(b"Left", idx - 1);
+                    children.push(b"Right", idx - 1);
                 }
             } else {
                 *val = Some(());
@@ -2082,11 +3220,11 @@ mod tests {
             // println!("path=\"{}\"", String::from_utf8_lossy(_path));
             if idx > 0 {
                 if idx % 2 == 0 {
-                    children.push_byte(b'+', idx-1);
-                    children.push(b"Left", idx-1);
+                    children.push_byte(b'+', idx - 1);
+                    children.push(b"Left", idx - 1);
                 } else {
-                    children.push_byte(b'-', idx-1);
-                    children.push(b"Right", idx-1);
+                    children.push_byte(b'-', idx - 1);
+                    children.push(b"Right", idx - 1);
                 }
             } else {
                 *val = Some(());
@@ -2098,88 +3236,185 @@ mod tests {
         assert_eq!(map.val_count(), 128);
         assert_eq!(map.get_val_at(b"Right+-+-+-"), Some(&()));
         assert_eq!(map.get_val_at(b"-+-+-+-"), Some(&()));
-        assert_eq!(map.get_val_at(b"RightLeftRightLeftRightLeftRight"), Some(&()));
+        assert_eq!(
+            map.get_val_at(b"RightLeftRightLeftRightLeftRight"),
+            Some(&())
+        );
     }
 
-    const GREETINGS: &[&str] = &["Hallo,Afrikaans", "Përshëndetje,Albanian", "እው ሰላም ነው,Amharic", "مرحبًا,Arabic",
-        "Barev,Armenian", "Kamisaki,Aymara", "Salam,Azerbaijani", "Kaixo,Basque", "Вітаю,Belarusian", "হ্যালো,Bengali",
-        "Zdravo,Bosnian", "Здравейте,Bulgarian", "ဟယ်လို,Burmese", "你好,Cantonese", "Hola,Catalan", "Kamusta,Cebuano",
-        "Kamusta,Cebuano", "Moni,Chichewa", "Bonghjornu,Corsican", "Zdravo,Croatian", "Ahoj,Czech", "Hej,Danish",
-        "Hallo,Dutch", "Hello,English", "Tere,Estonian", "Hello,Ewe", "سلام,Farsi (Persian)", "Bula,Fijian",
-        "Kumusta,Filipino", "Hei,Finnish", "Bonjour,French", "Dia dhuit,Gaelic (Irish)", "Ola,Galician", "გამარჯობა,Georgian",
-        "Guten tag,German", "γεια,Greek", "Mba'éichapa,Guarani", "Bonjou,Haitian Creole", "Aloha,Hawaiian",
-        "שלום,Hebrew", "नमस्ते,Hindi", "Nyob zoo,Hmong", "Szia,Hungarian", "Halló,Icelandic", "Ndewo,Igbo",
+    const GREETINGS: &[&str] = &[
+        "Hallo,Afrikaans",
+        "Përshëndetje,Albanian",
+        "እው ሰላም ነው,Amharic",
+        "مرحبًا,Arabic",
+        "Barev,Armenian",
+        "Kamisaki,Aymara",
+        "Salam,Azerbaijani",
+        "Kaixo,Basque",
+        "Вітаю,Belarusian",
+        "হ্যালো,Bengali",
+        "Zdravo,Bosnian",
+        "Здравейте,Bulgarian",
+        "ဟယ်လို,Burmese",
+        "你好,Cantonese",
+        "Hola,Catalan",
+        "Kamusta,Cebuano",
+        "Kamusta,Cebuano",
+        "Moni,Chichewa",
+        "Bonghjornu,Corsican",
+        "Zdravo,Croatian",
+        "Ahoj,Czech",
+        "Hej,Danish",
+        "Hallo,Dutch",
+        "Hello,English",
+        "Tere,Estonian",
+        "Hello,Ewe",
+        "سلام,Farsi (Persian)",
+        "Bula,Fijian",
+        "Kumusta,Filipino",
+        "Hei,Finnish",
+        "Bonjour,French",
+        "Dia dhuit,Gaelic (Irish)",
+        "Ola,Galician",
+        "გამარჯობა,Georgian",
+        "Guten tag,German",
+        "γεια,Greek",
+        "Mba'éichapa,Guarani",
+        "Bonjou,Haitian Creole",
+        "Aloha,Hawaiian",
+        "שלום,Hebrew",
+        "नमस्ते,Hindi",
+        "Nyob zoo,Hmong",
+        "Szia,Hungarian",
+        "Halló,Icelandic",
+        "Ndewo,Igbo",
         "TRASH-NO-COMMA", //Trash here, to test error-cases
-        "Hello,Ilocano", "Halo,Indonesian", "Ciao,Italian", "こんにちは,Japanese", "Сәлеметсіз бе,Kazakh",
+        "Hello,Ilocano",
+        "Halo,Indonesian",
+        "Ciao,Italian",
+        "こんにちは,Japanese",
+        "Сәлеметсіз бе,Kazakh",
         "TRASH-NOTHING-AFTER-COMMA,", //Trash here, to test error-cases
-        "សួស្តី,Khmer", "Mwaramutse,Kinyarwanda", "안녕하세요,Korean", "Slav,Kurdish", "ສະບາຍດີ,Lao", "Salve,Latin",
+        "សួស្តី,Khmer",
+        "Mwaramutse,Kinyarwanda",
+        "안녕하세요,Korean",
+        "Slav,Kurdish",
+        "ສະບາຍດີ,Lao",
+        "Salve,Latin",
         ",TRASH-NOTHING-BEFORE-COMMA", //Trash here, to test error-cases
-        "Sveika,Latvian", "Sveiki,Lithuanian", "Moien,Luxembourgish", "Salama,Malagasy", "Selamat pagi,Malay",
+        "Sveika,Latvian",
+        "Sveiki,Lithuanian",
+        "Moien,Luxembourgish",
+        "Salama,Malagasy",
+        "Selamat pagi,Malay",
         "", //Trash here, empty string
-        "Bongu,Maltese", "你好,Mandarin", "Kia ora,Maori", "नमस्कार,Marathi", "сайн уу,Mongolian", "Niltze Tialli Pialli,Nahuatl",
-        "Ya’at’eeh,Navajo", "नमस्कार,Nepali", "Hei,Norwegian", "سلام,Pashto", "Cześć,Polish", "Olá,Portuguese",
-        "ਸਤ ਸ੍ਰੀ ਅਕਾਲ,Punjabi", "Akkam,Oromo", "Allianchu,Quechua", "Bunâ,Romanian", "Привет,Russian", "Talofa,Samoan",
-        "Thobela,Sepedi", "Здраво,Serbian", "Dumela,Sesotho", "Ahoj,Slovak", "Zdravo,Slovenian", "Hello,Somali",
-        "Hola,Spanish", "Jambo,Swahili", "Hallå,Swedish", "Kamusta,Tagalog", "Ia Orana,Tahitian", "Li-hó,Taiwanese",
-        "வணக்கம்,Tamil", "สวัสดี,Thai", "Tashi delek,Tibetan", "Mālō e lelei,Tongan", "Avuxeni,Tsonga", "Merhaba,Turkish",
-        "привіт,Ukrainian", "السلام عليكم,Urdu", "Salom,Uzbek", "Xin chào,Vietnamese", "Helo,Welsh", "Molo,Xhosa",
+        "Bongu,Maltese",
+        "你好,Mandarin",
+        "Kia ora,Maori",
+        "नमस्कार,Marathi",
+        "сайн уу,Mongolian",
+        "Niltze Tialli Pialli,Nahuatl",
+        "Ya’at’eeh,Navajo",
+        "नमस्कार,Nepali",
+        "Hei,Norwegian",
+        "سلام,Pashto",
+        "Cześć,Polish",
+        "Olá,Portuguese",
+        "ਸਤ ਸ੍ਰੀ ਅਕਾਲ,Punjabi",
+        "Akkam,Oromo",
+        "Allianchu,Quechua",
+        "Bunâ,Romanian",
+        "Привет,Russian",
+        "Talofa,Samoan",
+        "Thobela,Sepedi",
+        "Здраво,Serbian",
+        "Dumela,Sesotho",
+        "Ahoj,Slovak",
+        "Zdravo,Slovenian",
+        "Hello,Somali",
+        "Hola,Spanish",
+        "Jambo,Swahili",
+        "Hallå,Swedish",
+        "Kamusta,Tagalog",
+        "Ia Orana,Tahitian",
+        "Li-hó,Taiwanese",
+        "வணக்கம்,Tamil",
+        "สวัสดี,Thai",
+        "Tashi delek,Tibetan",
+        "Mālō e lelei,Tongan",
+        "Avuxeni,Tsonga",
+        "Merhaba,Turkish",
+        "привіт,Ukrainian",
+        "السلام عليكم,Urdu",
+        "Salom,Uzbek",
+        "Xin chào,Vietnamese",
+        "Helo,Welsh",
+        "Molo,Xhosa",
     ];
 
     /// Test pushing into the trie, one byte at a time
     #[test]
     fn ana_test4() {
         let mut greetings_vec = GREETINGS.to_vec();
-        let btm = PathMap::<Range<usize>>::new_from_ana(0..greetings_vec.len(), |mut range, val, children, path| {
-            let n = path.len();
+        let btm = PathMap::<Range<usize>>::new_from_ana(
+            0..greetings_vec.len(),
+            |mut range, val, children, path| {
+                let n = path.len();
 
-            //Sort the keys in the range by the first byte of each substring
-            let string_slice = &mut greetings_vec[range.clone()];
-            string_slice.sort_by_key(|s| s.as_bytes().get(n));
+                //Sort the keys in the range by the first byte of each substring
+                let string_slice = &mut greetings_vec[range.clone()];
+                string_slice.sort_by_key(|s| s.as_bytes().get(n));
 
-            //Discard the strings that are too short (that have ended prematurely)
-            while range.len() > 0 && greetings_vec[range.start].len() <= n { range.start += 1; }
-
-            while range.len() > 0 {
-                //Find the range of strings that start with the same byte as the first string
-                let mut m = range.start + 1;
-                let byte = greetings_vec[range.start].as_bytes()[n];
-                while range.contains(&m) && greetings_vec[m].as_bytes()[n] == byte {
-                    m += 1;
+                //Discard the strings that are too short (that have ended prematurely)
+                while range.len() > 0 && greetings_vec[range.start].len() <= n {
+                    range.start += 1;
                 }
 
-                let (mut same_prefix_range, remaining) = (range.start..m, m..range.end);
-
-                //If this is the end of a path, set the value
-                if byte == b',' {
-
-                    //Sort by the languages
-                    //NOTE: there is some ambiguity in the desired behavior, since the validity test
-                    // sorts the greetings but not the languages.  However, if we don't sort the languages,
-                    // then non-contiguous and non-prefixing empty language strings can't be removed unless
-                    // we attempt to represent the results of a node by a list instead of a range
-                    let string_slice = &mut greetings_vec[same_prefix_range.clone()];
-                    string_slice.sort_by_key(|s| &s[n+1..]);
-
-                    //Discard the strings have nothing after the ','
-                    while same_prefix_range.len() > 0 && greetings_vec[same_prefix_range.start].len() <= n+1 {
-                        same_prefix_range.start += 1;
+                while range.len() > 0 {
+                    //Find the range of strings that start with the same byte as the first string
+                    let mut m = range.start + 1;
+                    let byte = greetings_vec[range.start].as_bytes()[n];
+                    while range.contains(&m) && greetings_vec[m].as_bytes()[n] == byte {
+                        m += 1;
                     }
-                    //If we didn't discard all the items
-                    if same_prefix_range.len() > 0 {
-                        *val = Some(same_prefix_range);
+
+                    let (mut same_prefix_range, remaining) = (range.start..m, m..range.end);
+
+                    //If this is the end of a path, set the value
+                    if byte == b',' {
+                        //Sort by the languages
+                        //NOTE: there is some ambiguity in the desired behavior, since the validity test
+                        // sorts the greetings but not the languages.  However, if we don't sort the languages,
+                        // then non-contiguous and non-prefixing empty language strings can't be removed unless
+                        // we attempt to represent the results of a node by a list instead of a range
+                        let string_slice = &mut greetings_vec[same_prefix_range.clone()];
+                        string_slice.sort_by_key(|s| &s[n + 1..]);
+
+                        //Discard the strings have nothing after the ','
+                        while same_prefix_range.len() > 0
+                            && greetings_vec[same_prefix_range.start].len() <= n + 1
+                        {
+                            same_prefix_range.start += 1;
+                        }
+                        //If we didn't discard all the items
+                        if same_prefix_range.len() > 0 {
+                            *val = Some(same_prefix_range);
+                        }
+                    } else {
+                        //Recursive case
+                        children.push_byte(byte, same_prefix_range);
                     }
-                } else {
-                    //Recursive case
-                    children.push_byte(byte, same_prefix_range);
+                    range = remaining;
                 }
-                range = remaining;
-            }
-        });
+            },
+        );
 
-        let mut check: Vec<&str> = GREETINGS.into_iter().copied()
+        let mut check: Vec<&str> = GREETINGS
+            .into_iter()
+            .copied()
             .filter(|x| {
                 let comma_idx = x.find(",").unwrap_or(0);
-                comma_idx != 0 && comma_idx < x.len()-1
+                comma_idx != 0 && comma_idx < x.len() - 1
             })
             .collect();
         check.sort_by_key(|x| x.split_once(",").map(|s| s.0).unwrap_or(&""));
@@ -2189,7 +3424,7 @@ mod tests {
         while let Some(range) = rz.to_next_get_val() {
             for language_idx in range.clone().into_iter() {
                 let greeting = std::str::from_utf8(rz.path()).unwrap();
-                let language = &greetings_vec[language_idx][rz.path().len()+1..];
+                let language = &greetings_vec[language_idx][rz.path().len() + 1..];
 
                 // println!("language: {}, greeting: {}", language, greeting);
                 assert_eq!(*it.next().unwrap(), format!("{greeting},{language}"));
@@ -2197,52 +3432,34 @@ mod tests {
         }
     }
 
-    //GOAT WIP
-    // #[test]
-    // fn ana_test5() {
-    //     let _btm = PathMap::<&str>::new_from_ana(GREETINGS, |string_slice, val, children, _path| {
-
-    //         fn split_key(in_str: &str) -> (&str, &str) {
-    //             let det = in_str.find(',').unwrap_or(usize::MAX);
-    //             if det == 0 {
-    //                 ("", &in_str[1..])
-    //             } else if det == usize::MAX {
-    //                 ("", in_str)
-    //             } else {
-    //                 (&in_str[0..det], &in_str[det+1..])
-    //             }
-    //         }
-
-    //         if string_slice.len() == 1 {
-    //             let (_, split_val) = split_key(string_slice[0]);
-    //             *val = Some(split_val);
-    //         } else {
-    //             for i in 0..string_slice.len() {
-    //                 let (key, _) = split_key(string_slice[0]);
-    //                 children.tolerant_push(key.as_bytes(), &string_slice[i..i+1]);
-    //             }
-    //         }
-    //     });
-
-    //     let mut rz = _btm.read_zipper();
-    //     while let Some(language) = rz.to_next_get_value() {
-    //         //GOAT, this feature (and therefore this test) is WIP
-    //         println!("language: {}, greeting: {}", language, std::str::from_utf8(rz.path()).unwrap());
-    //     }
-    // }
-
     #[test]
     fn apo_test1() {
         let mut btm = PathMap::new();
-        let rs = ["arro^w", "bow", "cann^on", "roman", "romane", "romanus^", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom^i"];
-        rs.iter().enumerate().for_each(|(i, r)| { btm.set_val_at(r.as_bytes(), i); });
+        let rs = [
+            "arro^w",
+            "bow",
+            "cann^on",
+            "roman",
+            "romane",
+            "romanus^",
+            "romulus",
+            "rubens",
+            "ruber",
+            "rubicon",
+            "rubicundus",
+            "rom^i",
+        ];
+        rs.iter().enumerate().for_each(|(i, r)| {
+            btm.set_val_at(r.as_bytes(), i);
+        });
 
         let mut alphabetic = [0u64; 4];
-        for c in "abcdefghijklmnopqrstuvwxyz".bytes() { alphabetic.set_bit(c) }
+        for c in "abcdefghijklmnopqrstuvwxyz".bytes() {
+            alphabetic.set_bit(c)
+        }
 
         let trie_ref = btm.trie_ref_at_path([]);
         let counted = PathMap::new_from_ana(trie_ref, |trie_ref, _v, builder, loc| {
-
             let iter = trie_ref.child_mask().iter();
             for b in iter {
                 if alphabetic.test_bit(b) {

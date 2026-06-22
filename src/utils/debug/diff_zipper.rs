@@ -1,6 +1,5 @@
-
-use crate::zipper::*;
 use crate::utils::ByteMask;
+use crate::zipper::*;
 
 /// A [Zipper] type that wraps two other zippers that are expected to behave identically,
 /// and panics when they don't.  Useful to debug a Zipper implementation.
@@ -12,31 +11,38 @@ pub struct DiffZipper<A: Zipper, B: Zipper> {
 
 impl<A: Zipper, B: Zipper> DiffZipper<A, B> {
     pub fn new(a: A, b: B, log_moves: bool) -> Self {
-        Self{a, b, log_moves}
+        Self { a, b, log_moves }
     }
 }
 
-impl<A: Zipper, B: Zipper> Zipper for DiffZipper<A, B>
-{
+impl<A: Zipper, B: Zipper> Zipper for DiffZipper<A, B> {
     fn path_exists(&self) -> bool {
+        #[cfg(feature = "counters")]
+        crate::counters::record_diff_observation_check();
         let a = self.a.path_exists();
         let b = self.b.path_exists();
         assert_eq!(a, b);
         a
     }
     fn is_val(&self) -> bool {
+        #[cfg(feature = "counters")]
+        crate::counters::record_diff_observation_check();
         let a = self.a.is_val();
         let b = self.b.is_val();
         assert_eq!(a, b);
         a
     }
     fn child_count(&self) -> usize {
+        #[cfg(feature = "counters")]
+        crate::counters::record_diff_observation_check();
         let a = self.a.child_count();
         let b = self.b.child_count();
         assert_eq!(a, b);
         a
     }
     fn child_mask(&self) -> ByteMask {
+        #[cfg(feature = "counters")]
+        crate::counters::record_diff_observation_check();
         let a = self.a.child_mask();
         let b = self.b.child_mask();
         assert_eq!(a, b);
@@ -44,8 +50,7 @@ impl<A: Zipper, B: Zipper> Zipper for DiffZipper<A, B>
     }
 }
 
-impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZipper<A, B>
-{
+impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZipper<A, B> {
     fn at_root(&self) -> bool {
         let a = self.a.at_root();
         let b = self.b.at_root();
@@ -191,7 +196,8 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
     }
 }
 
-impl<A: Zipper + ZipperAbsolutePath, B: Zipper + ZipperAbsolutePath> ZipperAbsolutePath for DiffZipper<A, B>
+impl<A: Zipper + ZipperAbsolutePath, B: Zipper + ZipperAbsolutePath> ZipperAbsolutePath
+    for DiffZipper<A, B>
 {
     fn origin_path(&self) -> &[u8] {
         let a = self.a.origin_path();
@@ -207,11 +213,12 @@ impl<A: Zipper + ZipperAbsolutePath, B: Zipper + ZipperAbsolutePath> ZipperAbsol
     }
 }
 
-impl<A: Zipper + ZipperPathBuffer, B: Zipper + ZipperPathBuffer> ZipperPathBuffer for DiffZipper<A, B>
+impl<A: Zipper + ZipperPathBuffer, B: Zipper + ZipperPathBuffer> ZipperPathBuffer
+    for DiffZipper<A, B>
 {
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
-        let a = unsafe{ self.a.origin_path_assert_len(len) };
-        let b = unsafe{ self.b.origin_path_assert_len(len) };
+        let a = unsafe { self.a.origin_path_assert_len(len) };
+        let b = unsafe { self.b.origin_path_assert_len(len) };
         assert_eq!(a, b);
         a
     }
@@ -226,7 +233,8 @@ impl<A: Zipper + ZipperPathBuffer, B: Zipper + ZipperPathBuffer> ZipperPathBuffe
     }
 }
 
-impl<A: Zipper + ZipperIteration, B: Zipper + ZipperIteration> ZipperIteration for DiffZipper<A, B>
+impl<A: Zipper + ZipperIteration, B: Zipper + ZipperIteration> ZipperIteration
+    for DiffZipper<A, B>
 {
     fn to_next_val(&mut self) -> bool {
         let a = self.a.to_next_val();
@@ -257,7 +265,7 @@ impl<A: Zipper + ZipperIteration, B: Zipper + ZipperIteration> ZipperIteration f
     }
 }
 
-impl <PZL : ZipperProduct, PZR : ZipperProduct> ZipperProduct for DiffZipper<PZL, PZR> {
+impl<PZL: ZipperProduct, PZR: ZipperProduct> ZipperProduct for DiffZipper<PZL, PZR> {
     fn focus_factor(&self) -> usize {
         let a = self.a.focus_factor();
         let b = self.b.focus_factor();
@@ -275,5 +283,30 @@ impl <PZL : ZipperProduct, PZR : ZipperProduct> ZipperProduct for DiffZipper<PZL
         let b = self.b.path_indices();
         assert_eq!(a, b);
         a
+    }
+}
+
+#[cfg(all(test, feature = "counters"))]
+mod tests {
+    use super::*;
+    use crate::PathMap;
+
+    #[test]
+    fn diff_zipper_counts_observation_checks() {
+        use crate::counters::{reset_virtual_zipper_counters, virtual_zipper_counters};
+
+        let _guard = crate::counters::counter_test_guard();
+        let mut left = PathMap::<()>::new();
+        left.insert(b"a", ());
+        let right = left.clone();
+        let zipper = DiffZipper::new(left.read_zipper(), right.read_zipper(), false);
+
+        reset_virtual_zipper_counters();
+        assert!(zipper.path_exists());
+        assert!(!zipper.is_val());
+        assert_eq!(zipper.child_count(), 1);
+        assert_eq!(zipper.child_mask(), ByteMask::from(b'a'));
+
+        assert_eq!(virtual_zipper_counters().diff_observation_checks, 4);
     }
 }

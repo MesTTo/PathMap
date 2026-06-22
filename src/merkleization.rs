@@ -1,30 +1,14 @@
-
-//GOAT: Internal Discussion: What do we ultimately want this API to look like?
-//
-// * Firstly, we probably ought to make a writable trait, in the vein of `ZipperSubtries` that allows
-// merkleization on any object that has a mutable trie node (PathMaps, WriteZippers, etc.)
-// I've wanted that anyway for a while because I felt like a lot of the API between ZipperWriting and
-// PathMap should be merged together.
-//
-// * Secondly, I think we ought to allow the client to exfiltrate and store the `memo`, wrapped in some
-// kind of black box.  That way, they could perform "gradual merkleization", as an opportunistic background
-// process.
-//
-// However, the `memo` is liable to get huge in real-world situations, therefore we also want some kind of
-// way to implement a heuristic to evict nodes that are unlikely to be duplicated.  I'm not totally sure what
-// that heuristic(s) would be.  My first guess would be to try an LRU cache, but also, higher nodes are less
-// likely to be identical, but also we get more "bang" if we find higher-level sharing.  So perhaps finding
-// a that's shared means we make sure its parents are refreshed into the cache...  Anyway, gotta try stuff
-// and measure.
-//
-// One additional consideration if we go the persistent memo route is that the very existence of the memo
-// structure, under the present implementation, would increase the node refcounts and lead to copying... So
-// we might want to explore something like a "weak" pointer to keep in the memo (semantics wouldn't be exactly
-// the same as an Rc `weak`, but a similar idea)
+//! Temporary structural deduplication for `PathMap`.
+//!
+//! The current API is intentionally narrow: [`PathMap::merkleize`](crate::PathMap::merkleize)
+//! runs one in-memory pass, uses a temporary hash memo, and drops that memo before returning. A
+//! persistent or content-addressed memo needs separate ownership and eviction rules, because keeping
+//! node references in a long-lived memo changes refcounts and can force copies during later writes.
+//! MORK's content-addressed persistence track should build that as a separate design.
 
 use crate::alloc::Allocator;
-use crate::trie_node::*;
 use crate::gxhash;
+use crate::trie_node::*;
 
 /// Statistics created after merkleization
 #[derive(Default, Debug)]
@@ -33,9 +17,9 @@ pub struct MerkleizeResult {
     pub hash: u128,
     /// The number of shared node references that replaced identical copies during the merkleization
     pub reused: usize,
-    //GOAT, not sure how to describe this
+    /// The number of nodes cloned so descendants could be replaced without mutating existing aliases
     pub cloned: usize,
-    //GOAT, not sure how to describe this
+    /// The number of child links rewritten to point at memoized equivalent subtries
     pub replaced: usize,
 }
 
@@ -45,13 +29,13 @@ pub(crate) fn merkleize_impl<V, A>(
     node: &TrieNodeODRc<V, A>,
     value: Option<&V>,
 ) -> (u128, Option<TrieNodeODRc<V, A>>)
-    where
-        V: Clone + Send + Sync + std::hash::Hash,
-        A: Allocator,
+where
+    V: Clone + Send + Sync + std::hash::Hash,
+    A: Allocator,
 {
     // hash = (value, [(path, child_hash)])
-    use std::hash::{Hash};
     use std::collections::hash_map::Entry;
+    use std::hash::Hash;
     const INITIAL_SEED: i64 = 0;
     let mut hasher = gxhash::GxHasher::with_seed(INITIAL_SEED);
     value.hash(&mut hasher);
@@ -107,19 +91,12 @@ mod tests {
     #[test]
     fn test_btm_merkleize() {
         let paths: &[&[u8]] = &[
-            b"axx",
-            b"ayy",
-            b"bxx",
-            b"byy",
-            b"cxx",
-            b"cyy",
-            b"ddxx",
-            b"ddyy",
+            b"axx", b"ayy", b"bxx", b"byy", b"cxx", b"cyy", b"ddxx", b"ddyy",
         ];
-        let paths = paths.iter()
-            .map(|&path| (path, ()));
+        let paths = paths.iter().map(|&path| (path, ()));
         let mut btm = crate::PathMap::from_iter(paths);
-        #[cfg(feature="viz")] {
+        #[cfg(feature = "viz")]
+        {
             let mut before = Vec::new();
             use crate::viz::{viz_maps, DrawConfig};
             viz_maps(&[btm.clone()], &DrawConfig::default(), &mut before).unwrap();
@@ -128,7 +105,8 @@ mod tests {
         }
         let result = btm.merkleize();
         eprintln!("merkleize result: {result:?}\n");
-        #[cfg(feature="viz")] {
+        #[cfg(feature = "viz")]
+        {
             use crate::viz::{viz_maps, DrawConfig};
             let mut after = Vec::new();
             viz_maps(&[btm], &DrawConfig::default(), &mut after).unwrap();

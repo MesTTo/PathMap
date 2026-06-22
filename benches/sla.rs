@@ -1,44 +1,72 @@
 #![allow(unused)]
-use std::hash::{Hasher, Hash};
-use std::time::Instant;
 use num_traits::Zero;
+use pathmap::morphisms::Catamorphism;
+use pathmap::ring::{AlgebraicResult, Lattice};
+use pathmap::utils::{
+    BitMask, ByteMask,
+    ints::{indices_to_bob, indices_to_weave},
+};
+use pathmap::zipper::{
+    ReadZipperUntracked, WriteZipperUntracked, Zipper, ZipperMoving, ZipperValues, ZipperWriting,
+};
+use pathmap::*;
 use rand::distr::Uniform;
 use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::Distribution;
-use pathmap::*;
-use pathmap::morphisms::Catamorphism;
-use pathmap::ring::{AlgebraicResult, Lattice};
-use pathmap::utils::{BitMask, ByteMask, ints::{indices_to_weave, indices_to_bob}};
-use pathmap::zipper::{ReadZipperUntracked, WriteZipperUntracked, Zipper, ZipperMoving, ZipperValues, ZipperWriting};
+use std::hash::{Hash, Hasher};
+use std::time::Instant;
 
 #[derive(Copy, Clone, Debug)]
 #[repr(transparent)]
 struct FAddMul(f32);
-impl std::ops::Deref for FAddMul { type Target = f32; fn deref(&self) -> &Self::Target { &self.0 } }
-impl std::hash::Hash for FAddMul { fn hash<H: Hasher>(&self, state: &mut H) { self.0.to_bits().hash(state); } }
+impl std::ops::Deref for FAddMul {
+    type Target = f32;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::hash::Hash for FAddMul {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
 
 // Note FAddMul is *not* a valid lattice under pjoin, but until we have bitraversal policies, this will have to do
 impl Lattice for FAddMul {
-    fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized {
-        if self.0.is_zero() { return AlgebraicResult::Identity(1) }
-        if other.0.is_zero() { return AlgebraicResult::Identity(2) }
+    fn pjoin(&self, other: &Self) -> AlgebraicResult<Self>
+    where
+        Self: Sized,
+    {
+        if self.0.is_zero() {
+            return AlgebraicResult::Identity(1);
+        }
+        if other.0.is_zero() {
+            return AlgebraicResult::Identity(2);
+        }
         let s = self.0 + other.0;
         // make sparse if the dense sides had opposite signs and nearly cancelled out
-        if self.0 * other.0 < 0f32 && s.abs() < 1e-9 { return AlgebraicResult::None }
+        if self.0 * other.0 < 0f32 && s.abs() < 1e-9 {
+            return AlgebraicResult::None;
+        }
         AlgebraicResult::Element(FAddMul(s))
     }
 
-    fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized {
-        let s = self.0*other.0;
-        if s.abs() < 1e-9 { return AlgebraicResult::None }
+    fn pmeet(&self, other: &Self) -> AlgebraicResult<Self>
+    where
+        Self: Sized,
+    {
+        let s = self.0 * other.0;
+        if s.abs() < 1e-9 {
+            return AlgebraicResult::None;
+        }
         AlgebraicResult::Element(FAddMul(s))
     }
 }
 
 struct DenseTensorFRef {
     m: Vec<f32>,
-    d: Vec<usize>
+    d: Vec<usize>,
 }
 
 impl DenseTensorFRef {
@@ -72,7 +100,9 @@ impl DenseTensorFRef {
     }
     pub fn foreach(d: &[usize], mut f: impl FnMut(&[usize])) {
         let n = d.len();
-        if n == 0 || d.iter().any(|&x| x == 0) { return; }
+        if n == 0 || d.contains(&0) {
+            return;
+        }
 
         let mut ix = vec![0usize; n];
         loop {
@@ -84,10 +114,14 @@ impl DenseTensorFRef {
                 k -= 1;
                 ix[k] += 1;
                 // no carry needed
-                if ix[k] < d[k] { break; }
+                if ix[k] < d[k] {
+                    break;
+                }
                 ix[k] = 0;
                 // overflowed the most-significant digit => done
-                if k == 0 { return; }
+                if k == 0 {
+                    return;
+                }
             }
         }
     }
@@ -102,14 +136,17 @@ impl DenseTensorFRef {
             .map(|(&a, &b)| a + b)
             .collect();
 
-        Self { m, d: self.d.clone() }
+        Self {
+            m,
+            d: self.d.clone(),
+        }
     }
 }
 
 struct SparseTensorFBOB {
     m: PathMap<f32>,
     d: usize,
-    p: Vec<u8>
+    p: Vec<u8>,
 }
 
 impl SparseTensorFBOB {
@@ -120,20 +157,49 @@ impl SparseTensorFBOB {
         indices_to_bob(ix, &mut self.p);
         self.m.insert(&self.p[..], v);
     }
-    fn add(&self, other: &Self) -> Self { Self::vf32(self.vf().join(other.vf()), self.d) }
-    fn mul(&self, other: &Self) -> Self { Self::vf32(self.vf().meet(other.vf()), self.d) }
+    fn add(&self, other: &Self) -> Self {
+        Self::vf32(self.vf().join(other.vf()), self.d)
+    }
+    fn mul(&self, other: &Self) -> Self {
+        Self::vf32(self.vf().meet(other.vf()), self.d)
+    }
     // Safety: F has the same layout as f32 (but exposes a different set of traits)
-    fn vf(&self) -> &PathMap<FAddMul> { unsafe { (&self.m as *const PathMap<f32> as *const PathMap<FAddMul>).as_ref().unwrap_unchecked() } }
-    fn vf_mut(&mut self) -> &mut PathMap<FAddMul> { unsafe { (&mut self.m as *mut PathMap<f32> as *mut PathMap<FAddMul>).as_mut().unwrap_unchecked() } }
-    fn vf32(m: PathMap<FAddMul>, d: usize) -> Self { unsafe { Self{ m: std::mem::transmute::<PathMap::<FAddMul>, PathMap::<f32>>(m), d: d, p: Vec::new() } } }
-    fn new(dimensions: usize) -> Self { Self { m: PathMap::new(), d: dimensions, p: Vec::new() } }
+    fn vf(&self) -> &PathMap<FAddMul> {
+        unsafe {
+            (&self.m as *const PathMap<f32> as *const PathMap<FAddMul>)
+                .as_ref()
+                .unwrap_unchecked()
+        }
+    }
+    fn vf_mut(&mut self) -> &mut PathMap<FAddMul> {
+        unsafe {
+            (&mut self.m as *mut PathMap<f32> as *mut PathMap<FAddMul>)
+                .as_mut()
+                .unwrap_unchecked()
+        }
+    }
+    fn vf32(m: PathMap<FAddMul>, d: usize) -> Self {
+        unsafe {
+            Self {
+                m: std::mem::transmute::<PathMap<FAddMul>, PathMap<f32>>(m),
+                d: d,
+                p: Vec::new(),
+            }
+        }
+    }
+    fn new(dimensions: usize) -> Self {
+        Self {
+            m: PathMap::new(),
+            d: dimensions,
+            p: Vec::new(),
+        }
+    }
 }
-
 
 struct SparseTensorFWeave {
     m: PathMap<f32>,
     d: usize,
-    p: Vec<u8>
+    p: Vec<u8>,
 }
 
 impl SparseTensorFWeave {
@@ -144,13 +210,43 @@ impl SparseTensorFWeave {
         // println!("{:?} {:?}", ix, &self.p[..]);
         self.m.insert(&self.p[..], v);
     }
-    fn add(&self, other: &Self) -> Self { Self::vf32(self.vf().join(other.vf()), self.d) }
-    fn mul(&self, other: &Self) -> Self { Self::vf32(self.vf().meet(other.vf()), self.d) }
+    fn add(&self, other: &Self) -> Self {
+        Self::vf32(self.vf().join(other.vf()), self.d)
+    }
+    fn mul(&self, other: &Self) -> Self {
+        Self::vf32(self.vf().meet(other.vf()), self.d)
+    }
     // Safety: F has the same layout as f32 (but exposes a different set of traits)
-    fn vf(&self) -> &PathMap<FAddMul> { unsafe { (&self.m as *const PathMap<f32> as *const PathMap<FAddMul>).as_ref().unwrap_unchecked() } }
-    fn vf_mut(&mut self) -> &mut PathMap<FAddMul> { unsafe { (&mut self.m as *mut PathMap<f32> as *mut PathMap<FAddMul>).as_mut().unwrap_unchecked() } }
-    fn vf32(m: PathMap<FAddMul>, d: usize) -> Self { unsafe { Self{ m: std::mem::transmute::<PathMap::<FAddMul>, PathMap::<f32>>(m), d: d, p: Vec::new() } } }
-    fn new(dimensions: usize) -> Self { Self { m: PathMap::new(), d: dimensions, p: Vec::new() } }
+    fn vf(&self) -> &PathMap<FAddMul> {
+        unsafe {
+            (&self.m as *const PathMap<f32> as *const PathMap<FAddMul>)
+                .as_ref()
+                .unwrap_unchecked()
+        }
+    }
+    fn vf_mut(&mut self) -> &mut PathMap<FAddMul> {
+        unsafe {
+            (&mut self.m as *mut PathMap<f32> as *mut PathMap<FAddMul>)
+                .as_mut()
+                .unwrap_unchecked()
+        }
+    }
+    fn vf32(m: PathMap<FAddMul>, d: usize) -> Self {
+        unsafe {
+            Self {
+                m: std::mem::transmute::<PathMap<FAddMul>, PathMap<f32>>(m),
+                d: d,
+                p: Vec::new(),
+            }
+        }
+    }
+    fn new(dimensions: usize) -> Self {
+        Self {
+            m: PathMap::new(),
+            d: dimensions,
+            p: Vec::new(),
+        }
+    }
 }
 
 /// Q[10,11,00,00]
@@ -158,9 +254,16 @@ impl SparseTensorFWeave {
 /// bhqd,bhkd->bhqk  ((to be) auto generated, do not touch)
 static mut COUNT: usize = 0;
 #[allow(non_snake_case)]
-fn bob_attention(Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUntracked<f32>, out: &mut WriteZipperUntracked<f32>, depth: usize) {
-    let QF = 0b00001011u8; let QB = 0b00000111u8;
-    let KF = 0b00001011u8; let KB = 0b00000100u8;
+fn bob_attention(
+    Q: &mut ReadZipperUntracked<f32>,
+    K: &mut ReadZipperUntracked<f32>,
+    out: &mut WriteZipperUntracked<f32>,
+    depth: usize,
+) {
+    let QF = 0b00001011u8;
+    let QB = 0b00000111u8;
+    let KF = 0b00001011u8;
+    let KB = 0b00000100u8;
     let qm = Q.child_mask();
     let km = K.child_mask();
 
@@ -171,7 +274,9 @@ fn bob_attention(Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUntracked<f
         for j in rkm.iter() {
             let K_proj_out: u8 = (KB & j) << 1; // permute (hardcoded)
             let out_b: u8 = Q_proj_out | K_proj_out;
-            if QF & i != KF & j { continue }
+            if QF & i != KF & j {
+                continue;
+            }
 
             Q.descend_to_byte(i);
             K.descend_to_byte(j);
@@ -179,7 +284,9 @@ fn bob_attention(Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUntracked<f
             if depth == 63 {
                 let total = out.get_val_or_set_mut(0f32);
                 *total += unsafe { *Q.val().unwrap_unchecked() * *K.val().unwrap_unchecked() };
-                unsafe { COUNT += 1; }
+                unsafe {
+                    COUNT += 1;
+                }
             } else {
                 bob_attention(Q, K, out, depth + 1);
             }
@@ -193,7 +300,11 @@ fn bob_attention(Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUntracked<f
 // [b,h,q,d]
 /// bhqd,bhkd->bhqk  (auto generated, do not touch)
 #[allow(non_snake_case, unused)]
-fn _byte_weave_attention(Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUntracked<f32>, out: &mut WriteZipperUntracked<f32>) {
+fn _byte_weave_attention(
+    Q: &mut ReadZipperUntracked<f32>,
+    K: &mut ReadZipperUntracked<f32>,
+    out: &mut WriteZipperUntracked<f32>,
+) {
     let bm = Q.child_mask().and(&K.child_mask());
     for b in bm.iter() {
         Q.descend_to_byte(b);
@@ -246,7 +357,11 @@ fn _byte_weave_attention(Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUnt
 
 // [b0,h0,k0,d0,b1,h1,k1,d1]
 #[allow(non_snake_case, unused)]
-fn _short_weave_attention(Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUntracked<f32>, out: &mut WriteZipperUntracked<f32>) {
+fn _short_weave_attention(
+    Q: &mut ReadZipperUntracked<f32>,
+    K: &mut ReadZipperUntracked<f32>,
+    out: &mut WriteZipperUntracked<f32>,
+) {
     let bm = Q.child_mask().and(&K.child_mask());
     for b in bm.iter() {
         Q.descend_to_byte(b);
@@ -266,34 +381,31 @@ fn _short_weave_attention(Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUn
                     K.descend_to_byte(k);
                     out.descend_to_byte(k);
 
-
                     let dm = Q.child_mask().and(&K.child_mask());
                     for d in dm.iter() {
                         Q.descend_to_byte(d);
                         K.descend_to_byte(d);
 
-                    let bm = Q.child_mask().and(&K.child_mask());
-                    for b in bm.iter() {
-                        Q.descend_to_byte(b);
-                        K.descend_to_byte(b);
-                        out.descend_to_byte(b);
-                        let hm = Q.child_mask().and(&K.child_mask());
-                        for h in hm.iter() {
-                            Q.descend_to_byte(h);
-                            K.descend_to_byte(h);
-                            out.descend_to_byte(h);
-                            let qm = Q.child_mask();
-                            for q in qm.iter() {
-                                Q.descend_to_byte(q);
-                                out.descend_to_byte(q);
-                                let km = K.child_mask();
-                                for k in km.iter() {
-                                    K.descend_to_byte(k);
-                                    out.descend_to_byte(k);
-
+                        let bm = Q.child_mask().and(&K.child_mask());
+                        for b in bm.iter() {
+                            Q.descend_to_byte(b);
+                            K.descend_to_byte(b);
+                            out.descend_to_byte(b);
+                            let hm = Q.child_mask().and(&K.child_mask());
+                            for h in hm.iter() {
+                                Q.descend_to_byte(h);
+                                K.descend_to_byte(h);
+                                out.descend_to_byte(h);
+                                let qm = Q.child_mask();
+                                for q in qm.iter() {
+                                    Q.descend_to_byte(q);
+                                    out.descend_to_byte(q);
+                                    let km = K.child_mask();
+                                    for k in km.iter() {
+                                        K.descend_to_byte(k);
+                                        out.descend_to_byte(k);
 
                                         let mut acc = 0f32;
-
 
                                         let dm = Q.child_mask().and(&K.child_mask());
                                         for d in dm.iter() {
@@ -307,30 +419,27 @@ fn _short_weave_attention(Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUn
                                             K.ascend_byte();
                                         }
 
-                                    let total = out.get_val_or_set_mut(0f32);
-                                    *total += acc;
+                                        let total = out.get_val_or_set_mut(0f32);
+                                        *total += acc;
 
-
-                                    K.ascend_byte();
+                                        K.ascend_byte();
+                                        out.ascend_byte();
+                                    }
+                                    Q.ascend_byte();
                                     out.ascend_byte();
                                 }
                                 Q.ascend_byte();
+                                K.ascend_byte();
                                 out.ascend_byte();
                             }
                             Q.ascend_byte();
                             K.ascend_byte();
                             out.ascend_byte();
                         }
-                        Q.ascend_byte();
-                        K.ascend_byte();
-                        out.ascend_byte();
-                    }
-
 
                         Q.ascend_byte();
                         K.ascend_byte();
                     }
-
 
                     K.ascend_byte();
                     out.ascend_byte();
@@ -349,12 +458,16 @@ fn _short_weave_attention(Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUn
 }
 
 #[allow(non_snake_case)]
-fn weave_attention(Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUntracked<f32>, out: &mut WriteZipperUntracked<f32>) {
+fn weave_attention(
+    Q: &mut ReadZipperUntracked<f32>,
+    K: &mut ReadZipperUntracked<f32>,
+    out: &mut WriteZipperUntracked<f32>,
+) {
     query_byte_weave_attention(Q, K, out, 2, |Q, K, out| {
         let mut acc = 0f32;
         let mut acc_ptr = &mut acc as *mut f32;
         aggregate_byte_weave_attention(Q, K, 2, |Q, K| unsafe {
-            *acc_ptr +=  *Q.val().unwrap() * *K.val().unwrap();
+            *acc_ptr += *Q.val().unwrap() * *K.val().unwrap();
             COUNT += 1;
         });
         out.set_val(acc);
@@ -362,8 +475,19 @@ fn weave_attention(Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUntracked
 }
 
 #[allow(non_snake_case)]
-fn query_byte_weave_attention<F : FnMut(&mut ReadZipperUntracked<f32>, &mut ReadZipperUntracked<f32>, &mut WriteZipperUntracked<f32>) + Copy>(
-    Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUntracked<f32>, out: &mut WriteZipperUntracked<f32>, depth: usize, mut cb: F) {
+fn query_byte_weave_attention<
+    F: FnMut(
+            &mut ReadZipperUntracked<f32>,
+            &mut ReadZipperUntracked<f32>,
+            &mut WriteZipperUntracked<f32>,
+        ) + Copy,
+>(
+    Q: &mut ReadZipperUntracked<f32>,
+    K: &mut ReadZipperUntracked<f32>,
+    out: &mut WriteZipperUntracked<f32>,
+    depth: usize,
+    mut cb: F,
+) {
     let bm = Q.child_mask().and(&K.child_mask());
     for b in bm.iter() {
         Q.descend_to_byte(b);
@@ -383,8 +507,11 @@ fn query_byte_weave_attention<F : FnMut(&mut ReadZipperUntracked<f32>, &mut Read
                     K.descend_to_byte(k);
                     out.descend_to_byte(k);
 
-                    if depth == 1 { cb(Q, K, out); }
-                    else { query_byte_weave_attention(Q, K, out, depth - 1, cb); }
+                    if depth == 1 {
+                        cb(Q, K, out);
+                    } else {
+                        query_byte_weave_attention(Q, K, out, depth - 1, cb);
+                    }
 
                     K.ascend_byte();
                     out.ascend_byte();
@@ -403,15 +530,24 @@ fn query_byte_weave_attention<F : FnMut(&mut ReadZipperUntracked<f32>, &mut Read
 }
 
 #[allow(non_snake_case)]
-fn aggregate_byte_weave_attention<F : FnMut(&mut ReadZipperUntracked<f32>, &mut ReadZipperUntracked<f32>) + Copy>(
-    Q: &mut ReadZipperUntracked<f32>, K: &mut ReadZipperUntracked<f32>, depth: usize, mut cb: F) {
+fn aggregate_byte_weave_attention<
+    F: FnMut(&mut ReadZipperUntracked<f32>, &mut ReadZipperUntracked<f32>) + Copy,
+>(
+    Q: &mut ReadZipperUntracked<f32>,
+    K: &mut ReadZipperUntracked<f32>,
+    depth: usize,
+    mut cb: F,
+) {
     let dm = Q.child_mask().and(&K.child_mask());
     for d in dm.iter() {
         Q.descend_to_byte(d);
         K.descend_to_byte(d);
 
-        if depth == 1 { cb(Q, K) }
-        else { aggregate_byte_weave_attention(Q, K, depth - 1, cb) }
+        if depth == 1 {
+            cb(Q, K)
+        } else {
+            aggregate_byte_weave_attention(Q, K, depth - 1, cb)
+        }
 
         Q.ascend_byte();
         K.ascend_byte();
@@ -437,8 +573,10 @@ fn reference_attention(Q: &DenseTensorFRef, K: &DenseTensorFRef, out: &mut Dense
                     for d in 0..Q.d[3] {
                         let qv = Q.get(&[b, h, q, d]);
                         let kv = K.get(&[b, h, k, d]);
-                        acc += qv*kv;
-                        unsafe { RCOUNT += 1; }
+                        acc += qv * kv;
+                        unsafe {
+                            RCOUNT += 1;
+                        }
                     }
                     out.set(&[b, h, q, k], acc);
                 }
@@ -447,7 +585,7 @@ fn reference_attention(Q: &DenseTensorFRef, K: &DenseTensorFRef, out: &mut Dense
     }
 }
 
-fn random_index<R : Rng>(size: &[usize], rng: &mut R, idx: &mut [usize]) {
+fn random_index<R: Rng>(size: &[usize], rng: &mut R, idx: &mut [usize]) {
     assert_eq!(size.len(), idx.len());
     for d in 0..size.len() {
         let g = Uniform::new(0, size[d]).unwrap();
@@ -455,7 +593,7 @@ fn random_index<R : Rng>(size: &[usize], rng: &mut R, idx: &mut [usize]) {
     }
 }
 
-#[cfg(feature="viz")]
+#[cfg(feature = "viz")]
 fn sparse_dimensionwise() {
     let mut t0 = SparseTensorFBOB::new(4);
     t0.set(&[3, 1, 6, 6], 0.5);
@@ -469,10 +607,25 @@ fn sparse_dimensionwise() {
     let t1p2 = t0.add(&t1);
     let t1m2 = t0.mul(&t1);
 
-    use pathmap::viz::{viz_maps, DrawConfig};
+    use pathmap::viz::{DrawConfig, viz_maps};
     let mut v = vec![];
-    let dc = DrawConfig{ mode: pathmap::viz::VizMode::Ascii, ascii_path: false, hide_value_paths: false, minimize_values: false, logical: true, color: false };
-    viz_maps(&&[t0, t1, t1p2, t1m2].into_iter().map(|t| t.vf().clone()).collect::<Vec<_>>()[..], &dc, &mut v).unwrap();
+    let dc = DrawConfig {
+        mode: pathmap::viz::VizMode::Ascii,
+        ascii_path: false,
+        hide_value_paths: false,
+        minimize_values: false,
+        logical: true,
+        color: false,
+    };
+    viz_maps(
+        &&[t0, t1, t1p2, t1m2]
+            .into_iter()
+            .map(|t| t.vf().clone())
+            .collect::<Vec<_>>()[..],
+        &dc,
+        &mut v,
+    )
+    .unwrap();
     println!("{}", str::from_utf8(&v[..]).unwrap());
 }
 
@@ -481,14 +634,24 @@ fn tipover_attention_bob() {
     // let (batch_size, sequence_length, n_heads, embedding_dim) = (2, 3, 4, 8); // toy
     // let (batch_size, sequence_length, n_heads, embedding_dim) = (32, 5, 12, 384); // shakespeare-char
     let (batch_size, sequence_length, n_heads, embedding_dim) = (8, 512, 25, 1600); // GPT-2 xl
-    let mut rtq = DenseTensorFRef::new(vec![batch_size, sequence_length, n_heads, embedding_dim/n_heads]);
-    let mut rtk = DenseTensorFRef::new(vec![batch_size, sequence_length, n_heads, embedding_dim/n_heads]);
+    let mut rtq = DenseTensorFRef::new(vec![
+        batch_size,
+        sequence_length,
+        n_heads,
+        embedding_dim / n_heads,
+    ]);
+    let mut rtk = DenseTensorFRef::new(vec![
+        batch_size,
+        sequence_length,
+        n_heads,
+        embedding_dim / n_heads,
+    ]);
     let mut rtr = DenseTensorFRef::new(vec![batch_size, sequence_length, n_heads, n_heads]);
     let mut c = 0f32;
     for b in 0..batch_size {
         for h in 0..sequence_length {
             for k in 0..n_heads {
-                for d in 0..embedding_dim/n_heads {
+                for d in 0..embedding_dim / n_heads {
                     c += 1f32;
                     rtq.set(&[b, h, k, d], c);
                     rtk.set(&[b, h, k, d], -c);
@@ -500,7 +663,7 @@ fn tipover_attention_bob() {
     let t0 = Instant::now();
     reference_attention(&rtq, &rtk, &mut rtr);
     println!("ref {} µs ({n_weights} weights)", t0.elapsed().as_micros());
-    println!("rcount {}", unsafe{ RCOUNT });
+    println!("rcount {}", unsafe { RCOUNT });
 
     let mut rtr_ = SparseTensorFBOB::new(4);
     for b in 0..batch_size {
@@ -520,7 +683,7 @@ fn tipover_attention_bob() {
     for b in 0..batch_size {
         for h in 0..sequence_length {
             for k in 0..n_heads {
-                for d in 0..embedding_dim/n_heads {
+                for d in 0..embedding_dim / n_heads {
                     c += 1f32;
                     rtq.set(&[b, h, k, d], c);
                     rtk.set(&[b, h, k, d], -c);
@@ -533,20 +696,37 @@ fn tipover_attention_bob() {
     // rtq.vF_mut().merkleize();
     // rtk.vF_mut().merkleize();
     let t0 = Instant::now();
-    bob_attention(&mut rtq.m.read_zipper(), &mut rtk.m.read_zipper(), &mut rtr.m.write_zipper(), 0);
-    println!("bob {} µs ({n_weights} weights, {q_nz} Q nz, {k_nz} K nz)", t0.elapsed().as_micros());
-    println!(" count {}", unsafe{ COUNT });
-    unsafe{ COUNT = 0 };
+    bob_attention(
+        &mut rtq.m.read_zipper(),
+        &mut rtk.m.read_zipper(),
+        &mut rtr.m.write_zipper(),
+        0,
+    );
+    println!(
+        "bob {} µs ({n_weights} weights, {q_nz} Q nz, {k_nz} K nz)",
+        t0.elapsed().as_micros()
+    );
+    println!(" count {}", unsafe { COUNT });
+    unsafe { COUNT = 0 };
 
     assert_eq!(rtr.vf().clone().hash(), rtr_.vf().clone().hash());
 
     let mut rtq = SparseTensorFBOB::new(4);
     let mut rtk = SparseTensorFBOB::new(4);
     let mut rtr = SparseTensorFBOB::new(4);
-    let mut idx = vec![0; 4];
+    let mut idx = [0; 4];
     // in completely unstructured sparsity, at 2% PathMap outperforms the naive dense implementation
-    for i in 0..(n_weights as f64*0.02) as usize {
-        random_index(&[batch_size, sequence_length, n_heads, embedding_dim/n_heads], &mut rng, &mut idx[..]);
+    for i in 0..(n_weights as f64 * 0.02) as usize {
+        random_index(
+            &[
+                batch_size,
+                sequence_length,
+                n_heads,
+                embedding_dim / n_heads,
+            ],
+            &mut rng,
+            &mut idx[..],
+        );
         rtq.set(&idx[..], i as f32);
         rtk.set(&idx[..], -(i as f32));
     }
@@ -555,9 +735,17 @@ fn tipover_attention_bob() {
     // rtq.vF_mut().merkleize();
     // rtk.vF_mut().merkleize();
     let t0 = Instant::now();
-    bob_attention(&mut rtq.m.read_zipper(), &mut rtk.m.read_zipper(), &mut rtr.m.write_zipper(), 0);
-    println!("bob {} µs ({n_weights} weights, {q_nz} Q nz, {k_nz} K nz)", t0.elapsed().as_micros());
-    println!("count {}", unsafe{ COUNT });
+    bob_attention(
+        &mut rtq.m.read_zipper(),
+        &mut rtk.m.read_zipper(),
+        &mut rtr.m.write_zipper(),
+        0,
+    );
+    println!(
+        "bob {} µs ({n_weights} weights, {q_nz} Q nz, {k_nz} K nz)",
+        t0.elapsed().as_micros()
+    );
+    println!("count {}", unsafe { COUNT });
 }
 
 fn tipover_attention_weave(density: f64) {
@@ -565,7 +753,12 @@ fn tipover_attention_weave(density: f64) {
     let mut rng = StdRng::from_seed([0; 32]);
     // let (batch_size, sequence_length, n_heads, embedding_dim) = (32, 512, 12, 384); // shakespeare-char
     let (batch_size, sequence_length, n_heads, embedding_dim) = (8, 512, 25, 1600); // GPT-2 xl
-    let args_d = vec![batch_size, sequence_length, n_heads, embedding_dim/n_heads];
+    let args_d = vec![
+        batch_size,
+        sequence_length,
+        n_heads,
+        embedding_dim / n_heads,
+    ];
     let result_d = vec![batch_size, sequence_length, n_heads, n_heads];
 
     // Reference/dense
@@ -582,7 +775,7 @@ fn tipover_attention_weave(density: f64) {
     let t0 = Instant::now();
     reference_attention(&rtq, &rtk, &mut rtr);
     println!("ref {} µs ({n_weights} weights)", t0.elapsed().as_micros());
-    println!("rcount {}", unsafe{ RCOUNT });
+    println!("rcount {}", unsafe { RCOUNT });
 
     // Copy dense solution into sparse
     let mut rtr_ = SparseTensorFWeave::new(4);
@@ -601,18 +794,25 @@ fn tipover_attention_weave(density: f64) {
     let q_nz = rtq.m.val_count();
     let k_nz = rtk.m.val_count();
     let t0 = Instant::now();
-    _short_weave_attention(&mut rtq.m.read_zipper(), &mut rtk.m.read_zipper(), &mut rtr.m.write_zipper());
-    println!("weave {} µs ({n_weights} weights, {q_nz} Q nz, {k_nz} K nz)", t0.elapsed().as_micros());
-    println!("count {}", unsafe{ COUNT });
+    _short_weave_attention(
+        &mut rtq.m.read_zipper(),
+        &mut rtk.m.read_zipper(),
+        &mut rtr.m.write_zipper(),
+    );
+    println!(
+        "weave {} µs ({n_weights} weights, {q_nz} Q nz, {k_nz} K nz)",
+        t0.elapsed().as_micros()
+    );
+    println!("count {}", unsafe { COUNT });
     assert_eq!(rtr.vf().clone().hash(), rtr_.vf().clone().hash());
-    unsafe{ COUNT = 0 };
+    unsafe { COUNT = 0 };
 
     // Weave/sparse
     let mut rtq = SparseTensorFWeave::new(4);
     let mut rtk = SparseTensorFWeave::new(4);
     let mut rtr = SparseTensorFWeave::new(4);
-    let mut idx = vec![0; 4];
-    for i in 0i32..(density*(args_d.iter().product::<usize>() as f64)) as i32 {
+    let mut idx = [0; 4];
+    for i in 0i32..(density * (args_d.iter().product::<usize>() as f64)) as i32 {
         random_index(&args_d[..], &mut rng, &mut idx[..]);
         rtq.set(&idx[..], 1.0);
         rtk.set(&idx[..], 1.0);
@@ -622,9 +822,16 @@ fn tipover_attention_weave(density: f64) {
     // rtq.vF_mut().merkleize();
     // rtk.vF_mut().merkleize();
     let t0 = Instant::now();
-    _short_weave_attention(&mut rtq.m.read_zipper(), &mut rtk.m.read_zipper(), &mut rtr.m.write_zipper());
-    println!("weave {} µs ({n_weights} weights, {q_nz} Q nz, {k_nz} K nz)", t0.elapsed().as_micros());
-    println!("count {}", unsafe{ COUNT });
+    _short_weave_attention(
+        &mut rtq.m.read_zipper(),
+        &mut rtk.m.read_zipper(),
+        &mut rtr.m.write_zipper(),
+    );
+    println!(
+        "weave {} µs ({n_weights} weights, {q_nz} Q nz, {k_nz} K nz)",
+        t0.elapsed().as_micros()
+    );
+    println!("count {}", unsafe { COUNT });
 }
 
 fn main() {

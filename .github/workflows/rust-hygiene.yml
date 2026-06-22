@@ -1,0 +1,49 @@
+name: Rust Hygiene
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo tools
+        run: |
+          cargo install cargo-deny --version 0.19.7 --locked
+          cargo install cargo-machete --version 0.9.2 --locked
+
+      - name: Format
+        run: cargo +nightly fmt --check
+
+      - name: Clippy performance lints
+        run: cargo +nightly perf-lints
+
+      - name: Library tests
+        run: cargo +nightly test --all-features --lib
+
+      - name: Fuzz target compile
+        run: cargo +nightly check --manifest-path fuzz/Cargo.toml
+
+      - name: Dependency hygiene
+        run: |
+          cargo machete --with-metadata --skip-target-dir
+          cargo deny check
+          cargo tree --duplicates
+
+      - name: Bench compile
+        run: cargo +nightly bench --all-features --no-run

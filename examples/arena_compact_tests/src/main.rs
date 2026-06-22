@@ -62,8 +62,7 @@ fn arena_dump() -> Result<(), std::io::Error> {
     // pathmap::alloc_tracking::reset();
 
     let start = Instant::now();
-    let tree = ArenaCompactTree::dump_from_zipper(
-        btm.read_zipper(), |_v| 0, tree_path)?;
+    let tree = ArenaCompactTree::dump_from_zipper(btm.read_zipper(), |_v| 0, tree_path)?;
     println!("built act in {:.2?}", start.elapsed());
     println!("counters {:?}", tree.counters());
     println!("len {:.2?}", tree.get_data().len());
