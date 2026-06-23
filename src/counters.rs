@@ -1,6 +1,432 @@
 use crate::PathMap;
-use crate::zipper::{*, zipper_priv::ZipperPriv};
+use crate::zipper::*;
 use crate::trie_node::{TaggedNodeRef, TrieNode};
+#[cfg(not(test))]
+use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+#[cfg(not(test))]
+static MAKE_UNIQUE_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static COW_CLONES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static MATERIALIZE_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static MATERIALIZED_SCOUT_FRAMES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static PRODUCT_FACTOR_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static DEPENDENT_PRODUCT_ENROLL_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static DEPENDENT_PRODUCT_FACTOR_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static OVERLAY_VALUE_MAPS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static OVERLAY_CHILD_MASK_UNIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static RESTRICT_VALUE_FILTERS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static RESTRICT_CHILD_MASK_FILTERS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static SUBTRACT_VALUE_MAPS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static SUBTRACT_CHILD_PROBES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static DIFF_OBSERVATION_CHECKS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static OBSERVER_MATERIALIZATIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static OBSERVER_MATERIALIZED_PATHS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(not(test))]
+static OBSERVER_MATERIALIZED_VALUES: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_MAKE_UNIQUE_CALLS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_COW_CLONES: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_MATERIALIZE_CALLS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_MATERIALIZED_SCOUT_FRAMES: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_PRODUCT_FACTOR_ENTRIES: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_DEPENDENT_PRODUCT_ENROLL_CALLS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_DEPENDENT_PRODUCT_FACTOR_ENTRIES: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_OVERLAY_VALUE_MAPS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_OVERLAY_CHILD_MASK_UNIONS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_RESTRICT_VALUE_FILTERS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_RESTRICT_CHILD_MASK_FILTERS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_SUBTRACT_VALUE_MAPS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_SUBTRACT_CHILD_PROBES: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_DIFF_OBSERVATION_CHECKS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_OBSERVER_MATERIALIZATIONS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_OBSERVER_MATERIALIZED_PATHS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static TEST_OBSERVER_MATERIALIZED_VALUES: std::cell::Cell<usize> = std::cell::Cell::new(0);
+}
+
+#[cfg(test)]
+static COUNTER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn counter_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    COUNTER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CowCloneCounters {
+    pub make_unique_calls: usize,
+    pub cow_clones: usize,
+    pub materialize_calls: usize,
+    pub materialized_scout_frames: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VirtualZipperCounters {
+    pub product_factor_entries: usize,
+    pub dependent_product_enroll_calls: usize,
+    pub dependent_product_factor_entries: usize,
+    pub overlay_value_maps: usize,
+    pub overlay_child_mask_unions: usize,
+    pub restrict_value_filters: usize,
+    pub restrict_child_mask_filters: usize,
+    pub subtract_value_maps: usize,
+    pub subtract_child_probes: usize,
+    pub diff_observation_checks: usize,
+    pub observer_materializations: usize,
+    pub observer_materialized_paths: usize,
+    pub observer_materialized_values: usize,
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_make_unique(cloned: bool) {
+    #[cfg(test)]
+    {
+        TEST_MAKE_UNIQUE_CALLS.with(|counter| counter.set(counter.get() + 1));
+        if cloned {
+            TEST_COW_CLONES.with(|counter| counter.set(counter.get() + 1));
+        }
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        MAKE_UNIQUE_CALLS.fetch_add(1, Relaxed);
+        if cloned {
+            COW_CLONES.fetch_add(1, Relaxed);
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_materialize_for_write(scout_depth: usize) {
+    #[cfg(test)]
+    {
+        TEST_MATERIALIZE_CALLS.with(|counter| counter.set(counter.get() + 1));
+        TEST_MATERIALIZED_SCOUT_FRAMES.with(|counter| counter.set(counter.get() + scout_depth));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        MATERIALIZE_CALLS.fetch_add(1, Relaxed);
+        MATERIALIZED_SCOUT_FRAMES.fetch_add(scout_depth, Relaxed);
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_product_factor_entry() {
+    #[cfg(test)]
+    {
+        TEST_PRODUCT_FACTOR_ENTRIES.with(|counter| counter.set(counter.get() + 1));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        PRODUCT_FACTOR_ENTRIES.fetch_add(1, Relaxed);
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_dependent_product_enroll_call() {
+    #[cfg(test)]
+    {
+        TEST_DEPENDENT_PRODUCT_ENROLL_CALLS.with(|counter| counter.set(counter.get() + 1));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        DEPENDENT_PRODUCT_ENROLL_CALLS.fetch_add(1, Relaxed);
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_dependent_product_factor_entry() {
+    #[cfg(test)]
+    {
+        TEST_DEPENDENT_PRODUCT_FACTOR_ENTRIES.with(|counter| counter.set(counter.get() + 1));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        DEPENDENT_PRODUCT_FACTOR_ENTRIES.fetch_add(1, Relaxed);
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_overlay_value_map() {
+    #[cfg(test)]
+    {
+        TEST_OVERLAY_VALUE_MAPS.with(|counter| counter.set(counter.get() + 1));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        OVERLAY_VALUE_MAPS.fetch_add(1, Relaxed);
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_overlay_child_mask_union() {
+    #[cfg(test)]
+    {
+        TEST_OVERLAY_CHILD_MASK_UNIONS.with(|counter| counter.set(counter.get() + 1));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        OVERLAY_CHILD_MASK_UNIONS.fetch_add(1, Relaxed);
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_restrict_value_filter() {
+    #[cfg(test)]
+    {
+        TEST_RESTRICT_VALUE_FILTERS.with(|counter| counter.set(counter.get() + 1));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        RESTRICT_VALUE_FILTERS.fetch_add(1, Relaxed);
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_restrict_child_mask_filter() {
+    #[cfg(test)]
+    {
+        TEST_RESTRICT_CHILD_MASK_FILTERS.with(|counter| counter.set(counter.get() + 1));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        RESTRICT_CHILD_MASK_FILTERS.fetch_add(1, Relaxed);
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_subtract_value_map() {
+    #[cfg(test)]
+    {
+        TEST_SUBTRACT_VALUE_MAPS.with(|counter| counter.set(counter.get() + 1));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        SUBTRACT_VALUE_MAPS.fetch_add(1, Relaxed);
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_subtract_child_probe() {
+    #[cfg(test)]
+    {
+        TEST_SUBTRACT_CHILD_PROBES.with(|counter| counter.set(counter.get() + 1));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        SUBTRACT_CHILD_PROBES.fetch_add(1, Relaxed);
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_diff_observation_check() {
+    #[cfg(test)]
+    {
+        TEST_DIFF_OBSERVATION_CHECKS.with(|counter| counter.set(counter.get() + 1));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        DIFF_OBSERVATION_CHECKS.fetch_add(1, Relaxed);
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_observer_materialization() {
+    #[cfg(test)]
+    {
+        TEST_OBSERVER_MATERIALIZATIONS.with(|counter| counter.set(counter.get() + 1));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        OBSERVER_MATERIALIZATIONS.fetch_add(1, Relaxed);
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_observer_materialized_path(has_value: bool) {
+    #[cfg(test)]
+    {
+        TEST_OBSERVER_MATERIALIZED_PATHS.with(|counter| counter.set(counter.get() + 1));
+        if has_value {
+            TEST_OBSERVER_MATERIALIZED_VALUES.with(|counter| counter.set(counter.get() + 1));
+        }
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        OBSERVER_MATERIALIZED_PATHS.fetch_add(1, Relaxed);
+        if has_value {
+            OBSERVER_MATERIALIZED_VALUES.fetch_add(1, Relaxed);
+        }
+    }
+}
+
+pub fn reset_cow_clone_counters() {
+    #[cfg(test)]
+    {
+        TEST_MAKE_UNIQUE_CALLS.with(|counter| counter.set(0));
+        TEST_COW_CLONES.with(|counter| counter.set(0));
+        TEST_MATERIALIZE_CALLS.with(|counter| counter.set(0));
+        TEST_MATERIALIZED_SCOUT_FRAMES.with(|counter| counter.set(0));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        MAKE_UNIQUE_CALLS.store(0, Relaxed);
+        COW_CLONES.store(0, Relaxed);
+        MATERIALIZE_CALLS.store(0, Relaxed);
+        MATERIALIZED_SCOUT_FRAMES.store(0, Relaxed);
+    }
+}
+
+pub fn cow_clone_counters() -> CowCloneCounters {
+    #[cfg(test)]
+    {
+        return CowCloneCounters {
+            make_unique_calls: TEST_MAKE_UNIQUE_CALLS.with(|counter| counter.get()),
+            cow_clones: TEST_COW_CLONES.with(|counter| counter.get()),
+            materialize_calls: TEST_MATERIALIZE_CALLS.with(|counter| counter.get()),
+            materialized_scout_frames: TEST_MATERIALIZED_SCOUT_FRAMES.with(|counter| counter.get()),
+        };
+    }
+
+    #[cfg(not(test))]
+    {
+        CowCloneCounters {
+            make_unique_calls: MAKE_UNIQUE_CALLS.load(Relaxed),
+            cow_clones: COW_CLONES.load(Relaxed),
+            materialize_calls: MATERIALIZE_CALLS.load(Relaxed),
+            materialized_scout_frames: MATERIALIZED_SCOUT_FRAMES.load(Relaxed),
+        }
+    }
+}
+
+pub fn reset_virtual_zipper_counters() {
+    #[cfg(test)]
+    {
+        TEST_PRODUCT_FACTOR_ENTRIES.with(|counter| counter.set(0));
+        TEST_DEPENDENT_PRODUCT_ENROLL_CALLS.with(|counter| counter.set(0));
+        TEST_DEPENDENT_PRODUCT_FACTOR_ENTRIES.with(|counter| counter.set(0));
+        TEST_OVERLAY_VALUE_MAPS.with(|counter| counter.set(0));
+        TEST_OVERLAY_CHILD_MASK_UNIONS.with(|counter| counter.set(0));
+        TEST_RESTRICT_VALUE_FILTERS.with(|counter| counter.set(0));
+        TEST_RESTRICT_CHILD_MASK_FILTERS.with(|counter| counter.set(0));
+        TEST_SUBTRACT_VALUE_MAPS.with(|counter| counter.set(0));
+        TEST_SUBTRACT_CHILD_PROBES.with(|counter| counter.set(0));
+        TEST_DIFF_OBSERVATION_CHECKS.with(|counter| counter.set(0));
+        TEST_OBSERVER_MATERIALIZATIONS.with(|counter| counter.set(0));
+        TEST_OBSERVER_MATERIALIZED_PATHS.with(|counter| counter.set(0));
+        TEST_OBSERVER_MATERIALIZED_VALUES.with(|counter| counter.set(0));
+        return;
+    }
+
+    #[cfg(not(test))]
+    {
+        PRODUCT_FACTOR_ENTRIES.store(0, Relaxed);
+        DEPENDENT_PRODUCT_ENROLL_CALLS.store(0, Relaxed);
+        DEPENDENT_PRODUCT_FACTOR_ENTRIES.store(0, Relaxed);
+        OVERLAY_VALUE_MAPS.store(0, Relaxed);
+        OVERLAY_CHILD_MASK_UNIONS.store(0, Relaxed);
+        RESTRICT_VALUE_FILTERS.store(0, Relaxed);
+        RESTRICT_CHILD_MASK_FILTERS.store(0, Relaxed);
+        SUBTRACT_VALUE_MAPS.store(0, Relaxed);
+        SUBTRACT_CHILD_PROBES.store(0, Relaxed);
+        DIFF_OBSERVATION_CHECKS.store(0, Relaxed);
+        OBSERVER_MATERIALIZATIONS.store(0, Relaxed);
+        OBSERVER_MATERIALIZED_PATHS.store(0, Relaxed);
+        OBSERVER_MATERIALIZED_VALUES.store(0, Relaxed);
+    }
+}
+
+pub fn virtual_zipper_counters() -> VirtualZipperCounters {
+    #[cfg(test)]
+    {
+        return VirtualZipperCounters {
+            product_factor_entries: TEST_PRODUCT_FACTOR_ENTRIES.with(|counter| counter.get()),
+            dependent_product_enroll_calls: TEST_DEPENDENT_PRODUCT_ENROLL_CALLS
+                .with(|counter| counter.get()),
+            dependent_product_factor_entries: TEST_DEPENDENT_PRODUCT_FACTOR_ENTRIES
+                .with(|counter| counter.get()),
+            overlay_value_maps: TEST_OVERLAY_VALUE_MAPS.with(|counter| counter.get()),
+            overlay_child_mask_unions: TEST_OVERLAY_CHILD_MASK_UNIONS.with(|counter| counter.get()),
+            restrict_value_filters: TEST_RESTRICT_VALUE_FILTERS.with(|counter| counter.get()),
+            restrict_child_mask_filters: TEST_RESTRICT_CHILD_MASK_FILTERS
+                .with(|counter| counter.get()),
+            subtract_value_maps: TEST_SUBTRACT_VALUE_MAPS.with(|counter| counter.get()),
+            subtract_child_probes: TEST_SUBTRACT_CHILD_PROBES.with(|counter| counter.get()),
+            diff_observation_checks: TEST_DIFF_OBSERVATION_CHECKS.with(|counter| counter.get()),
+            observer_materializations: TEST_OBSERVER_MATERIALIZATIONS.with(|counter| counter.get()),
+            observer_materialized_paths: TEST_OBSERVER_MATERIALIZED_PATHS
+                .with(|counter| counter.get()),
+            observer_materialized_values: TEST_OBSERVER_MATERIALIZED_VALUES
+                .with(|counter| counter.get()),
+        };
+    }
+
+    #[cfg(not(test))]
+    {
+        VirtualZipperCounters {
+            product_factor_entries: PRODUCT_FACTOR_ENTRIES.load(Relaxed),
+            dependent_product_enroll_calls: DEPENDENT_PRODUCT_ENROLL_CALLS.load(Relaxed),
+            dependent_product_factor_entries: DEPENDENT_PRODUCT_FACTOR_ENTRIES.load(Relaxed),
+            overlay_value_maps: OVERLAY_VALUE_MAPS.load(Relaxed),
+            overlay_child_mask_unions: OVERLAY_CHILD_MASK_UNIONS.load(Relaxed),
+            restrict_value_filters: RESTRICT_VALUE_FILTERS.load(Relaxed),
+            restrict_child_mask_filters: RESTRICT_CHILD_MASK_FILTERS.load(Relaxed),
+            subtract_value_maps: SUBTRACT_VALUE_MAPS.load(Relaxed),
+            subtract_child_probes: SUBTRACT_CHILD_PROBES.load(Relaxed),
+            diff_observation_checks: DIFF_OBSERVATION_CHECKS.load(Relaxed),
+            observer_materializations: OBSERVER_MATERIALIZATIONS.load(Relaxed),
+            observer_materialized_paths: OBSERVER_MATERIALIZED_PATHS.load(Relaxed),
+            observer_materialized_values: OBSERVER_MATERIALIZED_VALUES.load(Relaxed),
+        }
+    }
+}
 
 /// Example usage of counters
 ///
@@ -191,5 +617,75 @@ pub fn print_traversal<'a, V: 'a + Clone + Unpin, Z: ZipperIteration + Clone>(zi
     println!("{:?}", zipper.path());
     while zipper.to_next_val() {
         println!("{:?}", zipper.path());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cow_clone_counters_reset_and_record() {
+        let _guard = counter_test_guard();
+        reset_cow_clone_counters();
+
+        record_make_unique(false);
+        record_make_unique(true);
+        record_materialize_for_write(3);
+
+        assert_eq!(
+            cow_clone_counters(),
+            CowCloneCounters {
+                make_unique_calls: 2,
+                cow_clones: 1,
+                materialize_calls: 1,
+                materialized_scout_frames: 3,
+            }
+        );
+
+        reset_cow_clone_counters();
+        assert_eq!(cow_clone_counters(), CowCloneCounters::default());
+    }
+
+    #[test]
+    fn virtual_zipper_counters_reset_and_record() {
+        let _guard = counter_test_guard();
+        reset_virtual_zipper_counters();
+
+        record_product_factor_entry();
+        record_dependent_product_enroll_call();
+        record_dependent_product_factor_entry();
+        record_overlay_value_map();
+        record_overlay_child_mask_union();
+        record_restrict_value_filter();
+        record_restrict_child_mask_filter();
+        record_subtract_value_map();
+        record_subtract_child_probe();
+        record_diff_observation_check();
+        record_observer_materialization();
+        record_observer_materialized_path(false);
+        record_observer_materialized_path(true);
+
+        assert_eq!(
+            virtual_zipper_counters(),
+            VirtualZipperCounters {
+                product_factor_entries: 1,
+                dependent_product_enroll_calls: 1,
+                dependent_product_factor_entries: 1,
+                overlay_value_maps: 1,
+                overlay_child_mask_unions: 1,
+                restrict_value_filters: 1,
+                restrict_child_mask_filters: 1,
+                subtract_value_maps: 1,
+                subtract_child_probes: 1,
+                diff_observation_checks: 1,
+                observer_materializations: 1,
+                observer_materialized_paths: 2,
+                observer_materialized_values: 1,
+            }
+        );
+
+        reset_virtual_zipper_counters();
+        assert_eq!(virtual_zipper_counters(), VirtualZipperCounters::default());
     }
 }
