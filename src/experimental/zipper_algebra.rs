@@ -3024,6 +3024,7 @@ mod zipper_algebra_poly {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         PathMap,
         zipper::{
@@ -3038,6 +3039,37 @@ mod tests {
     type TernaryTest = (Paths, Paths, Paths);
     type NaryTest = [Paths; N];
     const N: usize = 6;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct PolicyValue(u8);
+
+    impl Lattice for PolicyValue {
+        fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> {
+            if self == other {
+                AlgebraicResult::None
+            } else {
+                AlgebraicResult::Element(PolicyValue(self.0.max(other.0)))
+            }
+        }
+
+        fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> {
+            if self == other {
+                AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)
+            } else {
+                AlgebraicResult::None
+            }
+        }
+    }
+
+    impl DistributiveLattice for PolicyValue {
+        fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> {
+            if self.0 > other.0 {
+                AlgebraicResult::Element(PolicyValue(self.0 - other.0))
+            } else {
+                AlgebraicResult::None
+            }
+        }
+    }
 
     fn mk_binary_test(test: &BinaryTest) -> (PathMap<u64>, PathMap<u64>) {
         (PathMap::from_iter(test.0), PathMap::from_iter(test.1))
@@ -3151,6 +3183,36 @@ mod tests {
             );
 
             result_copy.remove_val_at(expected_path.borrow(), true);
+        }
+
+        assert!(
+            result_copy.is_empty(),
+            "Paths unaccounted for are present in the result: {result_copy:#?}"
+        );
+    }
+
+    fn assert_same_map<V>(expected: &PathMap<V>, result: PathMap<V>)
+    where
+        V: Clone + Send + Sync + Unpin + Eq + core::fmt::Debug,
+    {
+        let mut result_copy = result.clone();
+        let mut expected_zipper = expected.read_zipper();
+
+        while expected_zipper.to_next_val() {
+            let expected_path = expected_zipper.path().to_vec();
+            let expected_val = expected_zipper
+                .val()
+                .expect("to_next_val should stop at a value")
+                .clone();
+            let actual_val = result.get_val_at(&expected_path).cloned();
+
+            assert_eq!(
+                actual_val,
+                Some(expected_val),
+                "Value at {expected_path:#?}"
+            );
+
+            result_copy.remove_val_at(&expected_path, true);
         }
 
         assert!(
@@ -3799,6 +3861,81 @@ mod tests {
             check2(&RHS_EMPTY, RHS_EMPTY.0, |mut lhs, mut rhs, out| {
                 lhs.join(&mut rhs, out)
             });
+        }
+
+        #[test]
+        fn test_join_value_policy_none_removes_matched_value() {
+            let left = PathMap::from_iter([(b"same".as_slice(), PolicyValue(7))]);
+            let right = PathMap::from_iter([(b"same".as_slice(), PolicyValue(7))]);
+            let mut result = PathMap::new();
+
+            zipper_join(
+                &mut left.read_zipper(),
+                &mut right.read_zipper(),
+                &mut result.write_zipper(),
+            );
+
+            assert!(
+                result.is_empty(),
+                "pjoin returning AlgebraicResult::None should remove the matched value, got {result:?}"
+            );
+        }
+
+        #[test]
+        fn test_join_matches_whole_map_for_flipped_residual_representations() {
+            let listy = PathMap::from_iter([
+                (b"item/alpha".as_slice(), PolicyValue(1)),
+                (b"item/beta".as_slice(), PolicyValue(2)),
+            ]);
+            let dense = PathMap::from_iter([
+                (b"item/alpha".as_slice(), PolicyValue(10)),
+                (b"item/delta".as_slice(), PolicyValue(30)),
+                (b"item/epsilon".as_slice(), PolicyValue(40)),
+                (b"item/gamma".as_slice(), PolicyValue(20)),
+            ]);
+            let focus = b"item/";
+
+            let listy_focus = listy.read_zipper_at_path(focus).make_map();
+            let dense_focus = dense.read_zipper_at_path(focus).make_map();
+
+            let mut listy_dense_result = PathMap::new();
+            zipper_join(
+                &mut listy.read_zipper_at_path(focus),
+                &mut dense.read_zipper_at_path(focus),
+                &mut listy_dense_result.write_zipper(),
+            );
+            assert_same_map(&listy_focus.join(&dense_focus), listy_dense_result);
+
+            let mut dense_listy_result = PathMap::new();
+            zipper_join(
+                &mut dense.read_zipper_at_path(focus),
+                &mut listy.read_zipper_at_path(focus),
+                &mut dense_listy_result.write_zipper(),
+            );
+            assert_same_map(&dense_focus.join(&listy_focus), dense_listy_result);
+        }
+
+        #[test]
+        fn test_join_matches_whole_map_for_tiny_residual_focus() {
+            let singleton = PathMap::from_iter([(b"shared/singular".as_slice(), PolicyValue(1))]);
+            let branched = PathMap::from_iter([
+                (b"shared/alpha".as_slice(), PolicyValue(10)),
+                (b"shared/beta".as_slice(), PolicyValue(20)),
+                (b"shared/gamma".as_slice(), PolicyValue(30)),
+            ]);
+            let focus = b"shared/";
+
+            let singleton_focus = singleton.read_zipper_at_path(focus).make_map();
+            let branched_focus = branched.read_zipper_at_path(focus).make_map();
+
+            let mut result = PathMap::new();
+            zipper_join(
+                &mut singleton.read_zipper_at_path(focus),
+                &mut branched.read_zipper_at_path(focus),
+                &mut result.write_zipper(),
+            );
+
+            assert_same_map(&singleton_focus.join(&branched_focus), result);
         }
 
         #[test]
@@ -4564,6 +4701,65 @@ mod tests {
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN_N[0],
                 |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_subtract_n!(z0, z1, z2, z3, z4, z5 => out),
             );
+        }
+
+        #[test]
+        fn test_subtract_value_policy_is_directional() {
+            let left = PathMap::from_iter([(b"same".as_slice(), PolicyValue(10))]);
+            let right = PathMap::from_iter([(b"same".as_slice(), PolicyValue(3))]);
+
+            let mut forward = PathMap::new();
+            zipper_subtract(
+                &mut left.read_zipper(),
+                &mut right.read_zipper(),
+                &mut forward.write_zipper(),
+            );
+            assert_eq!(forward.get_val_at(b"same"), Some(&PolicyValue(7)));
+
+            let mut reverse = PathMap::new();
+            zipper_subtract(
+                &mut right.read_zipper(),
+                &mut left.read_zipper(),
+                &mut reverse.write_zipper(),
+            );
+            assert!(
+                reverse.is_empty(),
+                "reverse subtract should annihilate when rhs dominates, got {reverse:?}"
+            );
+        }
+
+        #[test]
+        fn test_subtract_matches_whole_map_for_flipped_residual_representations() {
+            let dense = PathMap::from_iter([
+                (b"scope/a".as_slice(), PolicyValue(10)),
+                (b"scope/b".as_slice(), PolicyValue(7)),
+                (b"scope/c".as_slice(), PolicyValue(5)),
+                (b"scope/d".as_slice(), PolicyValue(1)),
+            ]);
+            let listy = PathMap::from_iter([
+                (b"scope/a".as_slice(), PolicyValue(3)),
+                (b"scope/b".as_slice(), PolicyValue(9)),
+            ]);
+            let focus = b"scope/";
+
+            let dense_focus = dense.read_zipper_at_path(focus).make_map();
+            let listy_focus = listy.read_zipper_at_path(focus).make_map();
+
+            let mut dense_listy_result = PathMap::new();
+            zipper_subtract(
+                &mut dense.read_zipper_at_path(focus),
+                &mut listy.read_zipper_at_path(focus),
+                &mut dense_listy_result.write_zipper(),
+            );
+            assert_same_map(&dense_focus.subtract(&listy_focus), dense_listy_result);
+
+            let mut listy_dense_result = PathMap::new();
+            zipper_subtract(
+                &mut listy.read_zipper_at_path(focus),
+                &mut dense.read_zipper_at_path(focus),
+                &mut listy_dense_result.write_zipper(),
+            );
+            assert_same_map(&listy_focus.subtract(&dense_focus), listy_dense_result);
         }
     }
 
