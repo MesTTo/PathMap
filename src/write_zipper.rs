@@ -2155,19 +2155,23 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         RetryF: FnOnce(&mut TaggedNodeRefMut<'_, V, A>, &[u8]) -> R,
     {
         let key = self.key.node_key();
-        let mut focus_node = self.focus_stack.top_mut().unwrap();
-        if let Some((key_bytes, child_node)) = focus_node.node_get_child_mut(key) {
-            debug_assert_eq!(key_bytes, key.len());
-            let (key, node) = node_along_path_mut(child_node, path, true);
-            let mut node_ref = node.make_mut();
-            match node_f(&mut node_ref, key) {
-                Ok(result) => result,
-                Err(replacement_node) => {
-                    *node = replacement_node;
-                    retry_f(&mut node.make_mut(), key)
-                },
+        if key.len() > 0 {
+            let mut focus_node = self.focus_stack.top_mut().unwrap();
+            if let Some((key_bytes, child_node)) = focus_node.node_get_child_mut(key) {
+                debug_assert_eq!(key_bytes, key.len());
+                let (key, node) = node_along_path_mut(child_node, path, true);
+                let mut node_ref = node.make_mut();
+                match node_f(&mut node_ref, key) {
+                    Ok(result) => return result,
+                    Err(replacement_node) => {
+                        *node = replacement_node;
+                        return retry_f(&mut node.make_mut(), key)
+                    },
+                }
             }
-        } else {
+        }
+
+        {
             self.in_zipper_mut_static_result(
                 |focus_node, partial_key| {
                     let mut key_buf = [0u8; MAX_NODE_KEY_BYTES];
@@ -5188,6 +5192,34 @@ mod tests {
         assert_eq!(map4.get_val_at(b"root:s:old_s"), None);
         assert_eq!(map4.get_val_at(b"root:s:new_s"), Some(&403));
         assert_eq!(map4.get_val_at(b"root:t:old_t"), Some(&44));  // 't' preserved
+    }
+
+    #[test]
+    fn write_zipper_graft_child_maps_zero_child_with_root_value() {
+        let mut map: PathMap<u32> = PathMap::new();
+        map.set_val_at([], 1);
+        for child in 0u8..150 {
+            let idx = u32::from(child);
+            map.set_val_at([child], 10_000 + idx);
+            map.set_val_at([child, b':', b'o', b'l', b'd'], 10_001 + idx);
+        }
+
+        let mut graft: PathMap<u32> = PathMap::new();
+        graft.set_val_at([], 20_000);
+        graft.set_val_at([b':', 0, b':', b'a'], 20_001);
+        graft.set_val_at([b':', 0, b':', b'b', b':', b'c'], 20_002);
+
+        let mut wz = map.write_zipper();
+        wz.graft_child_maps(ByteMask::from(0), vec![graft], false);
+        drop(wz);
+
+        assert_eq!(map.get_val_at([]), Some(&1));
+        assert_eq!(map.get_val_at([0]), Some(&20_000));
+        assert_eq!(map.get_val_at([0, b':', 0, b':', b'a']), Some(&20_001));
+        assert_eq!(map.get_val_at([0, b':', 0, b':', b'b', b':', b'c']), Some(&20_002));
+        assert_eq!(map.get_val_at([0, b':', b'o', b'l', b'd']), None);
+        assert_eq!(map.get_val_at([1]), Some(&10_001));
+        assert_eq!(map.get_val_at([1, b':', b'o', b'l', b'd']), Some(&10_002));
     }
 
     crate::zipper::zipper_moving_tests::zipper_moving_tests!(write_zipper,
