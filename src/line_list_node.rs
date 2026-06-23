@@ -39,6 +39,14 @@ pub(crate) const KEY_BYTES_CNT: usize = 42;
 #[cfg(not(feature = "slim_ptrs"))]
 pub(crate) const KEY_BYTES_CNT: usize = 14;
 
+#[cfg(all(feature = "slim_ptrs", target_arch = "x86_64", not(miri)))]
+const _: [(); core::mem::size_of::<LineListNode<[u8; 1024], crate::alloc::GlobalAlloc>>()] =
+    [(); 64];
+
+#[cfg(all(not(feature = "slim_ptrs"), target_arch = "x86_64", not(miri)))]
+const _: [(); core::mem::size_of::<LineListNode<[u8; 1024], crate::alloc::GlobalAlloc>>()] =
+    [(); 48];
+
 const SLOT_0_USED_MASK: u16 = 1 << 15;
 const SLOT_1_USED_MASK: u16 = 1 << 14;
 const BOTH_SLOTS_USED_MASK: u16 = SLOT_0_USED_MASK | SLOT_1_USED_MASK;
